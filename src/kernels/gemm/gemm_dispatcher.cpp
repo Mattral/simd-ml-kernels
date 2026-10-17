@@ -48,19 +48,48 @@ static void cpuid_ex(int leaf, int subleaf,
 #endif
 }
 
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+// XGETBV with ECX=0 returns XCR0. Only valid when CPUID.1:ECX.OSXSAVE is set.
+static unsigned long long read_xcr0() noexcept {
+    unsigned int lo = 0, hi = 0;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    return (static_cast<unsigned long long>(hi) << 32) | lo;
+}
+#endif
+
 CpuFeatures CpuFeatures::detect() noexcept {
     CpuFeatures f;
 #if defined(__x86_64__) || defined(__i386__)
     unsigned int a, b, c, d;
-    // Leaf 1: SSE4.2 (ECX bit 20), FMA (ECX bit 12)
+    cpuid_ex(0, 0, a, b, c, d);
+    const unsigned int max_leaf = a;
+    // Leaf 1: FMA (ECX bit 12), SSE4.2 (bit 20), OSXSAVE (bit 27), F16C (bit 29)
     cpuid_ex(1, 0, a, b, c, d);
     f.has_fma   = (c & (1u << 12)) != 0;
     f.has_sse42 = (c & (1u << 20)) != 0;
+    const bool osxsave = (c & (1u << 27)) != 0;
+    const bool f16c    = (c & (1u << 29)) != 0;
+#if defined(__GNUC__) || defined(__clang__)
+    const unsigned long long xcr0 = osxsave ? read_xcr0() : 0;
+#else
+    const unsigned long long xcr0 = 0;
+#endif
+    const bool os_avx    = (xcr0 & 0x06) == 0x06;
+    const bool os_avx512 = (xcr0 & 0xE6) == 0xE6;
+    f.has_f16c = f16c && os_avx;
     // Leaf 7, sub-leaf 0: AVX2 (EBX bit 5), AVX-512F (EBX bit 16), AVX-512DQ (EBX bit 17)
-    cpuid_ex(7, 0, a, b, c, d);
-    f.has_avx2    = (b & (1u << 5))  != 0;
-    f.has_avx512f = (b & (1u << 16)) != 0;
-    f.has_avx512dq= (b & (1u << 17)) != 0;
+    if (max_leaf >= 7) {
+        cpuid_ex(7, 0, a, b, c, d);
+        const unsigned int max_subleaf = a;
+        f.has_avx2    = (b & (1u << 5))  != 0;
+        f.has_avx512f = (b & (1u << 16)) != 0;
+        f.has_avx512dq= (b & (1u << 17)) != 0;
+        // Leaf 7, sub-leaf 1: AVX512_BF16 (EAX bit 5)
+        if (max_subleaf >= 1) {
+            cpuid_ex(7, 1, a, b, c, d);
+            f.has_avx512bf16 = (a & (1u << 5)) != 0 && f.has_avx512f && os_avx512;
+        }
+    }
 #endif
     return f;
 }

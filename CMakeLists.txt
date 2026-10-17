@@ -180,36 +180,41 @@ else()
     message(STATUS "pybind11 not found: skipping Python extension build")
 endif()
 
-# ─── Standalone benchmark executable ─────────────────────────────────────────
-add_executable(bench
-    src/main_bench.cpp
-)
-target_link_libraries(bench PRIVATE simd_kernels_lib)
-target_include_directories(bench PRIVATE src)
-target_compile_options(bench PRIVATE ${PERF_FLAGS})
+# ─── Benchmarks (x86 only) ───────────────────────────────────────────────────
+# main_bench.cpp reads the TSC with x86 intrinsics and both harnesses call the
+# AVX2 kernels, which are not compiled when SIMD_ML_ENABLE_X86=OFF.
+if(SIMD_ML_ENABLE_X86)
+    # ─── Standalone benchmark executable ─────────────────────────────────────────
+    add_executable(bench
+        src/main_bench.cpp
+    )
+    target_link_libraries(bench PRIVATE simd_kernels_lib)
+    target_include_directories(bench PRIVATE src)
+    target_compile_options(bench PRIVATE ${PERF_FLAGS})
 
-# ─── Statistical benchmark tool (extended harness) ──────────────────────────
-add_executable(bench_stat
-    src/bench_stat.cpp
-)
-target_link_libraries(bench_stat PRIVATE simd_kernels_lib)
-target_include_directories(bench_stat PRIVATE src)
-target_compile_options(bench_stat PRIVATE ${PERF_FLAGS})
+    # ─── Statistical benchmark tool (extended harness) ──────────────────────────
+    add_executable(bench_stat
+        src/bench_stat.cpp
+    )
+    target_link_libraries(bench_stat PRIVATE simd_kernels_lib)
+    target_include_directories(bench_stat PRIVATE src)
+    target_compile_options(bench_stat PRIVATE ${PERF_FLAGS})
 
-# Optional OpenBLAS linkage for baseline comparisons.
-# Applied to BOTH bench and bench_stat: bench_stat's JSON output is what
-# feeds docs/BENCHMARKS.md and benchmarks/check_regression.py, so it needs
-# the same comparison capability as the RDTSC harness.
-if(BENCH_OPENBLAS)
-    find_package(BLAS QUIET)
-    if(BLAS_FOUND)
-        target_link_libraries(bench PRIVATE ${BLAS_LIBRARIES})
-        target_compile_definitions(bench PRIVATE BENCH_WITH_OPENBLAS)
-        target_link_libraries(bench_stat PRIVATE ${BLAS_LIBRARIES})
-        target_compile_definitions(bench_stat PRIVATE BENCH_WITH_OPENBLAS)
-        message(STATUS "OpenBLAS found; baseline comparison enabled in bench and bench_stat")
-    else()
-        message(WARNING "BENCH_OPENBLAS=ON but BLAS not found; disabling")
+    # Optional OpenBLAS linkage for baseline comparisons.
+    # Applied to BOTH bench and bench_stat: bench_stat's JSON output is what
+    # feeds docs/BENCHMARKS.md and benchmarks/check_regression.py, so it needs
+    # the same comparison capability as the RDTSC harness.
+    if(BENCH_OPENBLAS)
+        find_package(BLAS QUIET)
+        if(BLAS_FOUND)
+            target_link_libraries(bench PRIVATE ${BLAS_LIBRARIES})
+            target_compile_definitions(bench PRIVATE BENCH_WITH_OPENBLAS)
+            target_link_libraries(bench_stat PRIVATE ${BLAS_LIBRARIES})
+            target_compile_definitions(bench_stat PRIVATE BENCH_WITH_OPENBLAS)
+            message(STATUS "OpenBLAS found; baseline comparison enabled in bench and bench_stat")
+        else()
+            message(WARNING "BENCH_OPENBLAS=ON but BLAS not found; disabling")
+        endif()
     endif()
 endif()
 
@@ -257,10 +262,12 @@ install(DIRECTORY src/dispatch/
 
 # ── Benchmark executables ─────────────────────────────────────────────────────
 # Install under libexec/simd_kernels so they don't clutter PATH.
-install(TARGETS bench bench_stat
-    RUNTIME DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/simd_kernels"
-    COMPONENT Benchmarks
-)
+if(SIMD_ML_ENABLE_X86)
+    install(TARGETS bench bench_stat
+        RUNTIME DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/simd_kernels"
+        COMPONENT Benchmarks
+    )
+endif()
 
 # ── CMake package config ──────────────────────────────────────────────────────
 # Generates simd_kernels-config.cmake and simd_kernels-config-version.cmake

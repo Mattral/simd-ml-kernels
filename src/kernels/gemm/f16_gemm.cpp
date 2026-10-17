@@ -12,6 +12,7 @@
 
 #include "f16_gemm.hpp"
 #include "avx2_gemm_packed.hpp"  // for NR = 8 constant
+#include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -26,7 +27,10 @@ namespace gemm {
 // ─── Runtime capability check ─────────────────────────────────────────────────
 bool f16c_available() noexcept {
 #ifdef __F16C__
-    return __builtin_cpu_supports("f16c");
+    // CPUID + XGETBV via CpuFeatures rather than __builtin_cpu_supports("f16c"),
+    // which Clang <= 15 rejects as an unknown feature string.
+    static const bool available = dispatch::CpuFeatures::detect().has_f16c;
+    return available;
 #else
     return false;
 #endif

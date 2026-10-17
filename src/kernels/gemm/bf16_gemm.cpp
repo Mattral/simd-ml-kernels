@@ -25,6 +25,7 @@
 
 #include "bf16_gemm.hpp"
 #include "avx2_gemm_packed.hpp"  // for NR = 8 constant
+#include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -38,9 +39,10 @@ namespace gemm {
 
 // ─── Runtime capability check ─────────────────────────────────────────────────
 bool bf16_avx512bf16_available() noexcept {
-    // __builtin_cpu_supports is always available on GCC/Clang regardless of
-    // which -m flags were passed at compile time — it does a CPUID query.
-    return __builtin_cpu_supports("avx512bf16");
+    // CPUID + XGETBV via CpuFeatures: includes the OS ZMM-state check, and
+    // avoids feature strings that older Clang versions reject.
+    static const bool available = dispatch::CpuFeatures::detect().has_avx512bf16;
+    return available;
 }
 
 // ─── BF16→FP32 conversion helpers (AVX2 integer, no F16C) ───────────────────
