@@ -36,6 +36,9 @@ under **Changed** with a migration note.
 - The AVX2/AVX-512 units use `-ffast-math -fno-finite-math-only` (NaN/Inf keep
   IEEE semantics; measured as fast or faster than `-ffast-math`); a test checks
   that importing and running the kernels leaves FTZ/DAZ unchanged.
+- Wheels with cibuildwheel (`pyproject.toml` `[tool.cibuildwheel]`,
+  `.github/workflows/wheels.yml`): manylinux x86_64 and macOS arm64, each
+  `selftest`ed after a clean install; built as CI artifacts, not published.
 - CI checks that the default kernel table matches the runner's CPU flags
   (an AVX-512 runner must use the AVX-512 table).
 - `selftest` and the Python tests check every kernel table the CPU can run;

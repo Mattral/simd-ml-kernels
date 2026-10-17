@@ -66,3 +66,23 @@ line-length = 100
 target-version = "py39"
 select = ["E", "F", "W", "I", "UP"]
 ignore = ["E501"]   # line length handled separately
+
+# ─── Wheels (cibuildwheel; .github/workflows/wheels.yml) ─────────────────────
+# Linux x86_64 wheels contain the scalar, AVX2 and AVX-512 units and choose one
+# at run time, so a wheel built on any runner runs on any x86-64 CPU. macOS
+# arm64 wheels contain only the scalar kernels. Each wheel is installed in a
+# clean environment and must pass selftest before it is uploaded as a CI
+# artifact. Nothing is published.
+[tool.cibuildwheel]
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_* *_i686 *-win32"
+test-command = "python -m simd_ml_kernels selftest"
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }

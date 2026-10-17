@@ -166,7 +166,7 @@ hardware where auto-detect and a forced choice happen to coincide.
 
 Each item is done when its tests, committed benchmark JSON and docs are in.
 
-- **W2 — portable builds.** Per-ISA translation units with explicit flags
+- **W2 — portable builds** (in review: #17, #18, #19). Per-ISA translation units with explicit flags
   (baseline scalar, AVX2+FMA+F16C, AVX-512F/DQ/BW/VL) instead of
   `-march=native` (kept as an opt-in for local benchmarking); runtime dispatch
   from CPUID + XGETBV, resolved once; a scalar path for every kernel;
