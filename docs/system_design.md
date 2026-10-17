@@ -80,7 +80,7 @@ output ndarray returned to Python
 All SIMD kernels use 64-byte aligned buffers (`cache_alloc.hpp`):
 
 - **Why 64 bytes?** One cache-line = 64 bytes = one AVX-512 register. Unaligned loads that straddle a cache-line boundary require two cache-line fetches.
-- **posix_memalign / _aligned_malloc**: platform-appropriate aligned heap allocation
+- **C++17 aligned `operator new` / `delete`** (`std::align_val_t`): aligned heap allocation with no platform-specific branches
 - **Packing buffers**: allocated once per `sgemm_packed` call, reused across all k-panel iterations (critical performance fix — earlier versions re-allocated inside the k-loop)
 - **Python arrays**: `numpy.empty/zeros` allocates 64-byte aligned memory for large arrays. `is_aligned(arr)` verifies alignment. Unaligned inputs are handled by `_mm256_loadu_ps` (unaligned loads, same throughput on Haswell+)
 

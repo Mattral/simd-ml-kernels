@@ -41,6 +41,9 @@ wheel.packages   = []     # C extension only — no Python package directory
 # benchmark executables — none of which belong in a pip wheel, and (until
 # this was fixed) the wheel didn't even contain the actual importable .so.
 install.components = ["PythonModule"]
+# A wheel needs only the extension module: skip the C++ tests (which fetch
+# doctest from GitHub at configure time) and the benchmark executables.
+cmake.define = { SIMD_ML_BUILD_TESTS = "OFF", SIMD_ML_BUILD_BENCHMARKS = "OFF" }
 
 # ─── pytest configuration ─────────────────────────────────────────────────────
 [tool.pytest.ini_options]

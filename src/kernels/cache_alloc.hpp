@@ -14,7 +14,9 @@
  *     - Aligning to 64 bytes ensures every AVX-512 load hits exactly one cache line.
  *
  * Strategy:
- *   Use posix_memalign (POSIX) / _aligned_malloc (MSVC) to guarantee alignment.
+ *   Use C++17 aligned operator new / delete (std::align_val_t) to guarantee
+ *   alignment. It is standard on every supported toolchain (GCC, Clang,
+ *   MinGW, MSVC), so no platform-specific allocator branches are needed.
  *   Provide an STL-compatible AlignedAllocator<T> so std::vector can use it,
  *   plus raw alloc/free helpers for flat C arrays used inside the GEMM kernel.
  */
@@ -41,27 +43,17 @@ static constexpr std::size_t CACHE_LINE_BYTES = 64;
 inline void* aligned_alloc_raw(std::size_t bytes,
                                 std::size_t alignment = CACHE_LINE_BYTES) noexcept {
     if (bytes == 0) return nullptr;
-    void* ptr = nullptr;
-#if defined(_MSC_VER)
-    ptr = _aligned_malloc(bytes, alignment);
-#else
-    if (posix_memalign(&ptr, alignment, bytes) != 0) {
-        ptr = nullptr;
-    }
-#endif
-    return ptr;
+    return ::operator new(bytes, std::align_val_t(alignment), std::nothrow);
 }
 
 /**
  * aligned_free_raw — release memory allocated by aligned_alloc_raw.
+ * `alignment` must equal the value passed to aligned_alloc_raw.
  */
-inline void aligned_free_raw(void* ptr) noexcept {
+inline void aligned_free_raw(void* ptr,
+                             std::size_t alignment = CACHE_LINE_BYTES) noexcept {
     if (!ptr) return;
-#if defined(_MSC_VER)
-    _aligned_free(ptr);
-#else
-    free(ptr);
-#endif
+    ::operator delete(ptr, std::align_val_t(alignment));
 }
 
 /**
@@ -73,8 +65,9 @@ inline void aligned_free_raw(void* ptr) noexcept {
  */
 template <typename T>
 struct AlignedDeleter {
+    std::size_t alignment = CACHE_LINE_BYTES;  // must match the allocation
     void operator()(T* ptr) const noexcept {
-        aligned_free_raw(static_cast<void*>(ptr));
+        aligned_free_raw(static_cast<void*>(ptr), alignment);
     }
 };
 
@@ -87,7 +80,7 @@ AlignedUniquePtr<T> make_aligned_array(std::size_t count,
     void* raw = aligned_alloc_raw(count * sizeof(T), alignment);
     if (!raw) throw std::bad_alloc{};
     std::memset(raw, 0, count * sizeof(T));
-    return AlignedUniquePtr<T>(static_cast<T*>(raw));
+    return AlignedUniquePtr<T>(static_cast<T*>(raw), AlignedDeleter<T>{alignment});
 }
 
 // ─── STL-Compatible AlignedAllocator<T> ──────────────────────────────────────
@@ -123,7 +116,7 @@ public:
     }
 
     void deallocate(T* ptr, std::size_t /*n*/) noexcept {
-        aligned_free_raw(static_cast<void*>(ptr));
+        aligned_free_raw(static_cast<void*>(ptr), Alignment);
     }
 
     bool operator==(const AlignedAllocator&) const noexcept { return true; }

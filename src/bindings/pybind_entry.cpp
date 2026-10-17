@@ -381,7 +381,7 @@ static py::dict build_info() {
 #else
     info["fma"] = false;
 #endif
-    info["alignment"]       = "64-byte (posix_memalign / _aligned_malloc)";
+    info["alignment"]       = "64-byte (C++17 aligned operator new)";
     info["build_timestamp"] = std::string(__DATE__) + " " + std::string(__TIME__);
     info["runtime_isa"]     = simd_ml::dispatch::detected_isa();
     return info;
