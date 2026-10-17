@@ -10,7 +10,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─── Find dependencies ────────────────────────────────────────────────────────
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+# Development.Module, not Development: building an extension needs the
+# headers, not libpython, which manylinux images do not ship.
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11)
 find_package(OpenMP OPTIONAL_COMPONENTS CXX)
 option(SIMD_ML_OPENMP "Enable OpenMP multithreading in GEMM" OFF)

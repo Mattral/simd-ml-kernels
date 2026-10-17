@@ -322,7 +322,7 @@ the core the calling thread runs on.
 |---|---|---|
 | `ci.yml` | push to main, pull requests | C++ build + ctest (GCC 12, Clang 15, GCC 13); Python 3.10–3.12: install, `selftest`, pytest (with PyTorch CPU), stubtest, examples, bench CLI smoke run, generated tables match JSON; ASan + UBSan (Clang 15) |
 | `build-and-test.yml` | push to main, pull requests | GCC 12 with OpenBLAS-linked harnesses; OpenMP build; ASan + UBSan; macOS arm64 scalar build + ctest |
-| `wheels.yml` | pull requests touching the build, manual | cibuildwheel: manylinux_2_28 x86_64 and macOS arm64 wheels, CPython 3.9–3.13, each installed in a clean environment and `selftest`ed; the cp312 Linux wheel also under SDE `-nhm`/`-hsw`/`-skx`. Artifacts only, never published |
+| `wheels.yml` | pull requests touching the build, manual | cibuildwheel: manylinux_2_28 x86_64 and macOS arm64 wheels, CPython 3.9–3.13, each installed in a clean environment and `selftest`ed. Artifacts only, never published |
 | `bench.yml` | weekly | `python -m simd_ml_kernels bench --json` on a shared runner, uploaded as an artifact; not used for any claim |
 | `guardrail.yml` | push, pull requests, weekly | clang-tidy, pip-audit; report-only |
 
