@@ -33,8 +33,8 @@
 #include <vector>
 #include <numeric>
 #include <cassert>
-#include <ctime>
-#include <time.h>
+#include <chrono>
+#include <thread>
 #include <fstream>
 #ifdef __linux__
 #  include <sched.h>
@@ -67,24 +67,15 @@ static uint64_t calibrate_tsc_hz() {
     volatile double sink = 0.0;
     for (int i = 0; i < 1000000; ++i) sink += i * 0.001;
 
-    timespec t0{}, t1{}, req{};
-    req.tv_sec = 0;
-    req.tv_nsec = 100000000L;  // 100 ms
-
+    using Clock = std::chrono::steady_clock;
     uint64_t tsc0 = rdtsc_start();
-    if (clock_gettime(CLOCK_MONOTONIC, &t0) != 0) {
-        perror("clock_gettime");
-        return 0;
-    }
-    nanosleep(&req, nullptr);
+    const auto t0 = Clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     uint64_t tsc1 = rdtsc_end();
-    if (clock_gettime(CLOCK_MONOTONIC, &t1) != 0) {
-        perror("clock_gettime");
-        return 0;
-    }
+    const auto t1 = Clock::now();
 
-    uint64_t ns_elapsed = static_cast<uint64_t>(t1.tv_sec - t0.tv_sec) * 1000000000ULL
-                        + static_cast<uint64_t>(t1.tv_nsec - t0.tv_nsec);
+    const uint64_t ns_elapsed = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
     uint64_t tsc_elapsed = tsc1 - tsc0;
     if (ns_elapsed == 0) return 0;
     return static_cast<uint64_t>((static_cast<double>(tsc_elapsed) / ns_elapsed) * 1e9);

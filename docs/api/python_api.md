@@ -199,7 +199,7 @@ info = simd_kernels.build_info()
 # {
 #   'isa_compiled': 'AVX2+FMA3',
 #   'fma': True,
-#   'alignment': '64-byte (posix_memalign / _aligned_malloc)',
+#   'alignment': '64-byte (C++17 aligned operator new)',
 #   'build_timestamp': 'Jun 20 2026 14:22:11',
 #   'runtime_isa': 'avx2'
 # }

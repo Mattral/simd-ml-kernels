@@ -16,6 +16,10 @@ find_package(OpenMP OPTIONAL_COMPONENTS CXX)
 option(SIMD_ML_OPENMP "Enable OpenMP multithreading in GEMM" OFF)
 option(BENCH_OPENBLAS "Link against OpenBLAS for baseline comparison" OFF)
 option(SIMD_ML_SANITIZE "Instrument every target (kernels included) with ASan + UBSan" OFF)
+# Wheel builds (pyproject.toml) turn these off: a wheel only needs the Python
+# extension, and the test target fetches doctest at configure time.
+option(SIMD_ML_BUILD_TESTS      "Build the C++ test suite"                ON)
+option(SIMD_ML_BUILD_BENCHMARKS "Build bench and bench_stat (x86 only)"   ON)
 
 # ─── Detect AVX support ───────────────────────────────────────────────────────
 include(CheckCXXCompilerFlag)
@@ -197,7 +201,7 @@ endif()
 # ─── Benchmarks (x86 only) ───────────────────────────────────────────────────
 # main_bench.cpp reads the TSC with x86 intrinsics and both harnesses call the
 # AVX2 kernels, which are not compiled when SIMD_ML_ENABLE_X86=OFF.
-if(SIMD_ML_ENABLE_X86)
+if(SIMD_ML_ENABLE_X86 AND SIMD_ML_BUILD_BENCHMARKS)
     # ─── Standalone benchmark executable ─────────────────────────────────────────
     add_executable(bench
         src/main_bench.cpp
@@ -233,8 +237,10 @@ if(SIMD_ML_ENABLE_X86)
 endif()
 
 # ─── Tests ───────────────────────────────────────────────────────────────────
-enable_testing()
-add_subdirectory(tests)
+if(SIMD_ML_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 # ─── Install rules ────────────────────────────────────────────────────────────
 # Enables:  cmake --install <build_dir> --prefix /usr/local
@@ -276,7 +282,7 @@ install(DIRECTORY src/dispatch/
 
 # ── Benchmark executables ─────────────────────────────────────────────────────
 # Install under libexec/simd_kernels so they don't clutter PATH.
-if(SIMD_ML_ENABLE_X86)
+if(SIMD_ML_ENABLE_X86 AND SIMD_ML_BUILD_BENCHMARKS)
     install(TARGETS bench bench_stat
         RUNTIME DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/simd_kernels"
         COMPONENT Benchmarks
