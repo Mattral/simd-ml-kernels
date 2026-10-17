@@ -101,62 +101,51 @@ static bool test_softmax(int n, unsigned seed = 1) {
 }
 
 // ─── LayerNorm tests ─────────────────────────────────────────────────────────
-static bool test_layer_norm(int n, bool with_gamma_beta, unsigned seed = 5) {
+// Each of the four affine combinations (none / gamma / beta / both) is checked
+// against a two-pass float64 reference with |out - ref| <= atol + rtol*|ref|,
+// atol = 1e-5, rtol = 1e-4 — the same bound as TestLayerNorm in
+// test_precision.py. Inputs have mean ~50 so the mean subtraction is exercised.
+static bool test_layer_norm(int n, bool use_gamma, bool use_beta, unsigned seed = 5) {
     auto inp   = make_aligned_array<float>(n);
     auto out   = make_aligned_array<float>(n);
     auto gamma = make_aligned_array<float>(n);
     auto beta  = make_aligned_array<float>(n);
 
     fill_random(inp.get(), n, seed);
-    // gamma ~ [0.5, 1.5], beta ~ [-0.1, 0.1]
+    for (int i = 0; i < n; ++i) inp[i] = 20.0f * inp[i] + 50.0f;
+    // gamma ~ [0.5, 1.5], beta ~ [-1, 1]: a dropped beta changes outputs by O(1)
     for (int i = 0; i < n; ++i) {
         gamma[i] = 1.0f + 0.5f * ((float)(i % 10) / 10.0f - 0.5f);
-        beta[i]  = 0.1f * ((float)(i % 7) / 7.0f - 0.5f);
+        beta[i]  = 2.0f * ((float)(i % 7) / 7.0f - 0.5f);
     }
 
-    const float* g = with_gamma_beta ? gamma.get() : nullptr;
-    const float* b = with_gamma_beta ? beta.get()  : nullptr;
+    const float* g = use_gamma ? gamma.get() : nullptr;
+    const float* b = use_beta  ? beta.get()  : nullptr;
 
     activations::layer_norm_avx2(inp.get(), out.get(), n, g, b, 1e-5f);
 
-    // Without gamma/beta: output must have mean ≈ 0 and std ≈ 1
-    if (!with_gamma_beta) {
-        double mean = 0.0;
-        for (int i = 0; i < n; ++i) mean += out[i];
-        mean /= n;
+    double ref_mean = 0.0;
+    for (int i = 0; i < n; ++i) ref_mean += inp[i];
+    ref_mean /= n;
+    double ref_var = 0.0;
+    for (int i = 0; i < n; ++i) ref_var += (inp[i] - ref_mean) * (inp[i] - ref_mean);
+    ref_var /= n;
+    const double ref_inv_std = 1.0 / std::sqrt(ref_var + 1e-5);
 
-        double var = 0.0;
-        for (int i = 0; i < n; ++i) {
-            double d = out[i] - mean;
-            var += d * d;
-        }
-        var /= n;
-        double std_dev = std::sqrt(var);
-
-        bool mean_ok = std::abs(mean)         < 1e-4;
-        bool std_ok  = std::abs(std_dev - 1.0) < 1e-3;
-        bool pass = mean_ok && std_ok;
-        printf("  LayerNorm n=%-5d (no γ/β)  mean=%.2e  std=%.5f  %s\n",
-               n, mean, std_dev, pass ? "PASS" : "FAIL");
-        return pass;
-    }
-
-    // With gamma/beta: compute reference scalar and compare
-    double sum = 0.0, sum2 = 0.0;
-    for (int i = 0; i < n; ++i) { sum += inp[i]; sum2 += (double)inp[i] * inp[i]; }
-    double ref_mean = sum / n;
-    double ref_var  = sum2 / n - ref_mean * ref_mean;
-    double ref_inv_std = 1.0 / std::sqrt(ref_var + 1e-5);
-
-    double max_err = 0.0;
+    const double atol = 1e-5, rtol = 1e-4;
+    double max_abs_err = 0.0;
+    bool pass = true;
     for (int i = 0; i < n; ++i) {
-        double ref = (inp[i] - ref_mean) * ref_inv_std * gamma[i] + beta[i];
-        double err = std::abs((double)out[i] - ref) / (std::abs(ref) + 1e-7);
-        max_err = std::max(max_err, err);
+        double ref = (inp[i] - ref_mean) * ref_inv_std;
+        if (use_gamma) ref *= gamma[i];
+        if (use_beta)  ref += beta[i];
+        const double err = std::abs((double)out[i] - ref);
+        max_abs_err = std::max(max_abs_err, err);
+        if (err > atol + rtol * std::abs(ref)) pass = false;
     }
-    bool pass = (max_err < 1e-4);
-    printf("  LayerNorm n=%-5d (with γ/β)  max_rel_err=%.2e  %s\n",
-           n, max_err, pass ? "PASS" : "FAIL");
+    const char* label = use_gamma ? (use_beta ? "gamma+beta" : "gamma") : (use_beta ? "beta" : "none");
+    printf("  LayerNorm n=%-5d %-10s  max_abs_err=%.2e  %s\n",
+           n, label, max_abs_err, pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -178,10 +167,12 @@ int run_activation_tests() {
         all_pass &= test_softmax(n);
 
     printf(" LayerNorm:\n");
-    for (int n : {8, 64, 128, 256, 512, 768, 1024})
-        all_pass &= test_layer_norm(n, false);  // without affine
-    for (int n : {8, 64, 128, 256, 512, 768, 1024})
-        all_pass &= test_layer_norm(n, true);   // with gamma/beta
+    // Sizes cover the scalar tail alone (1, 7), exact multiples of the 8-wide
+    // AVX2 body (8, 16, 64, 768) and body + tail (9, 15, 17, 1027).
+    for (int n : {1, 7, 8, 9, 15, 16, 17, 64, 768, 1027})
+        for (bool use_gamma : {false, true})
+            for (bool use_beta : {false, true})
+                all_pass &= test_layer_norm(n, use_gamma, use_beta);
 
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;

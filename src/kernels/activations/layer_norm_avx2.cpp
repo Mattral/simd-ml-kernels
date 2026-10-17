@@ -128,6 +128,14 @@ void layer_norm_avx2(const float* input, float* output, int n,
                 _mm256_storeu_ps(output + i, _mm256_mul_ps(xnorm, g));
             }
             for (; i < n; ++i) output[i] = (input[i] - mean) * inv_std * gamma[i];
+        } else if (beta) {
+            for (; i + 8 <= n; i += 8) {
+                __m256 x    = _mm256_loadu_ps(input + i);
+                __m256 b    = _mm256_loadu_ps(beta  + i);
+                __m256 xnorm = _mm256_mul_ps(_mm256_sub_ps(x, vmean), vinvstd);
+                _mm256_storeu_ps(output + i, _mm256_add_ps(xnorm, b));
+            }
+            for (; i < n; ++i) output[i] = (input[i] - mean) * inv_std + beta[i];
         } else {
             for (; i + 8 <= n; i += 8) {
                 __m256 x    = _mm256_loadu_ps(input + i);
