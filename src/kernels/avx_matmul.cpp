@@ -367,7 +367,9 @@ void simd_sgemm(int M, int N, int K,
                 const float* __restrict__ B, int ldb,
                 float beta,
                 float*       __restrict__ C, int ldc) noexcept {
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
+    // The beta pass below runs and the K-loops do nothing.
+    if (M <= 0 || N <= 0 || K < 0) return;
 
     // ── Beta scaling ──────────────────────────────────────────────────────────
     if (beta == 0.0f) {

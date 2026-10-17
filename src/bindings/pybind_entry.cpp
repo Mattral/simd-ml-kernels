@@ -341,7 +341,9 @@ static py::array_t<float> py_layer_norm(py::array x,
 
     int ndim     = static_cast<int>(x.ndim());
     int row_size = static_cast<int>(x.shape(ndim - 1));
-    int rows     = static_cast<int>(x.size()) / row_size;
+    // An empty last axis has nothing to normalise; computing the row count
+    // as size / row_size would divide by zero (crashed the interpreter).
+    int rows     = row_size > 0 ? static_cast<int>(x.size()) / row_size : 0;
 
     // Validate gamma/beta if provided
     const float* gamma_ptr = nullptr;

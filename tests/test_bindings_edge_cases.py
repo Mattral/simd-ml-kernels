@@ -429,3 +429,57 @@ class TestDeprecatedImportName:
             old = importlib.import_module("simd_kernels")
         assert old is simd_ml_kernels
         assert old.sgemm is simd_ml_kernels.sgemm
+
+
+class TestSizeZero:
+    """Empty dimensions follow BLAS/NumPy: an empty K-sum gives C = beta*C
+    (beta == 0 overwrites, even NaN), and empty arrays come back empty.
+    Before this was fixed, sgemm with K == 0 returned uninitialised memory and
+    layer_norm on an empty last axis crashed the interpreter."""
+
+    @staticmethod
+    def _gemm(fn, M, K, N, **kw):
+        if fn == "sgemm":
+            return simd_ml_kernels.sgemm(np.ones((M, K), np.float32), np.ones((K, N), np.float32), **kw)
+        if fn == "sgemm_f16":
+            if not simd_ml_kernels.f16c_available():
+                pytest.skip("F16C not available")
+            return simd_ml_kernels.sgemm_f16(np.ones((M, K), np.float16), np.ones((K, N), np.float16), **kw)
+        return simd_ml_kernels.sgemm_bf16(_bf16_bits(np.ones((M, K))), _bf16_bits(np.ones((K, N))), **kw)
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    @pytest.mark.parametrize("M", [3, 300])   # 300 > 128 exercises the packed path
+    def test_k_zero_allocated_output_is_zero(self, fn, M):
+        for _ in range(3):  # fresh allocations; garbage used to show up here
+            C = self._gemm(fn, M, 0, 5)
+            assert C.shape == (M, 5)
+            np.testing.assert_array_equal(C, 0.0)
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_k_zero_beta_zero_overwrites_nan(self, fn):
+        C = np.full((4, 5), np.nan, np.float32)
+        self._gemm(fn, 4, 0, 5, C=C, beta=0.0)
+        np.testing.assert_array_equal(C, 0.0)
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_k_zero_scales_by_beta(self, fn):
+        C = np.full((4, 5), 3.0, np.float32)
+        self._gemm(fn, 4, 0, 5, C=C, beta=0.5)
+        np.testing.assert_array_equal(C, 1.5)
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    @pytest.mark.parametrize("M,N", [(0, 5), (4, 0), (0, 0)])
+    def test_empty_output(self, fn, M, N):
+        assert self._gemm(fn, M, 3, N).shape == (M, N)
+
+    @pytest.mark.parametrize("shape", [(0,), (3, 0), (0, 5)])
+    def test_layer_norm_empty(self, shape):
+        assert simd_ml_kernels.layer_norm(np.ones(shape, np.float32)).shape == shape
+
+    @pytest.mark.parametrize("shape", [(0,), (3, 0), (0, 5)])
+    def test_softmax_empty(self, shape):
+        assert simd_ml_kernels.softmax(np.ones(shape, np.float32)).shape == shape
+
+    @pytest.mark.parametrize("name", ["gelu", "relu", "silu"])
+    def test_elementwise_empty(self, name):
+        assert getattr(simd_ml_kernels, name)(np.ones((0, 4), np.float32)).shape == (0, 4)
