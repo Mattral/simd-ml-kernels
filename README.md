@@ -44,7 +44,9 @@ All kernels have AVX2 fast paths with scalar fallbacks for non-AVX2 systems.
 ### Python (recommended)
 
 ```bash
-pip install -e .
+pip install .
+python -m simd_ml_kernels selftest   # every kernel vs a float64 reference; exits 1 on failure
+python -m simd_ml_kernels info       # compiled ISA, flags, commit, CPU features
 ```
 
 ```python

@@ -55,8 +55,11 @@ jobs:
           print(simd_ml_kernels.build_info())
           "
 
-      - name: Run Python precision tests
-        run: pytest tests/test_precision.py tests/test_bindings_edge_cases.py -v --tb=short
+      - name: Self-test (every kernel vs float64; exits 1 on failure)
+        run: python3 -m simd_ml_kernels selftest
+
+      - name: Run Python tests
+        run: pytest tests -v --tb=short
 
 
   # ─── OpenMP multi-threaded GEMM ─────────────────────────────────────────────

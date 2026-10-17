@@ -6,6 +6,16 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
+### Added
+- `python -m simd_ml_kernels selftest`: checks every kernel against a NumPy
+  float64 reference with the bounds the test suite asserts (GEMMs: elementwise
+  `|C − AB| ≤ 2·K·u·(|A||B|)`, u = 2⁻²⁴), prints one line per kernel and exits 1
+  on any failure. Takes about 0.2 s. Replaces `tests/smoke_test.py`.
+- `python -m simd_ml_kernels info [--json]`: package and build (version, git
+  commit, compiler, kernel flags, compiled ISA, OpenMP) and CPU (model, runtime
+  ISA, AVX-512, F16C, AVX512-BF16).
+- `build_info()` gains `version`, `git_commit`, `compiler`, `kernel_flags`.
+
 ### Changed
 - **Renamed to simd-ml-kernels.** Repository and PyPI distribution:
   `simd-ml-kernels` (was `SIMD-Microkernels-for-ML-Workloads` / `simd-ml-microkernels`);

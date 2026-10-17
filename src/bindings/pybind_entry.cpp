@@ -428,6 +428,10 @@ static py::dict build_info() {
     info["build_timestamp"] = std::string(__DATE__) + " " + std::string(__TIME__);
     info["runtime_isa"]     = simd_ml::dispatch::detected_isa();
     info["openmp"]          = kHasOpenMP;
+    info["version"]         = SIMD_ML_VERSION;
+    info["git_commit"]      = SIMD_ML_GIT_COMMIT;
+    info["compiler"]        = SIMD_ML_COMPILER;
+    info["kernel_flags"]    = SIMD_ML_KERNEL_FLAGS;
     return info;
 }
 
