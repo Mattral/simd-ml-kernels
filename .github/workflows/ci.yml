@@ -156,6 +156,15 @@ jobs:
       - name: Build info
         run: python3 -m simd_ml_kernels info
 
+      # Fails if this runner's CPU has AVX-512F/DQ/BW/VL (or AVX2) and the
+      # dispatcher did not pick that table. GitHub runners vary (AMD EPYC Zen 3
+      # without AVX-512, Zen 5 and Intel Xeon with it), so over time this runs
+      # on real AVX-512 hardware too.
+      - name: Default kernel table matches this runner's CPU flags
+        run: |
+          grep -m1 '^flags' /proc/cpuinfo | grep -o -w -E 'avx2|fma|f16c|avx512(f|dq|bw|vl)' | sort -u | xargs echo "CPU flags:"
+          python3 -m pytest tests/test_bindings_edge_cases.py -k default_table_matches_cpuinfo -v
+
       - name: Run Python tests
         run: python3 -m pytest tests -v --tb=short
 

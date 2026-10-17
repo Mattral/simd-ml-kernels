@@ -48,8 +48,14 @@ option(SIMD_ML_NATIVE
 # outside them (dispatch, scalar kernels, bindings, tests) runs on any x86-64
 # CPU (SSE2). Which unit runs is decided at run time (src/dispatch/kernels.hpp).
 #
-# -ffast-math is applied to the AVX2 and AVX-512 kernel units only; the scalar
-# kernels, dispatch code, bindings and tests are compiled without it.
+# The AVX2 and AVX-512 kernel units get -ffast-math -fno-finite-math-only:
+# reassociation and the other fast-math rewrites, but NaN and Inf keep IEEE
+# semantics, so isnan/isinf tests and -inf masks cannot be optimised away.
+# Measured on the reference laptop (per-call minimum, 64 Ki elements, three
+# alternating rounds; PR #18): as fast as or faster than plain -ffast-math on
+# every kernel (exact GeLU 20 vs 23 us, ReLU 4.4 vs 6.9 us) and faster than no
+# fast-math (LayerNorm 14 vs 18 us); FP32 GEMM is unaffected. The scalar
+# kernels, dispatch code, bindings and tests are compiled without fast-math.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     set(WARN_FLAGS -Wall -Wextra -Wshadow -Wno-unused-parameter)
     set(BASE_FLAGS -O3 -DNDEBUG ${WARN_FLAGS})
@@ -58,7 +64,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     endif()
     set(AVX2_FLAGS   -mavx2 -mfma -mf16c)
     set(AVX512_FLAGS -mavx2 -mfma -mf16c -mavx512f -mavx512dq -mavx512bw -mavx512vl)
-    set(SIMD_MATH_FLAGS -ffast-math)
+    set(SIMD_MATH_FLAGS -ffast-math -fno-finite-math-only)
 elseif(MSVC)
     set(BASE_FLAGS /O2 /DNDEBUG)
     set(AVX2_FLAGS /arch:AVX2)

@@ -397,6 +397,34 @@ class TestAvx512Available:
             assert simd_ml_kernels.avx512_available() is True
 
 
+class TestDefaultTableMatchesCpu:
+    """With SIMD_ML_ISA unset, the active table is the widest one the CPU's
+    flags (from the OS, /proc/cpuinfo) allow. On an AVX-512 CI runner this
+    fails if the AVX-512 path is not taken."""
+
+    def test_default_table_matches_cpuinfo(self):
+        import subprocess
+        import sys
+
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8") as f:
+                flags = next(line for line in f if line.startswith("flags")).split()
+        except (OSError, StopIteration):
+            pytest.skip("no /proc/cpuinfo")
+        has = set(flags)
+        compiled = simd_ml_kernels.build_info()["isa_compiled"].split()
+        expect = "scalar"
+        if "avx2" in compiled and {"avx2", "fma", "f16c"} <= has:
+            expect = "avx2"
+            if "avx512" in compiled and {"avx512f", "avx512dq", "avx512bw", "avx512vl"} <= has:
+                expect = "avx512"
+        env = {k: v for k, v in os.environ.items() if k != "SIMD_ML_ISA"}
+        out = subprocess.run(
+            [sys.executable, "-c", "import simd_ml_kernels as s; print(s.detected_isa())"],
+            env=env, capture_output=True, text=True, check=True)
+        assert out.stdout.strip() == expect, f"CPU flags allow {expect}, got {out.stdout.strip()}"
+
+
 class TestDeprecatedImportName:
     """`import simd_kernels` (the pre-rename name) keeps working until 0.5.0."""
 
