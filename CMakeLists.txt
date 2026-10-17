@@ -15,7 +15,7 @@ find_package(pybind11)
 find_package(OpenMP OPTIONAL_COMPONENTS CXX)
 option(SIMD_ML_OPENMP "Enable OpenMP multithreading in GEMM" OFF)
 option(BENCH_OPENBLAS "Link against OpenBLAS for baseline comparison" OFF)
-option(SIMD_ML_SANITIZE "Enable AddressSanitizer/UndefinedBehaviorSanitizer for test binaries" OFF)
+option(SIMD_ML_SANITIZE "Instrument every target (kernels included) with ASan + UBSan" OFF)
 
 # ─── Detect AVX support ───────────────────────────────────────────────────────
 include(CheckCXXCompilerFlag)
@@ -86,6 +86,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 elseif(MSVC)
     set(PERF_FLAGS "/O2" "/arch:AVX2" "/DNDEBUG" "/fp:fast")
     set(PRECISION_FLAGS "/O2" "/arch:AVX2" "/DNDEBUG" "/fp:precise")
+endif()
+
+# ─── Sanitizers ───────────────────────────────────────────────────────────────
+# Applied to every target defined below, so the kernels are instrumented, not
+# only the test code. UBSan findings abort instead of printing and continuing.
+if(SIMD_ML_SANITIZE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined
+                            -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address,undefined)
+        message(STATUS "ASan + UBSan enabled for all targets")
+    else()
+        message(WARNING "SIMD_ML_SANITIZE=ON is only supported with GCC/Clang; ignored")
+    endif()
 endif()
 
 # ─── Kernel library (shared between Python extension and bench) ───────────────
@@ -232,7 +246,7 @@ add_subdirectory(tests)
 #   target_link_libraries(my_target PRIVATE simd_kernels::simd_kernels)
 
 # ── Static library ───────────────────────────────────────────────────────────
-# Exclude the precision_lib (test-only) and Python extension from install.
+# Exclude the Python extension from install (pip installs it).
 # Export the target so find_package() consumers can link against it.
 install(TARGETS simd_kernels_lib
     EXPORT  simd_kernels-targets

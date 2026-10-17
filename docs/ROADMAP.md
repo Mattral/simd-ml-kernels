@@ -62,7 +62,7 @@
 ---
 
 ## v0.7 — Engineering Polish ✅
-- [✅] ODR violation resolved (avx_matmul.cpp excluded from precision_lib)
+- [✅] ODR violation resolved: the test binary links one kernel library. (An earlier entry here said it was resolved by excluding avx_matmul.cpp from a second, non-fast-math "precision" library; that library still duplicated every other kernel and was never actually linked in, so tests ran the -ffast-math build. Removed in favour of linking only the shipped library.)
 - [✅] AVX-512 dispatch bug fixed (inner_NR=32 misaligned with 6×16 kernel)
 - [✅] All build warnings addressed
 - [✅] `guardrail.yml`: clang-tidy, pip-audit, codespell, license check

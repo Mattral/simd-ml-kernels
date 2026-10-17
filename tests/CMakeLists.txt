@@ -1,11 +1,21 @@
-# tests/CMakeLists.txt — IntrinsicML test build targets
+# tests/CMakeLists.txt — C++ test targets
 #
-# Link strategy (resolves the ODR violation from compiling avx_matmul.cpp twice):
-#   simd_kernels_lib        (perf build: -O3 -ffast-math)  → provides simd_sgemm, scalar_sgemm
-#   simd_kernels_precision_lib (-O2, no -ffast-math)       → provides all activation kernels
+# simd_tests links exactly one kernel library: simd_kernels_lib, compiled with
+# the same flags that ship in the Python extension, so the tests check the code
+# users run. The test sources themselves (float64 references, tolerance checks)
+# are compiled with PRECISION_FLAGS, i.e. without -ffast-math.
 #
-# simd_tests links BOTH; simd_kernels_lib is listed first so its simd_sgemm symbol wins.
-# avx_matmul.cpp is NOT compiled into precision_lib (it only belongs in the perf lib).
+# There used to be a second library, simd_kernels_precision_lib, that compiled
+# the same kernel sources without -ffast-math and was linked after
+# simd_kernels_lib. Two definitions of each kernel symbol is an ODR violation,
+# and because the linker resolves each symbol from the first archive that
+# provides it, every kernel object actually came from simd_kernels_lib
+# (verified by comparing .text sizes in the map file); the precision library
+# was never used.
+#
+# Sanitizers: configure with -DSIMD_ML_SANITIZE=ON. The top-level CMakeLists
+# then instruments every target, kernels included, so simd_tests itself is the
+# ASan/UBSan run.
 
 # ─── doctest dependency ───────────────────────────────────────────────────────
 find_package(doctest CONFIG QUIET)
@@ -21,33 +31,6 @@ if(NOT doctest_FOUND)
     )
     FetchContent_MakeAvailable(doctest)
 endif()
-
-# ─── Precision kernel library ─────────────────────────────────────────────────
-# Compiled WITHOUT -ffast-math for accurate numerical validation.
-# Excludes avx_matmul.cpp to prevent the ODR violation.
-# On non-x86 hosts (Apple Silicon etc.) only gemm_dispatcher.cpp is compiled —
-# the AVX2 activation/GEMM sources all include <immintrin.h> and won't compile.
-if(SIMD_ML_ENABLE_X86)
-    set(PRECISION_LIB_SRCS
-        ../src/kernels/intrinsic_gelu.cpp
-        ../src/kernels/gemm/avx2_gemm_packed.cpp
-        ../src/kernels/activations/relu_avx2.cpp
-        ../src/kernels/activations/silu_avx2.cpp
-        ../src/kernels/activations/softmax_avx2.cpp
-        ../src/kernels/activations/layer_norm_avx2.cpp
-        ../src/kernels/gemm/gemm_dispatcher.cpp
-    )
-else()
-    set(PRECISION_LIB_SRCS
-        ../src/kernels/gemm/gemm_dispatcher.cpp
-    )
-endif()
-add_library(simd_kernels_precision_lib STATIC ${PRECISION_LIB_SRCS})
-target_include_directories(simd_kernels_precision_lib PUBLIC
-    ${CMAKE_SOURCE_DIR}/src/kernels
-    ${CMAKE_SOURCE_DIR}/src
-)
-target_compile_options(simd_kernels_precision_lib PRIVATE ${PRECISION_FLAGS})
 
 # ─── Main C++ test runner ─────────────────────────────────────────────────────
 # On non-x86 hosts only the alignment test and a stub runner are compiled.
@@ -90,33 +73,6 @@ if(SIMD_ML_ENABLE_X86)
 else()
     target_compile_definitions(simd_tests PRIVATE SIMD_ML_X86_AVAILABLE=0)
 endif()
-# Link order: perf lib first (provides simd_sgemm), then precision lib.
-target_link_libraries(simd_tests PRIVATE simd_kernels_lib simd_kernels_precision_lib)
+target_link_libraries(simd_tests PRIVATE simd_kernels_lib)
 target_compile_options(simd_tests PRIVATE ${PRECISION_FLAGS})
 add_test(NAME simd_tests COMMAND simd_tests)
-
-# ─── AddressSanitizer / UBSan suite (optional, Clang/GCC only) ───────────────
-if(SIMD_ML_SANITIZE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_executable(simd_tests_asan
-        test_runner.cpp
-        test_alignment.cpp
-        test_gelu.cpp
-        test_gemm.cpp
-        test_gemm_packed.cpp
-        test_activations.cpp
-        test_threads.cpp
-    )
-    target_include_directories(simd_tests_asan PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/kernels
-        ${CMAKE_SOURCE_DIR}/src
-    )
-    target_link_libraries(simd_tests_asan PRIVATE simd_kernels_lib simd_kernels_precision_lib)
-    target_compile_options(simd_tests_asan PRIVATE
-        ${PRECISION_FLAGS}
-        -fsanitize=address,undefined
-        -fno-omit-frame-pointer)
-    target_link_options(simd_tests_asan PRIVATE
-        -fsanitize=address,undefined)
-    add_test(NAME simd_tests_asan COMMAND simd_tests_asan)
-    message(STATUS "ASan/UBSan test target enabled: simd_tests_asan")
-endif()
