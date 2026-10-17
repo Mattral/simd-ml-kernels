@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-check_regression.py — CI Regression Gating for IntrinsicML Benchmarks
+check_regression.py — CI Regression Gating for simd-ml-kernels Benchmarks
 
 Compares a current benchmark JSON result against a committed baseline.
 Fails (exit code 1) if any kernel's throughput dropped by more than
@@ -146,7 +146,7 @@ def check_regressions(baseline: dict, current: dict,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CI regression checker for IntrinsicML benchmarks",
+        description="CI regression checker for simd-ml-kernels benchmarks",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
@@ -158,7 +158,7 @@ def main() -> None:
                         help="Maximum allowed throughput drop in %% (default: 20)")
     args = parser.parse_args()
 
-    print("IntrinsicML Benchmark Regression Check")
+    print("simd-ml-kernels Benchmark Regression Check")
     print(f"  Baseline : {args.baseline}")
     print(f"  Current  : {args.current}")
     print(f"  Threshold: -{args.max_regression_pct:.0f}%% maximum drop")

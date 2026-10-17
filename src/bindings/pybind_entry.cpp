@@ -22,18 +22,18 @@
  *
  * ─── Python Usage ─────────────────────────────────────────────────────────────
  *   import numpy as np
- *   import simd_kernels
+ *   import simd_ml_kernels
  *
  *   A = np.random.randn(256, 256).astype(np.float32)
  *   B = np.random.randn(256, 256).astype(np.float32)
  *   C = np.zeros((256, 256), dtype=np.float32)
- *   simd_kernels.sgemm(A, B, C)
+ *   simd_ml_kernels.sgemm(A, B, C)
  *
  *   x = np.random.randn(65536).astype(np.float32)
- *   y = simd_kernels.gelu(x)
- *   simd_kernels.gelu_inplace(x)
+ *   y = simd_ml_kernels.gelu(x)
+ *   simd_ml_kernels.gelu_inplace(x)
  *
- *   print(simd_kernels.build_info())
+ *   print(simd_ml_kernels.build_info())
  */
 
 #include <pybind11/pybind11.h>
@@ -155,7 +155,7 @@ static py::array_t<float> py_sgemm(py::array A,
         throw std::runtime_error(
             "isa='avx512' was requested but this CPU does not support "
             "AVX-512F+DQ. Use isa='avx2' or isa='' (auto-detect) instead. "
-            "Check simd_kernels.avx512_available() to query hardware support.");
+            "Check simd_ml_kernels.avx512_available() to query hardware support.");
     }
 
     validate_array(A, "A");
@@ -402,7 +402,7 @@ static bool py_is_aligned(py::array arr) {
  *
  * A and B must be numpy arrays with dtype=np.float16. C (output) is float32
  * to avoid overflow in intermediate sums. Raises RuntimeError if F16C is not
- * available on this CPU (check simd_kernels.f16c_available() first).
+ * available on this CPU (check simd_ml_kernels.f16c_available() first).
  */
 static py::array_t<float> py_sgemm_f16(py::array A,
                                          py::array B,
@@ -413,7 +413,7 @@ static py::array_t<float> py_sgemm_f16(py::array A,
     if (!simd_ml::gemm::f16c_available()) {
         throw std::runtime_error(
             "sgemm_f16 requires F16C instructions which are not available on "
-            "this CPU. Check simd_kernels.f16c_available() before calling.");
+            "this CPU. Check simd_ml_kernels.f16c_available() before calling.");
     }
 
     // Validate A and B: must be float16 (kind='f', itemsize=2) and C-contiguous
@@ -636,13 +636,13 @@ struct GEMMConfig {
     }
 };
 
-PYBIND11_MODULE(simd_kernels, m) {
+PYBIND11_MODULE(_core, m) {
     m.doc() =
-        "IntrinsicML: Hand-vectorized AVX2/AVX-512 microkernels for ML workloads.\n\n"
+        "simd-ml-kernels: Hand-vectorized AVX2/AVX-512 microkernels for ML workloads.\n\n"
         "All operations are zero-copy: NumPy float32 array buffers are used directly.\n"
         "The GIL is released during computation for threading compatibility.\n\n"
         "Quick start:\n"
-        "    import numpy as np, simd_kernels as sk\n"
+        "    import numpy as np, simd_ml_kernels as sk\n"
         "    A = np.random.randn(256, 256).astype(np.float32)\n"
         "    B = np.random.randn(256, 256).astype(np.float32)\n"
         "    C = sk.sgemm(A, B)           # SIMD GEMM\n"
@@ -668,7 +668,7 @@ isa   : str, default "" (auto-detect). One of "", "avx2", "avx512".
         runtime auto-detected one — e.g. for benchmarking AVX2 vs AVX-512
         on the same AVX-512-capable machine. Requesting "avx512" on
         hardware without AVX-512F+DQ raises RuntimeError (check
-        simd_kernels.avx512_available() first). This override applies only
+        simd_ml_kernels.avx512_available() first). This override applies only
         to this call — it does not change behavior for subsequent calls.
         "scalar" is validated as a recognized value but raises
         RuntimeError ("not yet implemented") rather than silently falling
@@ -766,8 +766,8 @@ sgemm_packed's 8x16 micro-kernel), independent of any isa= override.
 
 Useful for checking before requesting isa='avx512' explicitly:
 
->>> if simd_kernels.avx512_available():
-...     C = simd_kernels.sgemm(A, B, isa='avx512')
+>>> if simd_ml_kernels.avx512_available():
+...     C = simd_ml_kernels.sgemm(A, B, isa='avx512')
 )doc");
 
     m.def("bf16_avx512bf16_available", &py_bf16_avx512bf16_available,
@@ -811,7 +811,7 @@ ndarray[float32], shape [M, N]
 
 Example
 -------
->>> import numpy as np, simd_kernels as sk
+>>> import numpy as np, simd_ml_kernels as sk
 >>> A_f32 = np.random.randn(64, 256).astype(np.float32)
 >>> A_bf16 = A_f32.view(np.uint16)[..., 1::2]  # take upper 16 bits
 >>> # Easier: use torch or ml_dtypes for proper BF16 arrays
@@ -832,7 +832,7 @@ C (output) is always float32 — accumulation in FP16 would lose precision
 at K > 64, so the output stays in full precision.
 
 Requires F16C instructions (Haswell+, AMD Piledriver+). Check
-simd_kernels.f16c_available() before calling; raises RuntimeError if absent.
+simd_ml_kernels.f16c_available() before calling; raises RuntimeError if absent.
 
 Parameters
 ----------
@@ -855,7 +855,7 @@ where the entire working set fits in L2 cache.
 
 Example
 -------
->>> import numpy as np, simd_kernels as sk
+>>> import numpy as np, simd_ml_kernels as sk
 >>> if sk.f16c_available():
 ...     A = np.random.randn(64, 256).astype(np.float16)
 ...     B = np.random.randn(256, 64).astype(np.float16)
@@ -889,7 +889,7 @@ nr      : int, default 8        — micro-kernel col block (future)
 
 Examples
 --------
->>> import numpy as np, simd_kernels as sk
+>>> import numpy as np, simd_ml_kernels as sk
 >>> A = np.random.randn(256, 512).astype(np.float32)
 >>> B = np.random.randn(512, 128).astype(np.float32)
 >>>

@@ -1,15 +1,15 @@
 # tests/CMakeLists.txt — C++ test targets
 #
-# simd_tests links exactly one kernel library: simd_kernels_lib, compiled with
+# simd_tests links exactly one kernel library: simd_ml_kernels_lib, compiled with
 # the same flags that ship in the Python extension, so the tests check the code
 # users run. The test sources themselves (float64 references, tolerance checks)
 # are compiled with PRECISION_FLAGS, i.e. without -ffast-math.
 #
 # There used to be a second library, simd_kernels_precision_lib, that compiled
 # the same kernel sources without -ffast-math and was linked after
-# simd_kernels_lib. Two definitions of each kernel symbol is an ODR violation,
+# simd_ml_kernels_lib. Two definitions of each kernel symbol is an ODR violation,
 # and because the linker resolves each symbol from the first archive that
-# provides it, every kernel object actually came from simd_kernels_lib
+# provides it, every kernel object actually came from simd_ml_kernels_lib
 # (verified by comparing .text sizes in the map file); the precision library
 # was never used.
 #
@@ -73,6 +73,6 @@ if(SIMD_ML_ENABLE_X86)
 else()
     target_compile_definitions(simd_tests PRIVATE SIMD_ML_X86_AVAILABLE=0)
 endif()
-target_link_libraries(simd_tests PRIVATE simd_kernels_lib)
+target_link_libraries(simd_tests PRIVATE simd_ml_kernels_lib)
 target_compile_options(simd_tests PRIVATE ${PRECISION_FLAGS})
 add_test(NAME simd_tests COMMAND simd_tests)

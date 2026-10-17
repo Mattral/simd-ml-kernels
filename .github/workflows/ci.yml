@@ -145,8 +145,8 @@ jobs:
         run: |
           echo "which python3: $(which python3)"
           echo "python3 --version: $(python3 --version)"
-          python3 -m pip show simd-ml-microkernels
-          python3 -c "import simd_kernels; print('simd_kernels location:', simd_kernels.__file__)"
+          python3 -m pip show simd-ml-kernels
+          python3 -c "import simd_ml_kernels; print('simd_ml_kernels location:', simd_ml_kernels.__file__)"
 
       - name: Smoke test (verify import and basic ops)
         run: python3 tests/smoke_test.py

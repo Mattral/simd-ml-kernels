@@ -9,18 +9,18 @@ Run with:
 
 Requirements:
     pip install numpy pytest scipy  (torch is optional)
-    pip install -e .  # or: cmake --build build && cp build/simd_kernels*.so .
+    pip install -e .  # or: cmake --build build && cp build/simd_ml_kernels*.so .
 """
 
 import numpy as np
 import pytest
 
 try:
-    import simd_kernels
+    import simd_ml_kernels
     HAS_SIMD = True
 except ImportError:
     HAS_SIMD = False
-    pytest.skip("simd_kernels not built — run cmake/pip install first",
+    pytest.skip("simd_ml_kernels not built — run cmake/pip install first",
                 allow_module_level=True)
 
 try:
@@ -122,7 +122,7 @@ def assert_close(actual, ref, rtol: float, atol: float, label: str = "") -> None
 # ─── GEMM Tests ──────────────────────────────────────────────────────────────
 
 class TestGEMM:
-    """Verify simd_kernels.sgemm matches np.dot to within FP32 tolerance."""
+    """Verify simd_ml_kernels.sgemm matches np.dot to within FP32 tolerance."""
 
     GEMM_TOL = 5e-2  # -ffast-math allows FP reassociation; O(K*eps_mach) accumulated error
     GEMM_ATOL = 1e-4  # absolute floor: GEMM output can legitimately be near zero
@@ -144,7 +144,7 @@ class TestGEMM:
         B = rand_matrix(K, N)
         C = np.zeros((M, N), dtype=np.float32)
 
-        simd_kernels.sgemm(A, B, C)
+        simd_ml_kernels.sgemm(A, B, C)
         C_ref = A.astype(np.float64) @ B.astype(np.float64)
 
         assert_close(C, C_ref, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL,
@@ -153,7 +153,7 @@ class TestGEMM:
     def test_sgemm_allocates_output_when_C_not_provided(self):
         A = rand_matrix(32, 64)
         B = rand_matrix(64, 32)
-        C = simd_kernels.sgemm(A, B)
+        C = simd_ml_kernels.sgemm(A, B)
         assert C.shape == (32, 32)
         assert C.dtype == np.float32
         C_ref = (A.astype(np.float64) @ B.astype(np.float64)).astype(np.float32)
@@ -168,7 +168,7 @@ class TestGEMM:
 
         alpha, beta = 2.5, 0.3
         C_simd = C_init.copy()
-        simd_kernels.sgemm(A, B, C_simd, alpha=alpha, beta=beta)
+        simd_ml_kernels.sgemm(A, B, C_simd, alpha=alpha, beta=beta)
 
         C_ref = alpha * (A.astype(np.float64) @ B.astype(np.float64)) \
               + beta * C_init.astype(np.float64)
@@ -180,7 +180,7 @@ class TestGEMM:
         A = rand_matrix(32, 32)
         B = rand_matrix(32, 32)
         C = np.full((32, 32), 1e30, dtype=np.float32)   # poison value
-        simd_kernels.sgemm(A, B, C, beta=0.0)
+        simd_ml_kernels.sgemm(A, B, C, beta=0.0)
         C_ref = (A @ B).astype(np.float32)
         assert np.allclose(C, C_ref, rtol=1e-3, atol=1e-4), \
             "beta=0 should overwrite C entirely"
@@ -189,13 +189,13 @@ class TestGEMM:
         A = rand_matrix(32, 64)
         B = rand_matrix(32, 32)  # wrong: K-dimension mismatch
         with pytest.raises(RuntimeError, match="Shape mismatch|ndim"):
-            simd_kernels.sgemm(A, B)
+            simd_ml_kernels.sgemm(A, B)
 
     def test_sgemm_non_contiguous_raises(self):
         A = rand_matrix(32, 32)
         B = rand_matrix(32, 32)
         with pytest.raises(RuntimeError, match="C-contiguous"):
-            simd_kernels.sgemm(A[::2], B)   # strided = not C-contiguous
+            simd_ml_kernels.sgemm(A[::2], B)   # strided = not C-contiguous
 
 
 # ─── GeLU Tests ──────────────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ class TestGeLU:
     def test_gelu_vs_tanh_approx(self, n):
         x = RNG.uniform(-3.0, 3.0, size=n).astype(np.float32)
         ref = gelu_tanh_numpy(x)
-        out = simd_kernels.gelu(x)
+        out = simd_ml_kernels.gelu(x)
         assert_close(out, ref, rtol=self.GELU_TOL, atol=self.GELU_ATOL,
                     label=f"GeLU n={n}")
 
@@ -219,7 +219,7 @@ class TestGeLU:
         """Dense sweep over [-5, 5] where the polynomial approximation is valid."""
         x = np.arange(-5.0, 5.0 + 1e-12, 0.001, dtype=np.float32)
         ref = gelu_tanh_numpy(x)
-        out = simd_kernels.gelu(x)
+        out = simd_ml_kernels.gelu(x)
         max_abs_err = float(np.max(np.abs(out.astype(np.float64) - ref)))
         assert max_abs_err < 1e-4, (
             f"GeLU sweep [-5,5]: max_abs_err={max_abs_err:.2e} > 1e-4"
@@ -227,28 +227,28 @@ class TestGeLU:
 
     def test_gelu_inplace_equals_outofplace(self):
         x = RNG.standard_normal(8192).astype(np.float32)
-        out_oop = simd_kernels.gelu(x.copy())
+        out_oop = simd_ml_kernels.gelu(x.copy())
         x_ip = x.copy()
-        simd_kernels.gelu_inplace(x_ip)
+        simd_ml_kernels.gelu_inplace(x_ip)
         assert np.allclose(out_oop, x_ip, rtol=1e-6), \
             "In-place and out-of-place GeLU must agree"
 
     def test_gelu_negative_saturation(self):
         """For x ≪ 0, GeLU(x) → 0."""
         x = np.full(64, -10.0, dtype=np.float32)
-        out = simd_kernels.gelu(x)
+        out = simd_ml_kernels.gelu(x)
         assert np.allclose(out, 0.0, atol=1e-5), "GeLU(-10) should be ≈ 0"
 
     def test_gelu_positive_passthrough(self):
         """For large x > 0, GeLU(x) ≈ x."""
         x = np.full(64, 10.0, dtype=np.float32)
-        out = simd_kernels.gelu(x)
+        out = simd_ml_kernels.gelu(x)
         assert np.allclose(out, x, rtol=1e-3), "GeLU(10) should be ≈ 10"
 
     def test_gelu_output_shape_preserved(self):
         for shape in [(8,), (4, 16), (2, 3, 32)]:
             x = rand_array(int(np.prod(shape))).reshape(shape)
-            out = simd_kernels.gelu(x)
+            out = simd_ml_kernels.gelu(x)
             assert out.shape == shape, f"shape {shape} not preserved"
 
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
@@ -257,7 +257,7 @@ class TestGeLU:
         x_np = RNG.standard_normal(4096).astype(np.float32)
         x_pt = torch.from_numpy(x_np)
         ref = F.gelu(x_pt, approximate="tanh").numpy()
-        got = simd_kernels.gelu(x_np)
+        got = simd_ml_kernels.gelu(x_np)
         assert_close(got, ref, rtol=self.GELU_TOL, atol=self.GELU_ATOL,
                     label="vs PyTorch GeLU")
 
@@ -269,17 +269,17 @@ class TestReLU:
     def test_relu_vs_numpy(self, n):
         x = RNG.uniform(-3.0, 3.0, size=n).astype(np.float32)
         ref = relu_numpy(x).astype(np.float32)
-        out = simd_kernels.relu(x)
+        out = simd_ml_kernels.relu(x)
         # ReLU is exact (just a max with zero) — should match exactly
         assert np.array_equal(out, ref), f"ReLU n={n}: mismatch"
 
     def test_relu_all_negative(self):
         x = np.full(64, -5.0, dtype=np.float32)
-        assert np.all(simd_kernels.relu(x) == 0.0)
+        assert np.all(simd_ml_kernels.relu(x) == 0.0)
 
     def test_relu_all_positive(self):
         x = np.arange(1, 65, dtype=np.float32)
-        out = simd_kernels.relu(x)
+        out = simd_ml_kernels.relu(x)
         assert np.array_equal(out, x)
 
 
@@ -293,13 +293,13 @@ class TestSiLU:
     def test_silu_vs_numpy(self, n):
         x = RNG.uniform(-4.0, 4.0, size=n).astype(np.float32)
         ref = silu_numpy(x)
-        out = simd_kernels.silu(x)
+        out = simd_ml_kernels.silu(x)
         assert_close(out, ref, rtol=self.SILU_TOL, atol=self.SILU_ATOL,
                     label=f"SiLU n={n}")
 
     def test_silu_zero_input(self):
         x = np.zeros(64, dtype=np.float32)
-        out = simd_kernels.silu(x)
+        out = simd_ml_kernels.silu(x)
         assert np.allclose(out, 0.0, atol=1e-7)
 
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
@@ -307,7 +307,7 @@ class TestSiLU:
         x_np = RNG.standard_normal(4096).astype(np.float32)
         x_pt = torch.from_numpy(x_np)
         ref = F.silu(x_pt).numpy()
-        got = simd_kernels.silu(x_np)
+        got = simd_ml_kernels.silu(x_np)
         assert_close(got, ref, rtol=self.SILU_TOL, atol=self.SILU_ATOL,
                     label="vs PyTorch SiLU")
 
@@ -318,7 +318,7 @@ class TestSoftmax:
     @pytest.mark.parametrize("shape", [(8,), (64,), (512,), (4, 128), (16, 64)])
     def test_softmax_sums_to_one(self, shape):
         x = RNG.standard_normal(shape).astype(np.float32)
-        out = simd_kernels.softmax(x)
+        out = simd_ml_kernels.softmax(x)
         row_sums = out.reshape(-1, shape[-1]).sum(axis=1)
         assert np.allclose(row_sums, 1.0, atol=1e-5), \
             f"Softmax row sums not 1.0 for shape {shape}: {row_sums}"
@@ -327,20 +327,20 @@ class TestSoftmax:
     def test_softmax_vs_numpy(self, n):
         x = RNG.standard_normal(n).astype(np.float32)
         ref = softmax_numpy(x)
-        out = simd_kernels.softmax(x)
+        out = simd_ml_kernels.softmax(x)
         max_err = float(np.max(np.abs(out.astype(np.float64) - ref)))
         assert max_err < 1e-5, f"Softmax n={n}: max_abs_err={max_err:.2e}"
 
     def test_softmax_argmax_preserved(self):
         """argmax(softmax(x)) == argmax(x)."""
         x = RNG.standard_normal(256).astype(np.float32)
-        out = simd_kernels.softmax(x)
+        out = simd_ml_kernels.softmax(x)
         assert np.argmax(out) == np.argmax(x)
 
     def test_softmax_numerical_stability_large_values(self):
         """Input with very large values should not produce NaN/Inf."""
         x = np.array([1000.0, 1001.0, 999.0], dtype=np.float32)
-        out = simd_kernels.softmax(x)
+        out = simd_ml_kernels.softmax(x)
         assert np.all(np.isfinite(out)), "Softmax must be numerically stable for large inputs"
         assert np.allclose(out.sum(), 1.0, atol=1e-6)
 
@@ -348,7 +348,7 @@ class TestSoftmax:
     def test_softmax_vs_pytorch_2d(self):
         x = RNG.standard_normal((8, 64)).astype(np.float32)
         ref = F.softmax(torch.from_numpy(x), dim=-1).numpy()
-        out = simd_kernels.softmax(x, axis=-1)
+        out = simd_ml_kernels.softmax(x, axis=-1)
         assert np.allclose(out, ref, atol=1e-5)
 
 
@@ -373,7 +373,7 @@ class TestLayerNorm:
         beta  = RNG.standard_normal(n).astype(np.float32) if use_beta else None
 
         ref = layer_norm_numpy(x, gamma, beta)
-        out = simd_kernels.layer_norm(x, gamma=gamma, beta=beta)
+        out = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
 
         assert_close(out, ref, rtol=self.LN_TOL, atol=self.LN_ATOL,
                     label=f"LayerNorm n={n} gamma={use_gamma} beta={use_beta}")
@@ -388,7 +388,7 @@ class TestLayerNorm:
                     torch.from_numpy(x), [n],
                     weight=torch.from_numpy(gamma),
                     bias=torch.from_numpy(beta)).numpy()
-        out   = simd_kernels.layer_norm(x, gamma=gamma, beta=beta)
+        out   = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
         assert_close(out, ref, rtol=self.LN_TOL, atol=self.LN_ATOL,
                     label="vs PyTorch LayerNorm")
 
@@ -397,16 +397,16 @@ class TestLayerNorm:
 
 class TestBuildInfo:
     def test_build_info_returns_dict(self):
-        info = simd_kernels.build_info()
+        info = simd_ml_kernels.build_info()
         assert isinstance(info, dict)
         assert "isa_compiled" in info or "ISA" in info
 
     def test_detected_isa_is_string(self):
-        isa = simd_kernels.detected_isa()
+        isa = simd_ml_kernels.detected_isa()
         assert isinstance(isa, str)
         assert any(kw in isa for kw in ("avx", "scalar", "sse"))
 
     def test_is_aligned_returns_bool(self):
         x = np.zeros(1024, dtype=np.float32)
-        result = simd_kernels.is_aligned(x)
+        result = simd_ml_kernels.is_aligned(x)
         assert isinstance(result, bool)

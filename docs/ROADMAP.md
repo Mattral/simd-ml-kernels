@@ -1,4 +1,4 @@
-# IntrinsicML — Roadmap
+# simd-ml-kernels — Roadmap
 
 ## Legend
 ✅ Complete and verified   ⚠️ Partial / in progress   ❌ Not started
@@ -41,8 +41,8 @@
 ## v0.5 — Python Integration & Developer Experience ✅
 - [✅] pybind11 bindings for all kernels: `sgemm`, `gelu`, `relu`, `silu`, `softmax`, `layer_norm`
 - [✅] GIL release during all kernel calls (threading-safe)
-- [✅] Python type stubs (`simd_kernels.pyi`) for IDE autocompletion
-- [✅] `simd_kernels.build_info()` / `detected_isa()` / `is_aligned()`
+- [✅] Python type stubs (`python/simd_ml_kernels/_core.pyi`) for IDE autocompletion
+- [✅] `simd_ml_kernels.build_info()` / `detected_isa()` / `is_aligned()`
 - [✅] `set_num_threads` / `get_num_threads` exposed to Python
 - [✅] `GEMMConfig` callable configuration object (roadmap §9 DX vision)
 - [✅] `isa=` keyword argument on `sgemm()` and `GEMMConfig` (validated, forward-compatible)
@@ -133,7 +133,7 @@ subsequent calls) in `avx2_gemm_packed.cpp`, wired through
 `pybind_entry.cpp`. Requesting `isa="avx512"` on hardware without
 AVX-512F+DQ raises `RuntimeError` (checked against
 `gemm_packed_avx512_hardware_available()`, also exposed to Python as
-`simd_kernels.avx512_available()`). `isa="scalar"` is a recognized value
+`simd_ml_kernels.avx512_available()`). `isa="scalar"` is a recognized value
 but raises `RuntimeError` ("not yet implemented") rather than silently
 falling back, since no forced full-matrix scalar path exists yet. Verified
 via a direct C++ test (`test_gemm_isa_override` in
@@ -159,14 +159,14 @@ hardware where auto-detect and a forced choice happen to coincide.
       values — cheaper than F16C's VCVTPH2PS). Requires no special compile
       flag beyond AVX2. `bf16_avx512bf16_available()` provides a runtime
       check for vdpbf16ps availability (Ice Lake-SP+) ahead of the v1.0
-      packing path. Exposed as `simd_kernels.sgemm_bf16(A, B)` → float32.
+      packing path. Exposed as `simd_ml_kernels.sgemm_bf16(A, B)` → float32.
       Tested in `tests/test_gemm_bf16.cpp` across 14 shapes including BF16
       bit-pattern unit test and beta=0 NaN-safety check.
 - [✅] FP16 GEMM kernel (F16C extension). `sgemm_f16_avx2`: converts FP16
       inputs on load via `_mm256_cvtph_ps` (1 instruction per 8 values, hidden
       behind FMA latency), accumulates in FP32, stores FP32 output. Exposed as
-      `simd_kernels.sgemm_f16(A_f16, B_f16)` → `ndarray[float32]`. Runtime
-      guard via `f16c_available()` / `simd_kernels.f16c_available()`.
+      `simd_ml_kernels.sgemm_f16(A_f16, B_f16)` → `ndarray[float32]`. Runtime
+      guard via `f16c_available()` / `simd_ml_kernels.f16c_available()`.
       Implemented in `src/kernels/gemm/f16_gemm.{hpp,cpp}`, tested in
       `tests/test_gemm_f16.cpp` across 14 shapes including single-row
       inference (M=1, N=64, K=128) and alpha/beta variants.
@@ -205,7 +205,7 @@ speedup will be in the 6–10× range.
 ## Known Honest Limitations (never remove this section)
 
 These limitations are explicitly documented to help users understand the gap
-between IntrinsicML and production BLAS libraries.
+between simd-ml-kernels and production BLAS libraries.
 
 | Limitation | Impact | Planned fix |
 |---|---|---|

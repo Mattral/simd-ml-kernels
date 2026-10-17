@@ -1,12 +1,12 @@
 cff-version: "1.2.0"
-title: "IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for Machine Learning Workloads"
+title: "simd-ml-kernels: hand-vectorized SIMD kernels for machine learning workloads"
 authors:
   - family-names: "Myet"
     given-names: "Min Htet"
 version: "0.2.0"
 date-released: "2026-06-09"
 license: "Apache-2.0"
-repository-code: "https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads"
+repository-code: "https://github.com/Mattral/simd-ml-kernels"
 url: "https://zenodo.org/records/20616502"
 abstract: >
   An open-source C++17 library of clean, well-documented hand-vectorized

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# benchmarks/run_bench.sh — Build and run the IntrinsicML benchmark suite.
+# benchmarks/run_bench.sh — Build and run the simd-ml-kernels benchmark suite.
 #
 # Runs both:
 #   bench       — cycle-accurate RDTSC harness (quick check)
@@ -43,7 +43,7 @@ cmake "$REPO_ROOT" \
 cmake --build . --target bench bench_stat --parallel
 
 printf "\n╔══════════════════════════════════════════════╗\n"
-printf "║  IntrinsicML Benchmark                      ║\n"
+printf "║  simd-ml-kernels Benchmark                  ║\n"
 printf "╚══════════════════════════════════════════════╝\n"
 
 # ─── Cycle-accurate quick run ─────────────────────────────────────────────────

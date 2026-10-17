@@ -1,0 +1,26 @@
+# simd_ml_kernels-config.cmake — CMake package config for simd-ml-kernels
+#
+# Downstream usage:
+#   find_package(simd_ml_kernels REQUIRED)
+#   target_link_libraries(my_target PRIVATE simd_ml_kernels::simd_ml_kernels)
+
+@PACKAGE_INIT@
+
+# Import the exported targets (simd_ml_kernels::simd_ml_kernels_lib)
+include("${CMAKE_CURRENT_LIST_DIR}/simd_ml_kernels-targets.cmake")
+
+# Create the canonical alias: simd_ml_kernels::simd_ml_kernels
+# so users can write target_link_libraries(... simd_ml_kernels::simd_ml_kernels)
+# rather than the internal _lib-suffixed name.
+if(TARGET simd_ml_kernels::simd_ml_kernels_lib AND NOT TARGET simd_ml_kernels::simd_ml_kernels)
+    add_library(simd_ml_kernels::simd_ml_kernels ALIAS simd_ml_kernels::simd_ml_kernels_lib)
+endif()
+
+# Convenience variable for consumers that prefer variables over targets
+get_target_property(_simd_inc simd_ml_kernels::simd_ml_kernels_lib
+    INTERFACE_INCLUDE_DIRECTORIES)
+set(SIMD_ML_KERNELS_INCLUDE_DIRS "${_simd_inc}")
+set(SIMD_ML_KERNELS_VERSION "@PROJECT_VERSION@")
+set(SIMD_ML_KERNELS_FOUND TRUE)
+
+check_required_components(simd_ml_kernels)

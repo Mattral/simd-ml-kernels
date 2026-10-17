@@ -1,5 +1,5 @@
 """
-Type stubs for simd_kernels — IntrinsicML Python extension.
+Type stubs for simd_ml_kernels._core, the compiled extension module.
 
 All kernels operate on float32 NumPy arrays and release the GIL during
 computation. Arrays must be C-contiguous; call np.ascontiguousarray() if needed.
@@ -75,10 +75,10 @@ def sgemm_f16(
 
     Example
     -------
-    >>> if simd_kernels.f16c_available():
+    >>> if simd_ml_kernels.f16c_available():
     ...     A = np.random.randn(64, 256).astype(np.float16)
     ...     B = np.random.randn(256, 64).astype(np.float16)
-    ...     C = simd_kernels.sgemm_f16(A, B)   # float32 result
+    ...     C = simd_ml_kernels.sgemm_f16(A, B)   # float32 result
     """
     ...
 

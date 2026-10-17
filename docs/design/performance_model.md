@@ -25,7 +25,7 @@ Answer: the standard definition counts a fused multiply-add as 2 FLOPS
 The discrepancy: 112 vs 56 arises from whether you count "vector operations"
 (one _mm256_fmadd_ps = 1 op = 8 floats × 2 arithmetic ops) or "FLOPS".
   
-  IntrinsicML uses FLOPS convention: peak = 2 ports × 8 floats × 2 FLOPS × freq
+  simd-ml-kernels uses FLOPS convention: peak = 2 ports × 8 floats × 2 FLOPS × freq
                                           = 32 GFLOPS/GHz
   At 3.5 GHz: 32 × 3.5 = 112? No...
 

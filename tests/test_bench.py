@@ -1,7 +1,7 @@
 """
 tests/test_bench.py — Python Benchmark with Publication-Quality Plots
 
-Measures IntrinsicML SIMD vs NumPy reference performance for GEMM and GeLU
+Measures simd-ml-kernels SIMD vs NumPy reference performance for GEMM and GeLU
 across a range of problem sizes, then renders publication-quality plots.
 
 Usage:
@@ -12,13 +12,12 @@ Usage:
 
 Requirements:
     pip install numpy matplotlib tabulate scipy
-    # simd_kernels must be importable: either `pip install -e .` or
-    # cmake --build build_ci && (extension .so is in build_ci/)
+    # simd_ml_kernels must be installed: `pip install .`
 
 Speedup interpretation note:
     NumPy uses OpenBLAS which is multi-threaded. For a fair single-core
     comparison, set OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 before running.
-    Without this, NumPy speedups > 1 do not mean IntrinsicML is faster.
+    Without this, NumPy speedups > 1 do not mean simd-ml-kernels is faster.
 """
 
 from __future__ import annotations
@@ -30,24 +29,14 @@ from pathlib import Path
 
 import numpy as np
 
-# ─── sys.path bootstrap (allows direct invocation without `pip install -e .`) ──
-_repo_root = Path(__file__).parent.parent.resolve()
-for _candidate in [_repo_root / "build_ci", _repo_root / "build", _repo_root]:
-    if list(_candidate.glob("simd_kernels*.so")) or \
-       list(_candidate.glob("simd_kernels*.pyd")):
-        _s = str(_candidate)
-        if _s not in sys.path:
-            sys.path.insert(0, _s)
-        break
-
 # ─── Optional imports ─────────────────────────────────────────────────────────
 try:
-    import simd_kernels
+    import simd_ml_kernels
     HAS_SIMD = True
 except ImportError:
     HAS_SIMD = False
-    print("WARNING: simd_kernels not found. Only NumPy reference timings will run.")
-    print("  Build with: cmake --build build_ci --parallel")
+    print("WARNING: simd_ml_kernels not found. Only NumPy reference timings will run.")
+    print("  Install with: pip install .")
 
 try:
     import matplotlib
@@ -91,7 +80,7 @@ def timeit(fn, warmup: int = 3, reps: int = 10) -> tuple[float, float]:
 
 
 def gelu_numpy_ref(x: np.ndarray) -> np.ndarray:
-    """Reference GeLU (tanh formula) in NumPy — matches IntrinsicML's formula exactly."""
+    """Reference GeLU (tanh formula) in NumPy — matches simd-ml-kernels's formula exactly."""
     sqrt2pi = np.float32(0.7978845608028654)
     coeff   = np.float32(0.044715)
     inner   = sqrt2pi * (x + coeff * x ** 3)
@@ -134,9 +123,9 @@ def bench_gemm(sizes: list[int], reps: int = 10) -> list[dict]:
 
         if HAS_SIMD:
             # Pre-allocate C outside timeit to avoid allocator noise in the loop
-            simd_kernels.sgemm(A, B, C, alpha=1.0, beta=0.0)  # warm up
+            simd_ml_kernels.sgemm(A, B, C, alpha=1.0, beta=0.0)  # warm up
             t_simd_min, _ = timeit(
-                lambda: simd_kernels.sgemm(A, B, C, alpha=1.0, beta=0.0),
+                lambda: simd_ml_kernels.sgemm(A, B, C, alpha=1.0, beta=0.0),
                 reps=reps
             )
             gflops_simd = flops / t_simd_min / 1e9
@@ -153,7 +142,7 @@ def bench_gemm(sizes: list[int], reps: int = 10) -> list[dict]:
 def _print_gemm_row(r: dict) -> None:
     simd_str = (
         f"{r['simd_ms']:7.3f} ms  {r['simd_gflops']:6.1f} GFLOPS  {r['speedup']:5.2f}×"
-        if r["simd_ms"] is not None else "  (simd_kernels not installed)"
+        if r["simd_ms"] is not None else "  (simd_ml_kernels not installed)"
     )
     print(f"  GEMM {r['N']:4d}×{r['N']:4d}  "
           f"numpy: {r['numpy_ms']:7.3f} ms  {r['numpy_gflops']:6.1f} GFLOPS  |  "
@@ -194,7 +183,7 @@ def bench_gelu(sizes: list[int], reps: int = 10) -> list[dict]:
             # gelu() is out-of-place — input is unchanged, output pre-allocated.
             out = np.empty_like(x_orig)
             t_simd_min, _ = timeit(
-                lambda: simd_kernels.gelu(x_orig),  # returns new array each call
+                lambda: simd_ml_kernels.gelu(x_orig),  # returns new array each call
                 reps=reps
             )
             gelems_simd = n / t_simd_min / 1e9
@@ -204,7 +193,7 @@ def bench_gelu(sizes: list[int], reps: int = 10) -> list[dict]:
 
             # Accuracy spot-check vs numpy reference (not timed)
             ref = gelu_numpy_ref(x_orig)
-            got = simd_kernels.gelu(x_orig)
+            got = simd_ml_kernels.gelu(x_orig)
             max_rel = float(np.max(np.abs(got.astype(np.float64) - ref.astype(np.float64))
                                    / (np.abs(ref.astype(np.float64)) + 1e-7)))
             row["max_rel_err"] = max_rel
@@ -220,7 +209,7 @@ def _print_gelu_row(r: dict) -> None:
     simd_str = (
         f"{r['simd_ms']:8.4f} ms  {r['simd_gelems']:5.2f} GEl/s  {r['speedup']:5.2f}×"
         f"  (max_rel={r.get('max_rel_err', float('nan')):.1e})"
-        if r["simd_ms"] is not None else "  (simd_kernels not installed)"
+        if r["simd_ms"] is not None else "  (simd_ml_kernels not installed)"
     )
     print(f"  GeLU n={r['n']:8,}  "
           f"numpy: {r['numpy_ms']:8.4f} ms  {r['numpy_gelems']:5.2f} GEl/s  |  "
@@ -310,7 +299,7 @@ def plot_gemm(results: list[dict], save_dir: Path | None = None) -> None:
     simd_gflops = [r["simd_gflops"] for r in results if r["simd_gflops"] is not None]
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle("GEMM Throughput: IntrinsicML SIMD vs NumPy",
+    fig.suptitle("GEMM Throughput: simd-ml-kernels SIMD vs NumPy",
                  fontsize=_STYLE["fontsize_title"] + 1, fontweight="bold")
 
     # Left: GFLOPS vs size
@@ -321,7 +310,7 @@ def plot_gemm(results: list[dict], save_dir: Path | None = None) -> None:
     if simd_sizes:
         ax.plot(simd_sizes, simd_gflops, "s-",
                 color=_COLORS["simd"], linewidth=_STYLE["linewidth"],
-                markersize=_STYLE["markersize"], label="IntrinsicML AVX2")
+                markersize=_STYLE["markersize"], label="simd-ml-kernels AVX2")
     ax.set_xlabel("Matrix Size N  (N×N square)", fontsize=_STYLE["fontsize_axis"])
     ax.set_ylabel("GFLOPS", fontsize=_STYLE["fontsize_axis"])
     ax.set_title("Arithmetic Throughput", fontsize=_STYLE["fontsize_title"])
@@ -376,7 +365,7 @@ def plot_gelu(results: list[dict], save_dir: Path | None = None) -> None:
     simd_gelems = [r["simd_gelems"] for r in results if r["simd_gelems"] is not None]
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle("GeLU Throughput: IntrinsicML SIMD vs NumPy (tanh formula)",
+    fig.suptitle("GeLU Throughput: simd-ml-kernels SIMD vs NumPy (tanh formula)",
                  fontsize=_STYLE["fontsize_title"] + 1, fontweight="bold")
 
     # Left: Throughput vs size
@@ -387,7 +376,7 @@ def plot_gelu(results: list[dict], save_dir: Path | None = None) -> None:
     if simd_ns:
         ax.plot(simd_ns, simd_gelems, "s-",
                 color=_COLORS["simd"], linewidth=_STYLE["linewidth"],
-                markersize=_STYLE["markersize"], label="IntrinsicML AVX2")
+                markersize=_STYLE["markersize"], label="simd-ml-kernels AVX2")
     ax.set_xlabel("Input Elements N", fontsize=_STYLE["fontsize_axis"])
     ax.set_ylabel("GElements / second", fontsize=_STYLE["fontsize_axis"])
     ax.set_title("GeLU Activation Throughput", fontsize=_STYLE["fontsize_title"])
@@ -434,7 +423,7 @@ def plot_gelu(results: list[dict], save_dir: Path | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="IntrinsicML Python benchmark suite",
+        description="simd-ml-kernels Python benchmark suite",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
@@ -458,8 +447,8 @@ def main() -> None:
     show_plots = HAS_MPL and not args.no_plot
 
     if HAS_SIMD:
-        print(f"\nRuntime ISA:  {simd_kernels.detected_isa()}")
-        print(f"Build info:   {simd_kernels.build_info()}")
+        print(f"\nRuntime ISA:  {simd_ml_kernels.detected_isa()}")
+        print(f"Build info:   {simd_ml_kernels.build_info()}")
 
     # ── GEMM ──────────────────────────────────────────────────────────────────
     print("\n" + "═" * 72)
@@ -488,7 +477,7 @@ def main() -> None:
         print("\nInstall matplotlib for plots:  pip install matplotlib")
 
     # ── CI performance gate ───────────────────────────────────────────────────
-    # GeLU regression only: both IntrinsicML and NumPy's tanh are single-threaded
+    # GeLU regression only: both simd-ml-kernels and NumPy's tanh are single-threaded
     # here, so the comparison is apples-to-apples. Threshold: SIMD must not be
     # more than 2× slower than NumPy's tanh GeLU reference.
     #

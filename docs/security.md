@@ -4,7 +4,7 @@
 
 ## Threat Model
 
-IntrinsicML is a CPU microkernel library intended for use in research,
+simd-ml-kernels is a CPU microkernel library intended for use in research,
 benchmarking, and production ML inference pipelines. It is **not** a
 network-facing service or a security boundary. The threat model covers:
 

@@ -22,7 +22,7 @@
 ### GEMM path
 
 ```
-Python: simd_kernels.sgemm(A, B, C, alpha, beta)
+Python: simd_ml_kernels.sgemm(A, B, C, alpha, beta)
   │
   ▼ pybind_entry.cpp
 Validate (shape / dtype / contiguity / writeability)
@@ -53,7 +53,7 @@ C updated in-place, returned to Python
 ### Activation path (GeLU example)
 
 ```
-Python: simd_kernels.gelu(x)
+Python: simd_ml_kernels.gelu(x)
   │
   ▼ pybind_entry.cpp
 Validate (dtype=float32, C-contiguous)
