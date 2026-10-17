@@ -35,7 +35,8 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
 | **LayerNorm** | `activations/layer_norm_avx2.cpp` | 3-pass, double accumulation, optional γ/β |
 
-All kernels have AVX2 fast paths with scalar fallbacks for non-AVX2 systems.
+The Python extension currently requires AVX2 + FMA at run time; scalar
+fallbacks for every kernel and runtime ISA dispatch are planned (ROADMAP).
 
 ---
 
@@ -153,60 +154,9 @@ Optional: `libopenblas-dev` for `./bench_stat` baseline comparisons (`-DBENCH_OP
 
 ## Repository Layout
 
-```
-simd-ml-kernels/
-├── src/
-│   ├── kernels/
-│   │   ├── avx_matmul.cpp              # 6×16 AVX2 + AVX-512 GEMM
-│   │   ├── intrinsic_gelu.cpp          # GeLU (exact erf and tanh variants)
-│   │   ├── cache_alloc.hpp             # 64-byte aligned allocator
-│   │   ├── gemm/
-│   │   │   ├── avx2_gemm_packed.cpp    # 8×8 packed GEMM (Goto/BLIS style)
-│   │   │   ├── avx2_gemm_packed.hpp
-│   │   │   ├── gemm_dispatcher.cpp     # Runtime ISA dispatch
-│   │   │   └── naive_gemm.hpp          # Scalar reference
-│   │   └── activations/
-│   │       ├── activations.hpp
-│   │       ├── relu_avx2.cpp
-│   │       ├── silu_avx2.cpp
-│   │       ├── softmax_avx2.cpp
-│   │       └── layer_norm_avx2.cpp     # NEW: LayerNorm (3-pass, AVX2)
-│   ├── dispatch/
-│   │   ├── cpuid.hpp                   # Runtime CPU feature detection
-│   │   └── kernel_registry.hpp
-│   ├── bindings/
-│   │   └── pybind_entry.cpp            # Python/NumPy bindings
-│   ├── main_bench.cpp                  # RDTSC cycle-accurate bench
-│   └── bench_stat.cpp                  # Statistical bench with CI + JSON
-├── tests/
-│   ├── test_precision.py               # NumPy/PyTorch cross-validation
-│   ├── test_bindings_edge_cases.py     # Input validation + error handling
-│   ├── test_gemm.cpp                   # C++ GEMM correctness
-│   ├── test_gemm_packed.cpp            # C++ packed GEMM correctness
-│   ├── test_gelu.cpp                   # C++ GeLU correctness
-│   ├── test_activations.cpp            # C++ ReLU/SiLU/Softmax/LayerNorm
-│   ├── test_alignment.cpp              # Allocator alignment verification
-│   └── test_cli.py                     # selftest / info CLI
-├── benchmarks/
-│   ├── make_tables.py                  # README + BENCHMARKS tables from results/*.json
-│   └── results/                        # committed benchmark JSON (schema in README.md)
-├── docs/
-│   ├── DESIGN.md                       # Architecture + design decisions
-│   ├── BENCHMARKS.md                   # Protocol + generated results
-│   ├── ROADMAP.md
-│   └── architecture.md
-├── .github/workflows/
-│   ├── ci.yml                          # Build + test (every push)
-│   ├── build-and-test.yml
-│   ├── bench.yml                       # Weekly statistical benchmark
-│   └── guardrail.yml                   # Static analysis + security
-├── CMakeLists.txt
-├── pyproject.toml
-├── python/simd_ml_kernels/             # Python package: __init__.py, _core.pyi stubs
-├── python/simd_kernels/                # Deprecated import alias
-├── Dockerfile
-└── README.md
-```
+The map of the source tree, the build/test/benchmark commands and the checklist
+for adding a kernel are in [AGENTS.md](AGENTS.md); design notes are in
+[docs/DESIGN.md](docs/DESIGN.md).
 
 ---
 
@@ -220,30 +170,26 @@ ctest --test-dir build --output-on-failure
 pytest tests -v
 
 # Every kernel vs float64 (exit 1 on failure)
-python -m simd_ml_kernels selftest```
+python -m simd_ml_kernels selftest
+```
 
 ---
 
 ## CI Pipeline
 
-| Workflow | Trigger | What it does |
-|----------|---------|--------------|
-| `ci.yml` | Every push / PR | Build (GCC-12, GCC-13, Clang-15) + C++ tests + Python precision tests |
-| `build-and-test.yml` | Push to main | Focused build validation |
-| `bench.yml` | Weekly (Sunday 4 AM UTC) | `python -m simd_ml_kernels bench --json` on a CI runner, uploaded as an artifact (shared runners: not used for claims) |
-| `guardrail.yml` | Every push / PR | Static analysis + security scan |
+Every pull request builds with GCC 12/13 and Clang 15, runs the C++ tests, the
+Python tests with PyTorch cross-checks, `selftest`, stubtest, the examples and
+an ASan + UBSan build; the workflows are listed in
+[docs/DESIGN.md](docs/DESIGN.md) §8.
 
 ---
 
 ## Contributing
 
-Issues, pull requests, and benchmark reports from different hardware are
-welcome. If you run `bench_stat` on a machine with AVX-512 (e.g. Sapphire
-Rapids, Zen 4), please share the results — reproducible numbers from diverse
-hardware are the project's most valuable asset.
-
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the architectural context before
-proposing changes to the hot-loop kernels.
+Issues, pull requests and benchmark results from other hardware are welcome:
+run `python -m simd_ml_kernels bench --json` with the protocol in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) and open a PR with the JSON. Start
+with [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

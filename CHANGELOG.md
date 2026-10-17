@@ -15,6 +15,14 @@ under **Changed** with a migration note.
   commit, compiler, kernel flags, compiled ISA, OpenMP) and CPU (model, runtime
   ISA, AVX-512, F16C, AVX512-BF16).
 - `build_info()` gains `version`, `git_commit`, `compiler`, `kernel_flags`.
+- `examples/`: `mlp_block.py` (GEMM → GeLU → GEMM + residual → LayerNorm,
+  checked against PyTorch) and `bench_to_json.py`; both run in CI.
+- `AGENTS.md`: commands, repository map, rules, add-a-kernel checklist, result
+  schema. The design notes (`docs/architecture.md`, `docs/system_design.md`,
+  `docs/design/*.md`) are merged into `docs/DESIGN.md`, with their errors
+  corrected (listed at the end of that file).
+- CI checks `_core.pyi` against the module: `mypy.stubtest` for names,
+  `tests/test_stubs.py` for parameter names and defaults.
 
 ### Changed
 - **Renamed to simd-ml-kernels.** Repository and PyPI distribution:

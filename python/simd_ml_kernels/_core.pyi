@@ -293,3 +293,9 @@ def sgemm_bf16(
 def is_aligned(arr: np.ndarray) -> bool:
     """Return True if the array's data buffer is 64-byte aligned."""
     ...
+
+
+# ─── Private: used by `python -m simd_ml_kernels bench` and `info` ────────────
+
+def _measure_core_ghz(seconds: float = 0.05) -> float: ...
+def _cpu_caches() -> list[dict[str, int | str]]: ...

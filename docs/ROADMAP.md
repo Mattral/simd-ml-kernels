@@ -162,6 +162,30 @@ hardware where auto-detect and a forced choice happen to coincide.
 
 ---
 
+## Next, in order
+
+Each item is done when its tests, committed benchmark JSON and docs are in.
+
+- **W2 — portable builds.** Per-ISA translation units with explicit flags
+  (baseline scalar, AVX2+FMA+F16C, AVX-512F/DQ/BW/VL) instead of
+  `-march=native` (kept as an opt-in for local benchmarking); runtime dispatch
+  from CPUID + XGETBV, resolved once; a scalar path for every kernel;
+  `-ffast-math` only where tests show it is safe; FTZ/DAZ test; AVX-512
+  correctness under Intel SDE; wheels built with cibuildwheel (not published).
+- **W3 — GEMM.** Small-matrix register-blocked kernel (N ≤ 128 is 24% of
+  OpenBLAS on the reference laptop); AVX-512 micro-kernel with 24–28
+  accumulators; blocking from CPUID leaf 4; `trans_a`/`trans_b` in packing;
+  OpenMP on by default with a scaling table; LayerNorm single-pass vs
+  two-pass. Measured on ≥ 2 CPUs.
+- **W4 — low precision that is faster than FP32.** BF16/FP16 converted at pack
+  time; `vdpbf16ps` and VNNI INT8 where available.
+- **W5 — CPU LLM decode kernels.** Quantized GEMV with fused dequantization,
+  RMSNorm/SwiGLU epilogues, flash-decoding attention; judged by % of measured
+  STREAM bandwidth vs PyTorch CPU and llama.cpp.
+- **W6 — end-to-end decode loop** against PyTorch and llama.cpp.
+
+---
+
 ## v1.0 — NUMA and Multi-socket (Planned)
 - [❌] NUMA-aware packing buffer allocation
 - [❌] Multi-socket OpenMP with NUMA-local thread-private buffers
@@ -184,9 +208,8 @@ between simd-ml-kernels and production BLAS libraries.
 
 | Limitation | Impact | Planned fix |
 |---|---|---|
-| No hand-written assembly micro-kernel | 5–15% overhead vs hand-tuned assembly | Optional / long-term |
-| Fixed tile sizes (MC/KC/NC) | Derived for Skylake-class caches; not re-tuned for Sapphire Rapids / Zen 4 | v0.9 auto-tune |
-| Panel packing not skipped for small N | `sgemm_packed` was slower than a plain scalar loop at N=64: packing overhead dominates before it's amortised | v0.9 |
-| Single-threaded default | Linear throughput scaling with cores uncaptured | OpenMP flag exists |
-| No BF16/FP16 kernels | Modern LLM inference prefers lower precision | v0.9 |
+| Fixed tile sizes (MC/KC/NC) | Chosen for Skylake-class caches; not derived from the running CPU | W3 |
+| Small matrices (max(M,N,K) ≤ 128) | One FMA chain per output strip: 24% of OpenBLAS at N = 128 on the reference laptop | W3 |
+| Single-threaded default | OpenMP is a build option, off by default; no scaling measurements | W3 |
+| BF16/FP16 GEMM unpacked and unblocked | They convert B on every use and have no cache blocking; speed not measured with the current protocol | W4 |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

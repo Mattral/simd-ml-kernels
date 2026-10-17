@@ -32,8 +32,7 @@
  *
  * 6. LOOP UNROLLING (2×)
  *    A 2× unroll in K exposes more ILP to the out-of-order scheduler while
- *    keeping the source code auditable. See §7 of DESIGN.md for the trade-off
- *    discussion vs higher unroll factors.
+ *    keeping the source code auditable. The unroll factor is not tuned.
  *
  * Compilation flags expected: -O3 -march=native -mfma
  */

@@ -37,7 +37,7 @@ C = simd_ml_kernels.sgemm(A, B)
 simd_ml_kernels.sgemm(A, B, C, alpha=2.0, beta=0.5)
 ```
 
-**Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 register tile, AVX2 FMA). See `docs/DESIGN.md §2–3`.
+**Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 register tile, AVX2 FMA). See `docs/DESIGN.md` §2.
 
 ### `GEMMConfig` — callable GEMM configuration object
 

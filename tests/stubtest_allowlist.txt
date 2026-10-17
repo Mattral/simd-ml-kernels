@@ -1,0 +1,5 @@
+# mypy.stubtest allowlist (CI: python -m mypy.stubtest simd_ml_kernels --allowlist tests/stubtest_allowlist.txt).
+# __main__ runs the CLI when imported, so stubtest cannot import it.
+simd_ml_kernels.__main__
+# pybind11 classes have metaclass pybind11_type, which a .pyi cannot name.
+simd_ml_kernels._core.GEMMConfig

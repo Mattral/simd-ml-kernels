@@ -1,243 +1,302 @@
-# simd-ml-kernels — Design Document
+# simd-ml-kernels — Design
 
-**Version**: 2.0  
-**Status**: Living document — updated as major architectural decisions are made.
+How the library is put together and why. Measured performance is in
+[BENCHMARKS.md](BENCHMARKS.md) (generated from committed JSON); this page gives
+derivations and reasons, not results. Commands, the repository map and the
+checklist for adding a kernel are in [AGENTS.md](../AGENTS.md).
 
----
-
-## 1. Project Goals
-
-simd-ml-kernels occupies a specific niche: a **pedagogically transparent yet
-engineering-complete** reference implementation of SIMD microkernels for ML.
-
-| Axis               | What we are                         | What we are not |
-|--------------------|-------------------------------------|-----------------|
-| Correctness        | Validated against NumPy/PyTorch     | A toy / untested sketch |
-| Performance        | Measured against OpenBLAS / PyTorch on named hardware (docs/BENCHMARKS.md) | A BLAS replacement |
-| Readability        | Commented intrinsics with rationale | Opaque assembly |
-| Usability          | `pip install`-able Python library   | An isolated demo |
+This file replaces `architecture.md`, `system_design.md` and `design/*.md`,
+which described the same code several times and had drifted from it (see the
+"Corrections" note at the end).
 
 ---
 
-## 2. Cache Blocking (Goto/BLIS Structure)
-
-### Why blocking matters
-
-A naïve triple-loop GEMM (i, j, k) accesses B in column-major order — one
-new cache line per inner iteration. For a 256×256 float32 matrix (256 KB),
-this causes L2/L3 thrashing and achieves < 5% of peak arithmetic throughput.
-
-### The five-loop structure
-
-We follow the Goto (2008) / BLIS decomposition:
+## 1. Layers
 
 ```
-for jc in 0..N step NC:          # fits Bc panel in L3
-  for pc in 0..K step KC:        # fits Bc panel in L2; Ac panel in L2
-    pack_B(B[pc:pc+KC, jc:jc+NC])
-    for ic in 0..M step MC:      # fits Ac panel in L2
-      pack_A(A[ic:ic+MC, pc:pc+KC])
-      for jr in 0..NC step NR:   # register tile N-loop
-        for ir in 0..MC step MR: # register tile M-loop
-          microkernel(A_packed, B_packed, C)  ← hot inner loop
+Python   simd_ml_kernels/__init__.py  (re-exports _core)   _cli.py (info | selftest | bench)
+           │
+pybind11 src/bindings/pybind_entry.cpp: dtype/shape/layout checks, GIL release, output allocation
+           │  calls the kernels directly
+Kernels  src/kernels/gemm/avx2_gemm_packed.cpp   FP32 GEMM used by sgemm (8×8 AVX2, 8×16 AVX-512)
+         src/kernels/gemm/{f16,bf16}_gemm.cpp     FP16- / BF16-input GEMM (unpacked, see §4)
+         src/kernels/avx_matmul.cpp               second FP32 GEMM (6×16 / 6×32), C++ only
+         src/kernels/intrinsic_gelu.cpp           GeLU, exact (erf) and tanh
+         src/kernels/activations/*.cpp            ReLU, SiLU, softmax, LayerNorm
+           │
+Shared   src/kernels/simd_math.hpp   fast_exp_avx2, tanh_avx2
+         src/kernels/cache_alloc.hpp 64-byte aligned allocation, prefetch helpers
+         src/dispatch/               CPUID/XGETBV feature detection, cache detection (leaf 4)
 ```
 
-### Tile size rationale
-
-| Constant | Value | Rationale |
-|----------|-------|-----------|
-| MR       | 8     | 8 YMM accumulators per row; one YMM broadcast per k-step |
-| NR       | 8     | 8 floats per YMM; 8 YMM accumulators per col |
-| KC       | 256   | Ac panel (MC×KC = 128×256×4B = 128 KB) fits in L2 |
-| MC       | 128   | Bc panel (KC×NC = 256×2048×4B = 2 MB) — see NC note |
-| NC       | 2048  | Large NC exploits L3; NC is deliberately large in avx2_gemm_packed |
-
-The two GEMM implementations (`avx_matmul.cpp` vs `avx2_gemm_packed.cpp`) use
-slightly different tile sizes, providing a useful comparison point. Both follow
-the same five-loop structure.
+Every Python entry point validates its arguments (`DTypeError` for dtype,
+`ArgumentError` for shape, contiguity, writeability and values), allocates the
+output if none was given, releases the GIL and calls one kernel. Kernels never
+throw and never allocate Python objects.
 
 ---
 
-## 3. AVX2 Register Blocking
+## 2. FP32 GEMM (`sgemm`)
 
-### avx_matmul.cpp: 6×16 register block
+`sgemm(A, B, C, alpha, beta)` computes `C = alpha·A·B + beta·C`, row-major,
+through `simd_ml::gemm::sgemm_packed`.
+
+### 2.1 Small matrices: no packing
+
+If `max(M, N, K) ≤ 128` (`SMALL_GEMM_THRESHOLD`), `sgemm_direct_avx2` runs
+instead: for each row of C and each 8-column strip, one YMM accumulator
+collects `Σ_p A[i][p]·B[p][j:j+8]` directly from the unpacked inputs. At
+N = 128, A + B + C are 192 KiB, inside the L2 of any recent core, so strided B
+reads hit in cache. The K loop of one strip is a single chain of dependent
+FMAs (one accumulator; GCC 13 emits one `vfmadd231ps` per iteration), so one
+strip alone runs at one FMA per 4-cycle latency, 4 of the 32 flop/cycle an
+AVX2 core can do. Only the out-of-order window overlaps neighbouring strips:
+the reference laptop measures 6.1 flop/cycle at N = 128, about a quarter of
+OpenBLAS (BENCHMARKS.md). A register-blocked kernel without packing is the
+first target of W3 (ROADMAP).
+
+### 2.2 Large matrices: Goto/BLIS 5 loops
 
 ```
-MR=6, NR=16 (two __m256 vectors wide)
-Accumulator registers: 12 YMM (6 rows × 2 columns)
-A broadcast:           1  YMM (set1_ps)
-B panel:               2  YMM
-Total:                15 / 16 YMM — leaves 1 for temporaries
+for jc in 0..N step NC:            B panel  KC×NC, packed once per (jc, pc)
+  for pc in 0..K step KC:
+    pack_b_panel(B[pc:pc+KC, jc:jc+NC])     → NR-wide column blocks
+    for ic in 0..M step MC:
+      pack_a_panel(A[ic:ic+MC, pc:pc+KC])   → row-major MC×KC
+      for jr in 0..NC step NR:              micro-panel of B: KC×NR
+        for ir in 0..MC step MR:
+          micro-kernel: C[ir:ir+MR, jr:jr+NR] += alpha · A_packed · B_packed
 ```
 
-### avx2_gemm_packed.cpp: 8×8 register block
+`beta` is applied to all of C once before the loops (`beta = 0` writes zeros
+and never reads C, so NaN in an uninitialised C does not propagate). Tail
+blocks (`mr < MR` or `nr < NR`) go through a scalar loop over the packed
+panels. Both packing buffers are allocated once per call; with OpenMP each
+thread has its own (`thread_local`) and the `jc` loop is parallel.
+
+Packed layouts:
 
 ```
-MR=8, NR=8 (one __m256 vector wide)
-Accumulator registers: 8 YMM
-A pointers:            8 scalar  (a0..a7[p])
-B panel:               1 YMM
-Total:                 9 + 8 scalar
+B_packed[(j / NR) * kc * NR + p * NR + (j % NR)] = B[p][j]   (zero-padded to NR)
+A_packed[i * kc + p]                              = A[i][p]
 ```
 
-The 6×16 layout in `avx_matmul.cpp` achieves better arithmetic intensity
-(12 FMAs per B-load versus 8) at the cost of a wider B panel.
+### 2.3 Blocking constants
+
+| Constant | Value | Footprint | Intended level |
+|---|---:|---|---|
+| MR × NR | 8 × 8 (AVX2), 8 × 16 (AVX-512) | 8 accumulator registers | registers |
+| KC × NR | 256 × 8 | 8 KiB (16 KiB for NR = 16) B micro-panel, reused for all MC/MR row blocks | L1 |
+| MC × KC | 128 × 256 | 128 KiB packed A | L2 |
+| KC × NC | 256 × 2048 | 2 MiB packed B | L3 (or a large L2) |
+
+They are compile-time constants chosen for a Skylake-class core (32 KiB L1D,
+256 KiB–1.25 MiB L2). On the reference laptop's Lion Cove P-core (48 KiB L1D,
+2.5 MiB L2, from CPUID leaf 4) the A panel uses 5% of L2. Deriving them from
+CPUID leaf 4 at run time is W3. `GEMMConfig(tile_m=..., ...)` accepts tile
+sizes but does not use them.
+
+### 2.4 Micro-kernels
+
+**8×8 AVX2** (`inner_kernel_8x8`). Per k-step: one 8-float B load, 8
+broadcasts of `A[i][p]` (`vbroadcastss` from memory, a load-port µop each) and
+8 FMAs into 8 independent YMM accumulators. K is unrolled by 4 with one
+`prefetcht0` per unrolled step, 4 k-steps (128 bytes) ahead in B; those 4
+k-steps read two cache lines of B, so software prefetches every second line
+and the hardware prefetcher has to fetch the others.
+
+- Latency: an FMA has 4 cycles latency and 2 ports issue one each per cycle,
+  so 4 × 2 = 8 independent accumulators is the minimum that keeps both ports
+  busy, with no slack for any other stall.
+- Loads: 9 load µops per 8 FMAs. A core with 2 load ports (Skylake, Coffee
+  Lake) needs 4.5 cycles per k-step for the loads but 4 for the FMAs, so it can
+  reach at most 8/9 of FMA peak. Lion Cove has 3 load ports and is not limited
+  by this.
+- Registers: 8 accumulators + 1 B vector + broadcasts fit in 16 YMM. The source
+  loads the 8 C rows before the K loop; GCC 13 at `-O3` keeps the K loop free
+  of stack accesses and spills 6 of those 8 C rows once, outside the loop
+  (`objdump` of `inner_kernel_8x8`).
+- Peak: 2 ports × 8 lanes × 2 flop = 32 flop/cycle for AVX2+FMA. BENCHMARKS.md
+  reports the measured flop/cycle next to OpenBLAS on the same core.
+
+**8×16 AVX-512** (`inner_kernel_8x16_avx512`). The same kernel with ZMM:
+one 16-float B load, 8 broadcasts, 8 FMAs. On a core with two 512-bit FMA
+units the peak is 64 flop/cycle, but 8 accumulators are still only
+the latency minimum, and the 32 ZMM registers are mostly unused: production
+SKX kernels keep 24–28 accumulators live (BLIS uses a 32×12 shape). Replacing
+it is W3.
+
+**6×16 AVX2 / 6×32 AVX-512** (`avx_matmul.cpp`, `simd_sgemm`). A second GEMM
+with MC = 64, KC = 256, NC = 64, alpha folded into `pack_A`, and 12
+accumulators (6 rows × 2 vectors). It is not reachable from Python; the C++
+tests and the `bench` harness use it. It allocates its packing buffers inside
+the `jc` loop.
+
+### 2.5 ISA selection inside `sgemm_packed`
+
+`sgemm_packed` uses the 8×16 kernel when the library was compiled with
+AVX-512F and `__builtin_cpu_supports("avx512f")` and `("avx512dq")` are true,
+unless the per-call `isa="avx2"` override is set (a `thread_local` restored by
+an RAII guard in the binding). `isa="avx512"` on a CPU without AVX-512F/DQ
+raises in the binding; `isa="scalar"` raises "not implemented".
 
 ---
 
-## 4. GeLU Kernel Design
+## 3. Elementwise kernels and normalization
 
-### Mathematical form
+All loops process 8 floats per iteration with unaligned loads (no alignment
+requirement on NumPy inputs).
 
-Two variants, matching `torch.nn.functional.gelu`:
+### 3.1 exp and tanh (`simd_math.hpp`)
+
+`fast_exp_avx2(z)`: clamp z to ±88.376, `k = floor(z·log2(e) + 0.5)`,
+`f = z − k·ln2` in two steps (Cody–Waite, ln2 split into a high part with
+trailing zero bits and a low correction), degree-6 Horner polynomial for
+`exp(f)` on |f| ≤ ln2/2 (Cephes coefficients), result `p(f)·2^k` built by
+writing `k + 127` into the exponent field.
+
+`tanh_avx2(y)`: clamp y to ±7.99, `e = exp(2y)`, `(e − 1)/(e + 1)` with the
+division replaced by `rcpps` (12 bits) and one Newton–Raphson step
+(`r·(2 − d·r)`, about 23 bits). There is no rational polynomial for tanh in the
+code (an earlier version of this document described one).
+
+### 3.2 GeLU (`intrinsic_gelu.cpp`)
+
+`gelu(x, approximate=...)` has the same two definitions as
+`torch.nn.functional.gelu`:
 
 ```
-approximate="none" (default):  GeLU(x) = 0.5 · x · [1 + erf(x/√2)]
-approximate="tanh":            GeLU(x) ≈ 0.5 · x · [1 + tanh(√(2/π) · (x + 0.044715·x³))]
+"none" (default)  0.5·x·(1 + erf(x/√2))
+"tanh"            0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))
 ```
 
-The exact path evaluates erf as a rational minimax approximation
-`x·P(x²)/Q(x²)` (deg 6 / deg 4 in x², XLA `ErfImpl32` coefficients) on x clamped
-to [−4, 4]: 11 FMA/MUL and one VDIVPS per 8 values, no table lookups. Measured
-error bounds are in `docs/api/python_api.md`. The relative throughput of the two
-variants is not measured yet; it is added with the benchmark protocol (ROADMAP).
-`gelu_forward_scalar` (libm `erff`) remains the scalar correctness reference.
+`erf_avx2` is a rational minimax approximation `x·P(x²)/Q(x²)` (degrees 6 and
+4 in x², XLA `ErfImpl32` coefficients) on x clamped to [−4, 4], with a true
+`vdivps`: the quotient feeds `1 + erf`, where 1–2 ulp of error in erf near ±1
+already dominates. For x < −10 both variants return −0 (|GeLU(−10)| =
+7.6e-23); neither formula reaches −1 exactly in float32, so without this −inf
+and very negative inputs would give large negative values. The last n mod 8
+elements use masked load/store, so every element gets the same arithmetic.
+The error bounds asserted by the tests are in the `gelu` docstring and
+`docs/api/python_api.md`.
 
-### Rational polynomial for tanh
+### 3.3 SiLU, ReLU
 
-```
-tanh(y) ≈ y · (c₁ + c₃·y² + c₅·y⁴)
-           ────────────────────────────
-           1  + d₂·y² + d₄·y⁴ + d₆·y⁶
-```
+SiLU uses `σ(x) = 0.5·(1 + tanh(x/2))` with `tanh_avx2`, which needs no
+`exp(−x)` and therefore cannot overflow; the scalar tail uses `1/(1 + exp(−x))`.
+ReLU is `max(x, 0)`.
 
-Coefficients (minimax fit over [−5, 5]):
+### 3.4 Softmax (`softmax_avx2.cpp`)
 
-| Coefficient | Value       |
-|-------------|-------------|
-| c₃          | −0.16035530 |
-| c₅          |  0.00533740 |
-| d₂          |  0.48057120 |
-| d₄          |  0.07985040 |
-| d₆          |  0.00587330 |
+Three passes over a row: max (with NaN and +inf detection on the integer bit
+patterns), `exp(x − max)` stored to the output with the sum accumulated in
+double, then a multiply by `1/sum`. A row that contains NaN or +inf, or whose
+entries are all −inf, returns NaN in every position, as `torch.softmax` does;
+a partially −inf (masked) row is normal. The non-finite checks use bit
+patterns because the file is compiled with `-ffast-math`, under which the
+compiler may delete `isnan`/`isinf` tests (§5).
 
-Division is replaced by `_mm256_rcp_ps` (≈ 12 bits) + one Newton–Raphson
-refinement step, reaching full FP32 accuracy (~23 bits) at 1.0 cycle
-throughput vs 5–9 cycles for true division.
+### 3.5 LayerNorm (`layer_norm_avx2.cpp`)
 
-**Measured:** GeLU(tanh) is within 1.5e-6 of the tanh formula in float64 on [−10, 10] (bound 2e-6, asserted in tests).
+Three passes: mean (float → double, summed in double), variance of `x − mean`
+(squared in float, summed in double), then `(x − mean)·inv_std` with optional
+γ and β. Summing in double keeps the mean exact enough for inputs with a large
+offset (tests use mean 50, std 100). LayerNorm is 0.82× PyTorch on the
+reference laptop (BENCHMARKS.md); a single-pass (Welford) or fused two-pass
+version is part of W3.
 
 ---
 
-## 5. Layer Normalization Design
+## 4. FP16- and BF16-input GEMM
 
-Layer Normalization (Ba et al., 2016) normalizes over the last dimension:
-
-```
-output_i = (x_i − μ) / √(σ² + ε) · γ_i + β_i
-```
-
-### Three-pass implementation
-
-1. **Mean pass**: AVX2 horizontal sum with float→double promotion to
-   avoid catastrophic cancellation.
-2. **Variance pass**: AVX2 vectorized (x − mean)² accumulation.
-3. **Normalize pass**: AVX2 vectorized multiply + optional gamma/beta FMA.
-
-The three-pass approach is chosen over Welford's online algorithm for
-pedagogical clarity; it produces simpler, easier-to-verify assembly.
-For very large n (>10⁶), a two-pass (combined variance+normalize) would
-reduce memory traffic — noted in ROADMAP.md.
+`sgemm_f16` (F16C `vcvtph2ps`) and `sgemm_bf16` (BF16 → FP32 is exact:
+zero-extend to 32 bits and shift left by 16) compute in FP32 and write FP32.
+Both use the unpacked, unblocked structure of §2.1 for every size, converting
+each B element every time it is used, with one accumulator per output strip
+and no cache blocking. Their speed is not in BENCHMARKS.md yet (not measured
+with the current protocol). Replacing them with conversion at pack time
+followed by the FP32 micro-kernel (and
+`vdpbf16ps` / VNNI paths where the hardware has them) is W4.
 
 ---
 
-## 6. Software Prefetching
+## 5. Compiler flags and floating point
 
-The GEMM microkernel issues software prefetch hints for the B panel:
+Today every kernel is compiled with `-O3 -march=native -mfma -ffast-math` and
+the test sources with `-O2 -march=native` (no fast-math). The tests link the
+same kernel objects that ship in the extension, so they test the shipped code.
+Consequences:
 
-```cpp
-prefetch_l1(b_ptr + 32);   // 4 iterations ahead in the K-loop
-```
+- A build is specific to the CPU it was built on (`-march=native`); a wheel
+  built on an AVX-512 machine fails with SIGILL on an AVX2-only CPU.
+- `-ffast-math` implies `-ffinite-math-only`: the compiler may assume no NaN or
+  Inf, which is why softmax tests special values on bit patterns. Importing the
+  module does not change the host process's FTZ/DAZ bits (GCC links
+  `crtfastmath.o` only into executables).
 
-This is a hint to pull the next cache line into L1 before it is needed.
-On Skylake-class CPUs, L2→L1 latency is ~12 cycles; an FMA throughput of
-0.5 cy/instruction means the kernel processes ~24 FMAs in that window —
-matching the 4-iteration unroll factor.
-
-**Prefetch distance tuning**: the constant `+32` (2 YMM vectors, 64 bytes,
-one cache line) is appropriate for Skylake. Zen 3/4 or Alder Lake may
-benefit from a larger or smaller distance. This is a known tuning opportunity.
-
----
-
-## 7. Explicitly Acknowledged Gaps vs Production BLAS
-
-| Gap                          | Impact (estimated)     | Future work |
-|------------------------------|------------------------|-------------|
-| C++ intrinsics vs assembly   | 5–15% overhead         | Optional; use libxsmm? |
-| Fixed tile sizes             | 10–20% suboptimal      | Empirical search / BLIS auto-tune |
-| No NUMA-aware allocation     | Negligible for 1 socket| Add for multi-socket |
-| No packing-skip for small N  | ~~GEMM slower than scalar below N≈128~~ **Fixed in v0.9**: `sgemm_direct_avx2` (plain AVX2 loop, no packing) dispatched automatically for `max(M,N,K) ≤ 128` | Done |
-| Single-threaded default      | Linear with core count | OpenMP (optional flag) |
+W2 replaces this with per-ISA translation units and explicit flags, keeps
+`-march=native` as an opt-in for local benchmarking, scopes `-ffast-math` to
+the files whose tests show it is safe, and adds a test that FTZ/DAZ are
+unchanged after import (ROADMAP).
 
 ---
 
-## 8. `-ffast-math` Policy
+## 6. Runtime CPU detection
 
-The performance build uses `-ffast-math`. This permits:
-- Reassociation of FP operations (may change rounding order)
-- Unsafe math optimizations (NaN/Inf behaviour undefined)
+`CpuFeatures::detect()` (`gemm_dispatcher.cpp`) reads CPUID leaves 1 and 7 and
+XCR0 via XGETBV: AVX state needs XCR0 bits 1–2, AVX-512 additionally bits 5–7.
+F16C and AVX512_BF16 availability include these OS checks. `detect_caches()`
+reads CPUID leaf 4 (Intel) or 0x8000001D (AMD) for the core the calling thread
+runs on; on hybrid CPUs P- and E-cores report different caches.
 
-This is **appropriate for ML inference** where:
-- Inputs are pre-validated (no NaN/Inf expected)
-- Sub-ULP rounding differences do not affect model accuracy
-- The speed gain (5–15%) is material
-
-The precision test library is built **without** `-ffast-math` to validate
-correctness under IEEE 754 semantics.
+`detected_isa()` reports `"avx512"` or `"avx2"` (from `sgemm_packed`'s own
+choice, §2.5), `"sse42"` or `"scalar"`. The bindings call the AVX2 kernels
+directly, so today the extension requires AVX2 + FMA at run time.
 
 ---
 
-## 9. Python Binding Design
+## 7. Python bindings
 
-Key decisions in `pybind_entry.cpp`:
-
-1. **GIL release**: `py::gil_scoped_release release;` before every kernel
-   call. This allows Python's threading module to schedule other threads
-   during computation, important for async inference servers.
-
-2. **Zero-copy**: `py::array_t<float, py::array::c_contiguous>` gives
-   direct pointer access to the NumPy buffer — no copies.
-
-3. **Shape validation at the Python layer**: clearer errors than catching
-   undefined behaviour inside the kernel.
-
-4. **C allocation on None**: `sgemm(A, B)` without a C argument allocates
-   a new output array, matching the NumPy `@` operator ergonomics.
+- **Zero copy.** Inputs must already be float32 (float16 / BF16 bit patterns
+  for the low-precision GEMMs) and C-contiguous; nothing is converted
+  silently. A caller-supplied `C` must be float32, C-contiguous, writeable and
+  `[M, N]`; it is written in place (an earlier version cast it, wrote into a
+  hidden copy and left the caller's array unchanged).
+- **GIL.** Released for the duration of each kernel call.
+- **Errors.** `DTypeError(TypeError, RuntimeError)` and
+  `ArgumentError(ValueError, RuntimeError)`; the `RuntimeError` base keeps
+  pre-0.3 `except RuntimeError` code working until 0.5.0.
+- **Stubs.** `python/simd_ml_kernels/_core.pyi`; CI runs `mypy.stubtest` for
+  names and `tests/test_stubs.py` for parameter names and defaults.
 
 ---
 
-## 10. CI/CD Architecture
+## 8. CI
 
-Four GitHub Actions workflows:
-
-| Workflow          | Trigger                | Purpose |
-|-------------------|------------------------|---------|
-| `ci.yml`          | Every push / PR        | Build + C++ tests + Python precision tests |
-| `build-and-test.yml` | Push to main        | Focused build validation |
-| `bench.yml`       | Weekly (Sunday 4 AM)   | Statistical benchmark + regression gate |
-| `guardrail.yml`   | Every push / PR        | Static analysis + security scan |
-
-The bench workflow uses `bench_stat` (not `bench`) for statistical rigour:
-30 measurement repetitions, 95% confidence intervals, JSON output, and
-committed, metadata-complete results (`python -m simd_ml_kernels bench --json`).
+| Workflow | Trigger | Jobs |
+|---|---|---|
+| `ci.yml` | push to main, pull requests | C++ build + ctest (GCC 12, Clang 15, GCC 13); Python 3.10–3.12: install, `selftest`, pytest (with PyTorch CPU), stubtest, examples, bench CLI smoke run, generated tables match JSON; ASan + UBSan (Clang 15) |
+| `build-and-test.yml` | push to main, pull requests | GCC 12 with OpenBLAS-linked harnesses; OpenMP build; ASan + UBSan; macOS arm64 scalar build + ctest |
+| `bench.yml` | weekly | `python -m simd_ml_kernels bench --json` on a shared runner, uploaded as an artifact; not used for any claim |
+| `guardrail.yml` | push, pull requests, weekly | clang-tidy, pip-audit; report-only |
 
 ---
 
-*References*
+## Corrections to the documents this file replaces
 
-- Goto, K. & van de Geijn, R. (2008). Anatomy of High-Performance Matrix Multiplication. *ACM TOMS* 34(3).
-- Van Zee, F.G. & van de Geijn, R. (2015). BLIS: A Framework for Rapidly Instantiating BLAS Functionality. *ACM TOMS* 41(3).
-- Hendrycks, D. & Gimpel, K. (2016). Gaussian Error Linear Units (GELUs). *arXiv:1606.08415*.
-- Ba, J.L. et al. (2016). Layer Normalization. *arXiv:1607.06450*.
-- Intel. *Intrinsics Guide*. https://www.intel.com/content/www/us/en/docs/intrinsics-guide/
+For readers of older revisions: the merged-away files stated that GeLU's tanh
+is a rational polynomial (it is exp-based, §3.1); that the B panel KC × NC is
+8 KiB and L2-resident (it is 2 MiB; the 8 KiB block is the KC × NR micro-panel,
+§2.3); that the 8×8 kernel's peak is 16 flop/cycle and its FMA chain 12 cycles
+(32 flop/cycle and 4 cycles, §2.4); that the prefetch distance is 64 bytes (128,
+§2.4); that `sgemm` goes through the dispatch registry (the binding calls
+`sgemm_packed` directly, §6); and that the C++ precision tests run kernels built
+without `-ffast-math` (they link the fast-math objects, §5).
+
+---
+
+References: Goto & van de Geijn, *Anatomy of High-Performance Matrix
+Multiplication*, ACM TOMS 34(3), 2008. Van Zee & van de Geijn, *BLIS*, ACM TOMS
+41(3), 2015. Hendrycks & Gimpel, *GELUs*, arXiv:1606.08415. Ba et al., *Layer
+Normalization*, arXiv:1607.06450. Intel 64 and IA-32 SDM vol. 2A (CPUID,
+XGETBV).

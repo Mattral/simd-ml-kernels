@@ -7,7 +7,7 @@ namespace gemm {
 
 // ─── Tile/blocking constants ──────────────────────────────────────────────────
 // These constants are derived from typical Intel client CPU cache hierarchy.
-// See docs/DESIGN.md §2 for the full derivation.
+// See docs/DESIGN.md §2.3 for where each block is meant to live.
 //
 //   MR=8, NR=8  — micro-kernel register block: 8 YMM accumulators (one per row),
 //                 1 YMM for B panel → 9/16 YMM used, leaves headroom for prefetch
@@ -24,7 +24,7 @@ static constexpr int NC = 2048;
 // When max(M,N,K) ≤ SMALL_GEMM_THRESHOLD, sgemm_packed dispatches to
 // sgemm_direct_avx2 which skips panel packing entirely.
 //
-// Rationale (see BENCHMARKS.md §Positioning vs OpenBLAS and DESIGN.md §7):
+// Rationale (see docs/DESIGN.md §2.1):
 //   At N=64, the KC×NC packing buffer is ≈2 MB regardless of actual N.
 //   Allocating and filling it costs more time than the arithmetic itself,
 //   so sgemm_packed at N=64 runs at ~0.7× the speed of a plain AVX2 loop.

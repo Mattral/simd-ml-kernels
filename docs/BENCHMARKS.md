@@ -76,8 +76,7 @@ Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, s
 ## What is not measured yet
 
 - AVX-512 performance: neither the laptop (Lunar Lake) nor the workstation
-  (i9-9900, Coffee Lake) has AVX-512. AVX-512 code is checked for correctness
-  under Intel SDE only.
+  (i9-9900, Coffee Lake) has AVX-512.
 - Multi-threaded GEMM scaling (W3).
 - The workstation (i9-9900).
 - Fraction of theoretical peak: the per-cycle numbers above are measured, but
@@ -85,6 +84,17 @@ Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, s
 
 ## C++ harnesses
 
-`build/bench_stat` (wall-clock statistics, optional in-process OpenBLAS with
-`-DBENCH_OPENBLAS=ON`) and `build/bench` (RDTSC) remain for kernel
-development; published numbers come from `python -m simd_ml_kernels bench`.
+Two executables remain for kernel development; published numbers come only
+from `python -m simd_ml_kernels bench`.
+
+- `build/bench_stat`: `std::chrono::steady_clock`, warm-up plus N timed
+  repetitions, min / mean / median / standard deviation / 95% confidence
+  interval (t-distribution), JSON with `--output`. It pins itself with
+  `sched_setaffinity` on Linux. With `-DBENCH_OPENBLAS=ON` it links the system
+  BLAS and times it in the same process.
+- `build/bench`: RDTSC with `lfence; rdtsc` … `rdtscp; lfence`, minimum over
+  the repetitions. The TSC runs at a fixed reference frequency, not the core
+  clock, so its cycle counts are reference cycles. Its `util%` column is
+  GFLOP/s divided by 16 flop/cycle × TSC GHz: half the two-FMA-port AVX2 peak,
+  at a frequency the core may not be running at. Use it to compare two kernels
+  in one run, not as a fraction of peak.
