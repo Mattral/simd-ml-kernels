@@ -5,7 +5,7 @@ All kernels operate on float32 NumPy arrays and release the GIL during
 computation. Arrays must be C-contiguous; call np.ascontiguousarray() if needed.
 """
 
-from typing import Optional
+from typing import Any, Optional
 import numpy as np
 from numpy.typing import NDArray
 
@@ -41,13 +41,10 @@ def sgemm(
     C     : ndarray[float32], shape [M, N], optional (allocated if None)
     alpha : float scalar, default 1.0
     beta  : float scalar, default 0.0 (0 = overwrite C)
-    isa   : str, default "" — forces this call to use a specific kernel:
-            "" (auto-detect, default), "avx2", or "avx512". Requesting
-            "avx512" on hardware without AVX-512F+DQ raises RuntimeError
-            (check avx512_available() first). "scalar" is a recognized
-            value but raises RuntimeError ("not yet implemented") rather
-            than silently falling back. This override applies only to
-            this call, not subsequent ones.
+    isa   : str, default "" — the kernels chosen for this CPU. "scalar",
+            "avx2" or "avx512" run that kernel table for this call only;
+            one this build or CPU cannot run raises RuntimeError
+            (build_info()["isa_usable"] lists the ones that work).
 
     Returns
     -------
@@ -69,8 +66,8 @@ def sgemm_f16(
     A and B must have dtype=np.float16 (IEEE 754 half-precision, 16-bit).
     Output C is always float32 — FP16 accumulation loses precision at K > 64.
 
-    Requires F16C instructions (Haswell+, AMD Piledriver+). Check
-    f16c_available() before calling; raises RuntimeError if absent.
+    Runs on every CPU: F16C conversion in the AVX2 kernels, exact software
+    conversion in the scalar ones.
 
     Parameters
     ----------
@@ -86,10 +83,9 @@ def sgemm_f16(
 
     Example
     -------
-    >>> if simd_ml_kernels.f16c_available():
-    ...     A = np.random.randn(64, 256).astype(np.float16)
-    ...     B = np.random.randn(256, 64).astype(np.float16)
-    ...     C = simd_ml_kernels.sgemm_f16(A, B)   # float32 result
+    >>> A = np.random.randn(64, 256).astype(np.float16)
+    >>> B = np.random.randn(256, 64).astype(np.float16)
+    >>> C = simd_ml_kernels.sgemm_f16(A, B)   # float32 result
     """
     ...
 
@@ -162,12 +158,12 @@ def gelu_inplace(x: NDArray[np.float32], approximate: str = "none") -> None:
 
 
 def relu(x: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Return ReLU(x) = max(0, x) computed with AVX2 vectorization."""
+    """Return ReLU(x) = max(0, x)."""
     ...
 
 
 def silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Return SiLU(x) = x * sigmoid(x) using AVX2 vectorization."""
+    """Return SiLU(x) = x * sigmoid(x)."""
     ...
 
 
@@ -214,34 +210,31 @@ def get_num_threads() -> int:
 
 # ─── Diagnostics ─────────────────────────────────────────────────────────────
 
-def build_info() -> dict[str, str | bool]:
-    """Return a dict with compiled ISA, FMA support, alignment, and build timestamp."""
+def build_info() -> dict[str, Any]:
+    """Build details: version, git_commit, compiler, isa_compiled and isa_usable
+    (space-separated table names), isa_flags (table -> compiler flags),
+    runtime_isa (the active table), kernel_flags and sgemm_tile (of that
+    table), openmp, alignment, build_timestamp."""
     ...
 
 
 def detected_isa() -> str:
-    """Return the runtime-detected ISA label: 'avx512', 'avx2', 'sse42', or 'scalar'."""
+    """Return the kernel table every call uses: 'avx512', 'avx2' or 'scalar'."""
     ...
 
 
 def avx512_available() -> bool:
     """
-    Return True if this CPU supports AVX-512F+DQ (required by sgemm_packed's
-    8x16 micro-kernel), independent of any isa= override on a given call.
-
-    Check this before requesting isa='avx512' explicitly to avoid a
-    RuntimeError on unsupported hardware.
+    Return True if this build includes the AVX-512 kernels and this CPU and
+    OS can run them (AVX-512F/DQ/BW/VL, OS ZMM state).
     """
     ...
 
 
 def f16c_available() -> bool:
     """
-    Return True if this CPU supports F16C instructions (_mm256_cvtph_ps).
-
-    F16C is available on Intel Haswell (2013) and later, and on AMD Piledriver
-    (2012) and later — essentially all CPUs that also have AVX2. Check this
-    before calling sgemm_f16() to get a clean error instead of SIGILL.
+    Return True if this CPU supports F16C (vcvtph2ps), which the AVX2 kernels
+    require. sgemm_f16() runs without it (scalar kernels).
     """
     ...
 
@@ -272,8 +265,7 @@ def sgemm_bf16(
     Accepts uint16 dtype (explicit bit-cast) or bfloat16 dtype (numpy>=2.0 / ml_dtypes).
     Output C is always float32.
 
-    Requires only AVX2 (Haswell+) — no special AVX-512 BF16 flag needed.
-    BF16→FP32 uses the zero-extend+shift trick (3 integer instructions per 8 values).
+    Runs on every CPU. BF16→FP32 is exact: zero-extend and shift left by 16.
 
     Parameters
     ----------
@@ -299,3 +291,4 @@ def is_aligned(arr: np.ndarray) -> bool:
 
 def _measure_core_ghz(seconds: float = 0.05) -> float: ...
 def _cpu_caches() -> list[dict[str, int | str]]: ...
+def _set_isa(isa: str) -> None: ...

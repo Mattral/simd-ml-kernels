@@ -31,6 +31,10 @@
 #include "../src/kernels/gemm/bf16_gemm.hpp"
 #include "../src/kernels/gemm/naive_gemm.hpp"
 #include "../src/kernels/cache_alloc.hpp"
+#include "kernel_tables.hpp"
+
+// The table the test functions below call into (set by the runner).
+static const simd_ml::KernelTable* T = nullptr;
 
 #ifdef __AVX2__
 #  include <immintrin.h>
@@ -101,7 +105,7 @@ static bool test_bf16(int M, int N, int K,
                 beta,  C_ref.get(), N);
 
     // Kernel under test
-    simd_ml::gemm::sgemm_bf16_avx2(M, N, K,
+    T->sgemm_bf16(M, N, K,
                                     alpha, A_bf16.get(), K, B_bf16.get(), N,
                                     beta,  C_got.get(), N);
 
@@ -140,70 +144,74 @@ int run_bf16_gemm_tests() {
     printf("  bf16_avx512bf16_available(): %s (vdpbf16ps packing path: future v1.0)\n",
            vdp ? "true" : "false");
 
-    bool all_pass = true;
+    const bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
+        T = &t;
+        bool ok = true;
 
-    printf(" Square sizes (α=1, β=0):\n");
-    for (int s : {1, 7, 8, 9, 16, 32, 64, 128}) {
-        all_pass &= test_bf16(s, s, s);
-    }
-
-    printf(" Non-square / tail cases:\n");
-    all_pass &= test_bf16(1,  64, 128);   // batch=1 inference (single row)
-    all_pass &= test_bf16(4,  64, 256);   // small batch
-    all_pass &= test_bf16(13, 31,  37);   // all tails in NR=8 loop
-    all_pass &= test_bf16(32,  7,  17);   // wide M, narrow N
-
-    printf(" Alpha/beta scaling:\n");
-    all_pass &= test_bf16(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/42);
-    all_pass &= test_bf16(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/55);
-
-    printf(" beta=0 must zero C (not propagate NaN/inf):\n");
-    {
-        // Fill C with +infinity; after beta=0 call all elements must be finite.
-        int Msz = 8, Nsz = 8, Ksz = 8;
-        auto A = make_aligned_array<uint16_t>(Msz * Ksz);
-        auto B = make_aligned_array<uint16_t>(Ksz * Nsz);
-        auto C = make_aligned_array<float>(Msz * Nsz);
-        for (int i = 0; i < Msz * Ksz; ++i) A[i] = f32_to_bf16(0.1f);
-        for (int i = 0; i < Ksz * Nsz; ++i) B[i] = f32_to_bf16(0.1f);
-        for (int i = 0; i < Msz * Nsz; ++i)
-            C[i] = std::numeric_limits<float>::infinity();
-
-        simd_ml::gemm::sgemm_bf16_avx2(Msz, Nsz, Ksz,
-                                        1.0f, A.get(), Ksz, B.get(), Nsz,
-                                        0.0f, C.get(), Nsz);
-        bool finite_ok = true;
-        for (int i = 0; i < Msz * Nsz; ++i)
-            if (!std::isfinite(C[i])) { finite_ok = false; break; }
-        printf("  bf16 beta=0 overwrites inf:  %s\n", finite_ok ? "PASS" : "FAIL");
-        all_pass &= finite_ok;
-    }
-
-    printf(" BF16→FP32 bit-pattern correctness (unit test for conversion helper):\n");
-    {
-        // Verify the conversion by checking known BF16 values:
-        //   BF16 = 0x3F80 → FP32 0x3F800000 = 1.0f
-        //   BF16 = 0x4000 → FP32 0x40000000 = 2.0f
-        //   BF16 = 0x0000 → FP32 0x00000000 = 0.0f
-        //   BF16 = 0x7F80 → FP32 0x7F800000 = +inf
-        struct { uint16_t bf16; float expected; } cases[] = {
-            {0x3F80, 1.0f},
-            {0x4000, 2.0f},
-            {0x0000, 0.0f},
-            {0xBF80, -1.0f},  // sign bit
-        };
-        bool conv_ok = true;
-        for (auto& c : cases) {
-            float got = bf16_to_f32(c.bf16);
-            if (got != c.expected) {
-                printf("    bf16=0x%04X: expected %.1f got %.1f  FAIL\n",
-                       c.bf16, c.expected, got);
-                conv_ok = false;
-            }
+        printf(" Square sizes (α=1, β=0):\n");
+        for (int s : {1, 7, 8, 9, 16, 32, 64, 128}) {
+            ok &= test_bf16(s, s, s);
         }
-        printf("  BF16 bit-pattern unit tests:  %s\n", conv_ok ? "PASS" : "FAIL");
-        all_pass &= conv_ok;
-    }
+
+        printf(" Non-square / tail cases:\n");
+        ok &= test_bf16(1,  64, 128);   // batch=1 inference (single row)
+        ok &= test_bf16(4,  64, 256);   // small batch
+        ok &= test_bf16(13, 31,  37);   // all tails in NR=8 loop
+        ok &= test_bf16(32,  7,  17);   // wide M, narrow N
+
+        printf(" Alpha/beta scaling:\n");
+        ok &= test_bf16(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/42);
+        ok &= test_bf16(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/55);
+
+        printf(" beta=0 must zero C (not propagate NaN/inf):\n");
+        {
+            // Fill C with +infinity; after beta=0 call all elements must be finite.
+            int Msz = 8, Nsz = 8, Ksz = 8;
+            auto A = make_aligned_array<uint16_t>(Msz * Ksz);
+            auto B = make_aligned_array<uint16_t>(Ksz * Nsz);
+            auto C = make_aligned_array<float>(Msz * Nsz);
+            for (int i = 0; i < Msz * Ksz; ++i) A[i] = f32_to_bf16(0.1f);
+            for (int i = 0; i < Ksz * Nsz; ++i) B[i] = f32_to_bf16(0.1f);
+            for (int i = 0; i < Msz * Nsz; ++i)
+                C[i] = std::numeric_limits<float>::infinity();
+
+            T->sgemm_bf16(Msz, Nsz, Ksz,
+                                            1.0f, A.get(), Ksz, B.get(), Nsz,
+                                            0.0f, C.get(), Nsz);
+            bool finite_ok = true;
+            for (int i = 0; i < Msz * Nsz; ++i)
+                if (!std::isfinite(C[i])) { finite_ok = false; break; }
+            printf("  bf16 beta=0 overwrites inf:  %s\n", finite_ok ? "PASS" : "FAIL");
+            ok &= finite_ok;
+        }
+
+        printf(" BF16→FP32 bit-pattern correctness (unit test for conversion helper):\n");
+        {
+            // Verify the conversion by checking known BF16 values:
+            //   BF16 = 0x3F80 → FP32 0x3F800000 = 1.0f
+            //   BF16 = 0x4000 → FP32 0x40000000 = 2.0f
+            //   BF16 = 0x0000 → FP32 0x00000000 = 0.0f
+            //   BF16 = 0x7F80 → FP32 0x7F800000 = +inf
+            struct { uint16_t bf16; float expected; } cases[] = {
+                {0x3F80, 1.0f},
+                {0x4000, 2.0f},
+                {0x0000, 0.0f},
+                {0xBF80, -1.0f},  // sign bit
+            };
+            bool conv_ok = true;
+            for (auto& c : cases) {
+                float got = bf16_to_f32(c.bf16);
+                if (got != c.expected) {
+                    printf("    bf16=0x%04X: expected %.1f got %.1f  FAIL\n",
+                           c.bf16, c.expected, got);
+                    conv_ok = false;
+                }
+            }
+            printf("  BF16 bit-pattern unit tests:  %s\n", conv_ok ? "PASS" : "FAIL");
+            ok &= conv_ok;
+        }
+        return ok;
+    });
 
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;

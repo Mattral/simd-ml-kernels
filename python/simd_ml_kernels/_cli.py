@@ -189,26 +189,33 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
         ("softmax", _softmax_check),
         ("layer_norm", _layer_norm_check),
     ]
-    if sk.f16c_available():
-        checks.insert(1, ("sgemm_f16", _gemm_check(lambda a, b: sk.sgemm_f16(a, b), _as_f16)))
+    checks.insert(1, ("sgemm_f16", _gemm_check(lambda a, b: sk.sgemm_f16(a, b), _as_f16)))
     return checks
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
     d = info_dict()
+    usable = sk.build_info()["isa_usable"].split()
+    active = sk.detected_isa()
     print(f"simd_ml_kernels {d['package']['version']} ({d['build']['git_commit']}), "
-          f"{d['cpu']['model']}, runtime ISA {d['cpu']['runtime_isa']}")
+          f"{d['cpu']['model']}, kernel tables {' '.join(usable)} (active: {active})")
     failed = 0
-    for name, check in selftest_checks():
-        try:
-            worst, bound, detail = check()
-            ok = worst <= bound
-        except Exception as exc:  # noqa: BLE001 - report every failure, keep going
-            worst, ok, detail = float("nan"), False, f"{type(exc).__name__}: {exc}"
-        failed += not ok
-        print(f"  {'PASS' if ok else 'FAIL'}  {name:<13} {worst:8.3f}  {detail}")
-    if not sk.f16c_available():
-        print("  SKIP  sgemm_f16     (CPU has no F16C)")
+    try:
+        # Every table this CPU can run, not only the active one: a scalar or
+        # AVX2 path that is never selected here may be the one another CPU uses.
+        for isa in usable:
+            sk._core._set_isa(isa)
+            print(f" [{isa}]")
+            for name, check in selftest_checks():
+                try:
+                    worst, bound, detail = check()
+                    ok = worst <= bound
+                except Exception as exc:  # noqa: BLE001 - report every failure, keep going
+                    worst, ok, detail = float("nan"), False, f"{type(exc).__name__}: {exc}"
+                failed += not ok
+                print(f"  {'PASS' if ok else 'FAIL'}  {name:<13} {worst:8.3f}  {detail}")
+    finally:
+        sk._core._set_isa(active)
     print("selftest:", "FAILED" if failed else "passed")
     return 1 if failed else 0
 

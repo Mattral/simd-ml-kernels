@@ -23,6 +23,18 @@ under **Changed** with a migration note.
   corrected (listed at the end of that file).
 - CI checks `_core.pyi` against the module: `mypy.stubtest` for names,
   `tests/test_stubs.py` for parameter names and defaults.
+- **Portable builds with runtime dispatch.** Each instruction set has its own
+  translation units compiled with explicit flags (scalar baseline;
+  `-mavx2 -mfma -mf16c`; `-mavx512f -mavx512dq -mavx512bw -mavx512vl`)
+  instead of compiling everything with `-march=native`. One kernel table per
+  ISA is chosen at first use from CPUID + XGETBV, so a build runs on any
+  x86-64 CPU (and, scalar only, on other architectures). Every kernel has a
+  scalar version. `-DSIMD_ML_NATIVE=ON` restores `-march=native` for local
+  benchmarking.
+- `SIMD_ML_ISA=scalar|avx2|avx512` (environment) caps the kernel table.
+- `build_info()` gains `isa_usable`, `isa_flags` and `sgemm_tile`.
+- `selftest` and the Python tests check every kernel table the CPU can run;
+  ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
 - **Renamed to simd-ml-kernels.** Repository and PyPI distribution:
@@ -68,12 +80,32 @@ under **Changed** with a migration note.
 - `set_num_threads(n > 1)` in a build without OpenMP now emits a
   `RuntimeWarning` instead of being silently ignored; `build_info()["openmp"]`
   reports whether OpenMP is compiled in.
+- `sgemm(..., isa="scalar")` runs the scalar kernel instead of raising
+  "not implemented"; an `isa=` the build or CPU cannot run raises
+  `RuntimeError` as before, and `isa="cuda"`-style typos raise `ArgumentError`.
+- `sgemm_f16` runs on CPUs without F16C (scalar kernel) instead of raising.
+- `build_info()["isa_compiled"]` lists the kernel tables in the build
+  (`"scalar avx2 avx512"`) instead of one compile-time label;
+  `kernel_flags` are the active table's flags; the `fma` key is removed.
+  `detected_isa()` no longer returns `"sse42"` (such CPUs use `"scalar"`).
+- C++: `kernel_registry.hpp` (`dispatch::get_kernels`, `dispatch::sgemm`,
+  `dispatch::detected_isa`) is replaced by `dispatch/kernels.hpp`
+  (`kernels()`, `kernels_for()`); `gemm::set_gemm_isa_override`,
+  `get_gemm_isa_override`, `gemm_packed_isa_is_avx512`,
+  `gemm_packed_avx512_hardware_available` and `activations::gelu_avx2` are
+  removed. `gemm::sgemm_packed` still exists and dispatches.
 
 ### Removed
 - Stray `gitignore` (duplicate of `.gitignore`) and `poetry.lock` (the build
   backend is scikit-build-core; nothing used it).
 
 ### Fixed
+- CMake detected x86-64 from `CMAKE_SYSTEM_PROCESSOR`, which is empty when
+  `PROCESSOR_ARCHITECTURE` is not set (seen in an MSYS2 shell); the build then
+  silently became scalar-only and the extension failed to link. The compiler's
+  own target macros are used now.
+- The C++ tests no longer download doctest at configure time: it was fetched
+  but never used (`test_doctest.cpp` was not compiled; now removed).
 - `gelu(-inf)` returned NaN; it now returns -0 (x < -10 returns -0). The last
   `n % 8` elements of `gelu` were computed with libm `tanhf` instead of the
   vector kernel, so a value's result depended on its position; the tail now

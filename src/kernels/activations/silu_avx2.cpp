@@ -14,19 +14,20 @@
  * stable for all finite x. It avoids exp(−x) overflow for large positive x.
  */
 
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "silu_avx2.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
+#endif
+
 #include "activations.hpp"
+#include <immintrin.h>
 #include "../simd_math.hpp"
 #include <cmath>
 #include <cstddef>
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#endif
 
 namespace activations {
 
 void silu_avx2(const float* input, float* output, int n) {
-#ifdef __AVX2__
     const __m256 half = _mm256_set1_ps(0.5f);
 
     int i = 0;
@@ -49,14 +50,6 @@ void silu_avx2(const float* input, float* output, int n) {
         float sig   = 1.0f / (1.0f + std::exp(-x));
         output[i]   = x * sig;
     }
-#else
-    // Scalar fallback
-    for (int i = 0; i < n; ++i) {
-        float x   = input[i];
-        float sig = 1.0f / (1.0f + std::exp(-x));
-        output[i] = x * sig;
-    }
-#endif
 }
 
 } // namespace activations

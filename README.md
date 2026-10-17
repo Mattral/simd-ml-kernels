@@ -35,8 +35,10 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
 | **LayerNorm** | `activations/layer_norm_avx2.cpp` | 3-pass, double accumulation, optional γ/β |
 
-The Python extension currently requires AVX2 + FMA at run time; scalar
-fallbacks for every kernel and runtime ISA dispatch are planned (ROADMAP).
+Every kernel has a scalar, an AVX2 and (GEMM only) an AVX-512 version, each
+compiled separately with its own flags; the one to use is chosen at run time
+from CPUID and XGETBV (docs/DESIGN.md §5–6). The extension runs on any x86-64
+CPU and, scalar only, on other architectures.
 
 ---
 
@@ -71,7 +73,7 @@ y = sk.layer_norm(x, gamma=g, beta=b)  # LayerNorm with affine parameters
 
 # Diagnostics
 print(sk.build_info())    # ISA, FMA support, build timestamp
-print(sk.detected_isa())  # 'avx2', 'avx512', 'scalar'
+print(sk.detected_isa())  # kernel table in use: 'avx512', 'avx2' or 'scalar'
 ```
 
 ### C++ (standalone bench)
@@ -146,7 +148,7 @@ taskset -c 2 python -m simd_ml_kernels bench
 | CMake | ≥ 3.22 |
 | Python | ≥ 3.9 (for Python extension) |
 | pybind11 | ≥ 2.11 (for Python extension) |
-| AVX2 + FMA | Required for the SIMD paths |
+| AVX2 + FMA + F16C | At run time, for the AVX2 kernels (scalar kernels otherwise) |
 
 Optional: `libopenblas-dev` for `./bench_stat` baseline comparisons (`-DBENCH_OPENBLAS=ON`).
 

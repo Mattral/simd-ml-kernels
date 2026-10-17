@@ -19,34 +19,25 @@
  * allocation; it is NOT implemented here. The AVX2 zero-extend path is the
  * pragmatic choice for the batch sizes (1–128) this library targets in inference.
  *
- * bf16_avx512bf16_available() provides the runtime check for callers that want
- * to gate on vdpbf16ps availability (e.g., user-space dispatch in future).
+ * bf16_avx512bf16_available() (dispatch.cpp) reports whether the CPU has
+ * vdpbf16ps.
  */
 
 #include "bf16_gemm.hpp"
 #include "avx2_gemm_packed.hpp"  // for NR = 8 constant
-#include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
 #include <cstring>
 
-#ifdef __AVX2__
-#  include <immintrin.h>
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "bf16_gemm.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
 #endif
+#include <immintrin.h>
 
 namespace simd_ml {
 namespace gemm {
 
-// ─── Runtime capability check ─────────────────────────────────────────────────
-bool bf16_avx512bf16_available() noexcept {
-    // CPUID + XGETBV via CpuFeatures: includes the OS ZMM-state check, and
-    // avoids feature strings that older Clang versions reject.
-    static const bool available = dispatch::CpuFeatures::detect().has_avx512bf16;
-    return available;
-}
-
 // ─── BF16→FP32 conversion helpers (AVX2 integer, no F16C) ───────────────────
-#ifdef __AVX2__
 
 /**
  * bf16_to_fp32_scalar — convert one BF16 (uint16_t bit pattern) to float.
@@ -80,7 +71,6 @@ static inline __m256 bf16_to_fp32_x8(const uint16_t* ptr) noexcept {
     return _mm256_castsi256_ps(fp32bits);
 }
 
-#endif  // __AVX2__
 
 // ─── sgemm_bf16_avx2 implementation ──────────────────────────────────────────
 void sgemm_bf16_avx2(int M, int N, int K,
@@ -89,13 +79,6 @@ void sgemm_bf16_avx2(int M, int N, int K,
                      const uint16_t* __restrict__ B, int ldb,
                      float beta,
                      float*          __restrict__ C, int ldc) noexcept {
-#ifndef __AVX2__
-    // Unreachable: SIMD_ML_ENABLE_X86 requires AVX2. Present as a safety stub.
-    (void)M; (void)N; (void)K; (void)alpha;
-    (void)A; (void)lda; (void)B; (void)ldb;
-    (void)beta; (void)C; (void)ldc;
-    return;
-#else
     // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
     // The beta pass below runs and the K-loops do nothing.
     if (M <= 0 || N <= 0 || K < 0) return;
@@ -167,7 +150,6 @@ void sgemm_bf16_avx2(int M, int N, int K,
             c_row[j] += alpha * sum;
         }
     }
-#endif  // __AVX2__
 }
 
 }  // namespace gemm

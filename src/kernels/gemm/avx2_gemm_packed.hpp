@@ -91,52 +91,6 @@ void inner_kernel_8x16_avx512(const float* A_packed,
                               int          k_rem,
                               float        alpha) noexcept;
 
-/**
- * gemm_packed_isa_is_avx512 — Report whether sgemm_packed's full-block
- * dispatch will use the 8×16 AVX-512 micro-kernel (true) or the 8×8 AVX2
- * micro-kernel (false) on this CPU. Same detection logic as sgemm_packed's
- * internal dispatch — authoritative, not a separate/divergent check.
- *
- * Consults the current thread's ISA override (see set_gemm_isa_override)
- * if one is set; otherwise reflects raw hardware auto-detection. Note this
- * means kernel_registry.hpp's cached `detected_isa()` label (computed once
- * at process startup via std::call_once, before any override can exist)
- * intentionally does NOT change when an override is set — it continues to
- * describe the process-wide default, not any particular call's override.
- */
-bool gemm_packed_isa_is_avx512() noexcept;
-
-/**
- * gemm_packed_avx512_hardware_available — Raw AVX-512F+DQ capability check,
- * ignoring any override. Used to validate that a forced "avx512" override
- * is actually satisfiable on this CPU before it takes effect — forcing
- * AVX-512 instructions on hardware that lacks them would produce SIGILL,
- * so callers MUST check this (or rely on set_gemm_isa_override's built-in
- * validation) before requesting a forced AVX-512 path.
- */
-bool gemm_packed_avx512_hardware_available() noexcept;
-
-/**
- * set_gemm_isa_override / get_gemm_isa_override — Per-thread override for
- * sgemm_packed's AVX2-vs-AVX-512 kernel choice.
- *
- * Unlike set_num_threads (a process-wide sticky setting), this is
- * thread_local: it is designed to be set immediately before a call and
- * reset immediately after (RAII-style), so it affects only the calls made
- * on the current thread while active — matching the per-call `isa=` kwarg
- * semantics exposed in the Python bindings, not a global sticky mode.
- *
- * Accepted values: "" or "auto" (clear override, use hardware auto-detect),
- * "avx2" (force the 8×8 AVX2 kernel), "avx512" (force the 8×16 AVX-512
- * kernel — silently has no effect if gemm_packed_avx512_hardware_available()
- * is false, to avoid ever issuing an illegal instruction; callers wanting a
- * hard error on unsupported hardware should check that function themselves
- * before calling this, which is exactly what the Python binding does).
- * Any other string is treated the same as "auto".
- */
-void set_gemm_isa_override(const char* isa) noexcept;
-const char* get_gemm_isa_override() noexcept;
-
 // ─── Main GEMM entry point ────────────────────────────────────────────────────
 
 /**
@@ -158,12 +112,9 @@ void sgemm_direct_avx2(int M, int N, int K,
                         float* C, int ldc) noexcept;
 
 /**
- * sgemm_packed — Compute C = alpha*A*B + beta*C  (float32, row-major)
- *
- * Implements the Goto/BLIS 5-loop structure with panel packing.
- * Automatically dispatches to sgemm_direct_avx2 when
- * max(M,N,K) ≤ SMALL_GEMM_THRESHOLD to avoid packing overhead on
- * small matrices. This is the kernel used by the Python dispatch layer.
+ * sgemm_packed — C = alpha*A*B + beta*C (float32, row-major), through the
+ * kernel table chosen for this CPU (dispatch/kernels.hpp); defined in
+ * dispatch.cpp, so it can be called from code built for any CPU.
  */
 void sgemm_packed(int M, int N, int K,
                   float alpha,
@@ -172,12 +123,28 @@ void sgemm_packed(int M, int N, int K,
                   float beta,
                   float* C, int ldc);
 
+/**
+ * sgemm_packed_avx2 / sgemm_packed_avx512 — the per-ISA implementations
+ * (8×8 and 8×16 micro-kernels). Both use sgemm_direct_avx2 when
+ * max(M,N,K) <= SMALL_GEMM_THRESHOLD. Call only on a CPU that has the ISA;
+ * prefer kernels_for(Isa::...)->sgemm, which checks.
+ */
+void sgemm_packed_avx2(int M, int N, int K, float alpha,
+                       const float* A, int lda, const float* B, int ldb,
+                       float beta, float* C, int ldc);
+void sgemm_packed_avx512(int M, int N, int K, float alpha,
+                         const float* A, int lda, const float* B, int ldb,
+                         float beta, float* C, int ldc);
+
+/** scale_matrix_c — C = beta*C; beta = 0 writes zeros without reading C. AVX2 unit. */
+void scale_matrix_c(float* C, int M, int N, int ldc, float beta) noexcept;
+
 // ─── OpenMP thread control ────────────────────────────────────────────────────
 
 /**
- * set_num_threads / get_num_threads — control the OpenMP thread count used
- * by the outermost jc-parallel loop in sgemm_packed.
- * No-ops when the library is built without -DSIMD_ML_OPENMP.
+ * set_num_threads / get_num_threads — the OpenMP thread count used by the
+ * jc-parallel loop of the packed GEMMs (dispatch.cpp). Without
+ * -DSIMD_ML_OPENMP, get_num_threads() is always 1.
  */
 void set_num_threads(int n) noexcept;
 int  get_num_threads()      noexcept;

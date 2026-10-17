@@ -4,37 +4,22 @@
  * See f16_gemm.hpp for the full design note. Summary:
  *   C[fp32] = alpha * A[fp16] @ B[fp16] + beta * C[fp32]
  *
- * This file is compiled with -mf16c (set via CMake COMPILE_OPTIONS so the
- * flag is present even on machines where -march=native might not include it).
- * All F16C intrinsics are guarded by #ifdef __F16C__ so the file compiles to
- * a safe no-op stub on compilers / CPUs that lack the extension.
+ * An AVX2 unit (-mavx2 -mfma -mf16c); the scalar unit has the portable version.
  */
 
 #include "f16_gemm.hpp"
 #include "avx2_gemm_packed.hpp"  // for NR = 8 constant
-#include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
 #include <cstring>
 
-#ifdef __F16C__
-#  include <immintrin.h>
+#if !defined(__F16C__) || !defined(__AVX2__) || !defined(__FMA__)
+#  error "f16_gemm.cpp is an AVX2 unit: compile with -mavx2 -mfma -mf16c (CMakeLists.txt)"
 #endif
+#include <immintrin.h>
 
 namespace simd_ml {
 namespace gemm {
-
-// ─── Runtime capability check ─────────────────────────────────────────────────
-bool f16c_available() noexcept {
-#ifdef __F16C__
-    // CPUID + XGETBV via CpuFeatures rather than __builtin_cpu_supports("f16c"),
-    // which Clang <= 15 rejects as an unknown feature string.
-    static const bool available = dispatch::CpuFeatures::detect().has_f16c;
-    return available;
-#else
-    return false;
-#endif
-}
 
 // ─── sgemm_f16_avx2 implementation ───────────────────────────────────────────
 void sgemm_f16_avx2(int M, int N, int K,
@@ -43,14 +28,6 @@ void sgemm_f16_avx2(int M, int N, int K,
                     const uint16_t* __restrict__ B, int ldb,
                     float beta,
                     float*          __restrict__ C, int ldc) noexcept {
-#ifndef __F16C__
-    // Compiled without F16C. The Python binding checks f16c_available()
-    // before calling here, so this branch is unreachable in correct use.
-    (void)M; (void)N; (void)K; (void)alpha;
-    (void)A; (void)lda; (void)B; (void)ldb;
-    (void)beta; (void)C; (void)ldc;
-    return;
-#else
     // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
     // The beta pass below runs and the K-loops do nothing.
     if (M <= 0 || N <= 0 || K < 0) return;
@@ -131,7 +108,6 @@ void sgemm_f16_avx2(int M, int N, int K,
             c_row[j] += alpha * sum;
         }
     }
-#endif  // __F16C__
 }
 
 }  // namespace gemm

@@ -26,10 +26,14 @@
  * - The normalize pass uses AVX2 for full throughput.
  */
 
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "layer_norm_avx2.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
+#endif
+
 #include "activations.hpp"
+#include <immintrin.h>
 #include <cmath>
 #include <cstddef>
-#include <immintrin.h>
 
 namespace activations {
 
@@ -41,7 +45,6 @@ void layer_norm_avx2(const float* input, float* output, int n,
     // Accumulate in double to avoid precision loss for large n.
     double sum = 0.0;
 
-#ifdef __AVX2__
     {
         __m256d acc = _mm256_setzero_pd();
         int i = 0;
@@ -61,16 +64,12 @@ void layer_norm_avx2(const float* input, float* output, int n,
         // Scalar tail
         for (; i < n; ++i) sum += static_cast<double>(input[i]);
     }
-#else
-    for (int i = 0; i < n; ++i) sum += static_cast<double>(input[i]);
-#endif
 
     const float mean = static_cast<float>(sum / n);
 
     // ─── Pass 2: Compute variance ────────────────────────────────────────────
     double var_sum = 0.0;
 
-#ifdef __AVX2__
     {
         __m256d vacc = _mm256_setzero_pd();
         __m256  vmean = _mm256_set1_ps(mean);
@@ -92,17 +91,10 @@ void layer_norm_avx2(const float* input, float* output, int n,
             var_sum  += d * d;
         }
     }
-#else
-    for (int i = 0; i < n; ++i) {
-        double d  = static_cast<double>(input[i]) - static_cast<double>(mean);
-        var_sum  += d * d;
-    }
-#endif
 
     const float inv_std = 1.0f / std::sqrt(static_cast<float>(var_sum / n) + eps);
 
     // ─── Pass 3: Normalize (and optionally apply gamma/beta) ─────────────────
-#ifdef __AVX2__
     {
         __m256 vmean    = _mm256_set1_ps(mean);
         __m256 vinvstd  = _mm256_set1_ps(inv_std);
@@ -145,14 +137,6 @@ void layer_norm_avx2(const float* input, float* output, int n,
             for (; i < n; ++i) output[i] = (input[i] - mean) * inv_std;
         }
     }
-#else
-    // Scalar fallback
-    for (int i = 0; i < n; ++i) {
-        float xnorm = (input[i] - mean) * inv_std;
-        output[i]   = gamma ? xnorm * gamma[i] : xnorm;
-        if (beta) output[i] += beta[i];
-    }
-#endif
 }
 
 } // namespace activations

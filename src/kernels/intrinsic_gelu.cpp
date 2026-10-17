@@ -24,13 +24,16 @@
  * exp(z) is computed via:
  *   k = round(z · log₂e),  f = z − k·ln2,  exp(z) = 2^k · poly6(f)
  *
- * Compilation: -O3 -march=native -mfma -mavx2
+ * An AVX2 unit (CMakeLists.txt); gelu_forward_scalar is in scalar_kernels.cpp.
  */
+
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "intrinsic_gelu.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
+#endif
 
 #include "simd_math.hpp"
 #include "intrinsic_gelu.hpp"
 #include "cache_alloc.hpp"
-#include "activations/activations.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -41,7 +44,6 @@ static constexpr float GELU_COEFF     = 0.044715f;             // cubic coeffici
 static constexpr float INV_SQRT2      = 0.7071067811865476f;   // 1/√2 (for exact erf path)
 
 // ─── Vectorized GeLU via exp-based tanh ──────────────────────────────────────
-#ifdef __AVX2__
 
 /**
  * zero_below_minus_10 — GeLU(x) for x < -10 is -0 to within |GeLU(-10)| =
@@ -157,7 +159,6 @@ static inline void apply_elementwise(const float* input, float* output,
     }
 }
 
-#endif  // __AVX2__
 
 // ─── Public: gelu_forward_avx2 (tanh approximation) ──────────────────────────
 /**
@@ -170,15 +171,7 @@ static inline void apply_elementwise(const float* input, float* output,
  * the two formulas, not rounding.
  */
 void gelu_forward_avx2(const float* input, float* output, std::size_t n) {
-#ifdef __AVX2__
     apply_elementwise(input, output, n, [](__m256 v) { return gelu_kernel_avx2(v); });
-#else
-    for (std::size_t i = 0; i < n; ++i) {
-        float x     = input[i];
-        float inner = SQRT_2_OVER_PI * (x + GELU_COEFF * x * x * x);
-        output[i]   = 0.5f * x * (1.0f + std::tanh(inner));
-    }
-#endif
 }
 
 // ─── Public: gelu_erf_forward_avx2 (exact) ───────────────────────────────────
@@ -188,40 +181,5 @@ void gelu_forward_avx2(const float* input, float* output, std::size_t n) {
  * Error bound: see gelu_erf_kernel_avx2.
  */
 void gelu_erf_forward_avx2(const float* input, float* output, std::size_t n) {
-#ifdef __AVX2__
     apply_elementwise(input, output, n, [](__m256 v) { return gelu_erf_kernel_avx2(v); });
-#else
-    gelu_forward_scalar(input, output, n);
-#endif
 }
-
-// ─── Reference scalar GeLU (exact erf path — correctness oracle) ─────────────
-/**
- * gelu_forward_scalar — Numerically exact GeLU via std::erff.
- *
- * GeLU(x) = 0.5 · x · (1 + erf(x / √2))
- *
- * This is the correctness oracle used in unit tests. It is ~10× slower than
- * the AVX2 tanh path. Note: the tanh-approximate GeLU and erf-exact GeLU
- * differ by up to ~5e-4 in absolute value at x ≈ ±2.7 — this is NOT a bug
- * but an inherent difference between the two mathematical approximations.
- */
-void gelu_forward_scalar(const float* input,
-                          float*       output,
-                          std::size_t  n) {
-    for (std::size_t i = 0; i < n; ++i) {
-        float x   = input[i];
-        output[i] = 0.5f * x * (1.0f + std::erff(x * INV_SQRT2));
-    }
-}
-
-// ─── activations:: namespace adapter ─────────────────────────────────────────
-// The dispatch layer (gemm_dispatcher.cpp) and Python bindings call
-// activations::gelu_avx2() — bridge the free function into the namespace here.
-namespace activations {
-
-void gelu_avx2(const float* input, float* output, int n) {
-    gelu_forward_avx2(input, output, static_cast<std::size_t>(n));
-}
-
-} // namespace activations
