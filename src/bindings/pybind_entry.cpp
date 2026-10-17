@@ -44,6 +44,10 @@
 #include <vector>
 #include <sstream>
 #include <utility>
+#include <chrono>
+#include <limits>
+#include <cstdint>
+#include "../dispatch/cpuid.hpp"
 
 #include "../kernels/activations/activations.hpp"
 #include "../kernels/gemm/avx2_gemm_packed.hpp"
@@ -435,6 +439,57 @@ static py::dict build_info() {
     return info;
 }
 
+// ─── Benchmark support (private: used by `python -m simd_ml_kernels bench`) ──
+/**
+ * _measure_core_ghz — core clock of the calling thread, in GHz.
+ *
+ * Runs a chain of dependent 64-bit register-register integer adds for
+ * `seconds`. Each add needs the previous result and has 1-cycle latency on
+ * every x86 core since the P6,
+ * so adds / elapsed time = cycles / second. 100 adds per loop iteration keep
+ * the loop counter and branch (independent, on other ports) off the critical
+ * path. Returns NaN on non-x86 or non-GNU compilers.
+ */
+static double py_measure_core_ghz(double seconds) {
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+    py::gil_scoped_release release;
+    using Clock = std::chrono::steady_clock;
+    // Register operand, not an immediate: Golden Cove-class and newer cores
+    // fold chains of add-immediate in the renamer (an addq $1 chain measured
+    // 22 "GHz" on a Lion Cove core), but cannot fold reg-reg adds.
+    std::uint64_t x = 0, adds = 0;
+    volatile std::uint64_t one_src = 1;
+    const std::uint64_t one = one_src;
+    const auto t0 = Clock::now();
+    double elapsed = 0.0;
+    do {
+        for (int i = 0; i < 10000; ++i)
+            __asm__ volatile(".rept 100\n\taddq %1, %0\n\t.endr" : "+r"(x) : "r"(one));
+        adds += 10000ull * 100ull;
+        elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
+    } while (elapsed < seconds);
+    return static_cast<double>(adds) / elapsed * 1e-9;
+#else
+    (void)seconds;
+    return std::numeric_limits<double>::quiet_NaN();
+#endif
+}
+
+static py::list py_cpu_caches() {
+    py::list out;
+    for (const auto& c : simd_ml::dispatch::detect_caches()) {
+        py::dict d;
+        d["level"] = c.level;
+        d["type"] = std::string(1, c.type);
+        d["size_kib"] = c.size_kib;
+        d["ways"] = c.ways;
+        d["line_bytes"] = c.line_bytes;
+        d["max_sharing_cpus"] = c.max_sharing_cpus;
+        out.append(d);
+    }
+    return out;
+}
+
 // ─── Binding: is_aligned ─────────────────────────────────────────────────────
 static bool py_is_aligned(py::array arr) {
     return is_aligned(arr.data());
@@ -727,12 +782,8 @@ Notes
 -----
 Uses a Goto/BLIS-style packed GEMM with register blocking (8×8 AVX2 or
 8×16 AVX-512 micro-tile, auto-dispatched at runtime unless isa= forces a
-choice), panel packing, and FMA intrinsics. Achieves 55–59% of OpenBLAS
-single-threaded throughput for N≥256 (measured; see docs/BENCHMARKS.md). Small matrices (N≤64) lag further
-behind (~4%) and can even be slower than a plain scalar loop — packing
-overhead dominates and is not yet amortised at that size, and wider SIMD
-doesn't help a packing-bound regime — see DESIGN.md §7 for the full gap
-analysis.
+choice), panel packing, and FMA intrinsics. Throughput relative to
+OpenBLAS on named hardware: docs/BENCHMARKS.md.
 )doc");
 
     static const char* gelu_doc = R"doc(
@@ -925,6 +976,13 @@ Example
 ...     B = np.random.randn(256, 64).astype(np.float16)
 ...     C = sk.sgemm_f16(A, B)   # float32 output
 )doc");
+
+    m.def("_measure_core_ghz", &py_measure_core_ghz, py::arg("seconds") = 0.05,
+          "Core clock of the calling thread in GHz (dependent integer-add chain). "
+          "Private: used by `python -m simd_ml_kernels bench`.");
+    m.def("_cpu_caches", &py_cpu_caches,
+          "Caches of the core this thread runs on, from CPUID leaf 4 / 0x8000001D. "
+          "Private: used by `python -m simd_ml_kernels bench` and `info`.");
 
     m.def("is_aligned", &py_is_aligned,
           py::arg("arr"),

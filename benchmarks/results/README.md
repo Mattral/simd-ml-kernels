@@ -1,85 +1,26 @@
-# Benchmark Results
+# Benchmark results
 
-This directory stores JSON outputs from `bench_stat` (statistical harness)
-and `bench` (cycle-accurate RDTSC harness).
-
----
-
-## Files
-
-| File | Produced by | Contents |
-|---|---|---|
-| `gemm_results.json` | `bench_stat` — **committed baseline** | Controlled reference run for regression gating |
-| `bench_stat.json` | `bench_stat` — transient CI output | Latest CI run (not committed; compared against baseline) |
-| `bench_rdtsc.json` | `bench` — transient | Cycle-accurate RDTSC results |
-
----
-
-## `bench_stat` JSON schema
-
-```json
-{
-  "gemm": [
-    {
-      "kernel":        "simd_packed",
-      "N":             256,
-      "min_ms":        1.864,
-      "mean_ms":       1.891,
-      "median_ms":     1.877,
-      "stddev_ms":     0.012,
-      "ci95_half_ms":  0.015,
-      "gflops_peak":   18.01,
-      "gflops_mean":   17.76
-    }
-  ],
-  "gelu": [
-    {
-      "kernel":        "gelu_avx2",
-      "n":             1048576,
-      "min_ms":        0.902,
-      "mean_ms":       0.956,
-      "median_ms":     0.973,
-      "stddev_ms":     0.053,
-      "ci95_half_ms":  0.068,
-      "gelems_per_sec": 1.162
-    }
-  ]
-}
-```
-
----
-
-## `bench` (RDTSC) JSON schema
-
-```json
-{
-  "benchmarks": [
-    {
-      "name":          "SIMD   GEMM  256x256",
-      "category":      "gemm",
-      "M": 256, "N": 256, "K": 256,
-      "n": 0,
-      "min_cycles":    4213936,
-      "median_cycles": 4250100,
-      "gflops":        16.72
-    }
-  ]
-}
-```
-
----
-
-## Establishing a new baseline
-
-Run `bench_stat` on dedicated hardware with the CPU frequency locked:
+One JSON file per benchmark run, written by
 
 ```bash
-sudo cpupower frequency-set -g performance
-taskset -c 0 ./build/bench_stat \
-    --reps 50 \
-    --sizes 64,128,256,512,1024 \
-    --output benchmarks/results/gemm_results.json
+python -m simd_ml_kernels bench --json benchmarks/results/<label>_<date>_<commit>.json \
+    --label <label> --core "<core>" --note "<power settings>"
 ```
 
-Commit `gemm_results.json` to track regressions in CI via
-`benchmarks/check_regression.py`.
+following the protocol in [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md). Every
+benchmark number in README.md and docs/BENCHMARKS.md is generated from these
+files by `benchmarks/make_tables.py`; CI checks the tables are up to date.
+Do not edit result files by hand.
+
+## Schema `simd-ml-kernels-bench/1`
+
+| key | contents |
+|---|---|
+| `schema` | `"simd-ml-kernels-bench/1"` |
+| `machine` | `label`, `cpu_model`, `core` (caller's description of the pinned core), `pinned_cpus`, `caches` (CPUID leaf 4 of the pinned core: level, type, size_kib, ways, line_bytes, max_sharing_cpus), `logical_cpus`, `os`, `note` |
+| `build` | `version`, `git_commit`, `compiler`, `kernel_flags`, `isa_compiled`, `openmp` (from `build_info()`) |
+| `baselines` | `numpy`, `blas` {`name`, `version`}, `torch` (null if not installed) |
+| `env` | `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS` |
+| `protocol` | `warmup`, `reps`, `statistic`, `interleaved`, `clock` |
+| `command`, `python`, `timestamp_utc` | how and when the file was produced |
+| `results[]` | `kernel`, `impl`, `shape`, `median_s`, `p25_s`, `p75_s`, `min_s`, `reps`, `core_ghz` {`median`, `min`, `max`, `samples`, `attempts`, `below_min_ghz`}, and `gflops` + `flop_per_cycle` (GEMM) or `gelem_per_s` + `elem_per_cycle` (element-wise) |

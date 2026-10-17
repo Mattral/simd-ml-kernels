@@ -242,7 +242,8 @@ if(SIMD_ML_ENABLE_X86 AND SIMD_ML_BUILD_BENCHMARKS)
 
     # Optional OpenBLAS linkage for baseline comparisons.
     # Applied to BOTH bench and bench_stat: bench_stat's JSON output is what
-    # feeds docs/BENCHMARKS.md and benchmarks/check_regression.py, so it needs
+    # is used for kernel development (published numbers come from
+    # `python -m simd_ml_kernels bench`), so it needs
     # the same comparison capability as the RDTSC harness.
     if(BENCH_OPENBLAS)
         find_package(BLAS QUIET)

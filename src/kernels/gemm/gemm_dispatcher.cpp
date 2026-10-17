@@ -94,6 +94,43 @@ CpuFeatures CpuFeatures::detect() noexcept {
     return f;
 }
 
+std::vector<CacheLevel> detect_caches() {
+    std::vector<CacheLevel> out;
+#if defined(__x86_64__) || defined(__i386__)
+    unsigned int a, b, c, d;
+    cpuid_ex(0, 0, a, b, c, d);
+    const unsigned int max_leaf = a;
+    const bool intel = b == 0x756e6547u && d == 0x49656e69u && c == 0x6c65746eu;  // "GenuineIntel"
+    const bool amd   = b == 0x68747541u && d == 0x69746e65u && c == 0x444d4163u;  // "AuthenticAMD"
+    unsigned int leaf = 0;
+    if (intel && max_leaf >= 4) {
+        leaf = 4;
+    } else if (amd) {
+        cpuid_ex(0x80000000u, 0, a, b, c, d);
+        if (a >= 0x8000001Du) leaf = 0x8000001Du;
+    }
+    if (leaf == 0) return out;
+    // Same register layout in both leaves (Intel SDM vol. 2A, CPUID leaf 04H;
+    // AMD APM vol. 3, CPUID Fn8000_001D).
+    for (unsigned int i = 0; i < 16; ++i) {
+        cpuid_ex(static_cast<int>(leaf), static_cast<int>(i), a, b, c, d);
+        const unsigned int type = a & 0x1f;   // 0 = no more caches
+        if (type == 0) break;
+        CacheLevel cl;
+        cl.level            = static_cast<int>((a >> 5) & 7);
+        cl.type             = type == 1 ? 'D' : type == 2 ? 'I' : 'U';
+        cl.ways             = (b >> 22) + 1;
+        const unsigned partitions = ((b >> 12) & 0x3ff) + 1;
+        cl.line_bytes       = (b & 0xfff) + 1;
+        const unsigned sets = c + 1;
+        cl.size_kib         = cl.ways * partitions * cl.line_bytes * sets / 1024;
+        cl.max_sharing_cpus = ((a >> 14) & 0xfff) + 1;
+        out.push_back(cl);
+    }
+#endif
+    return out;
+}
+
 } } // namespace simd_ml::dispatch
 
 namespace simd_ml { namespace dispatch {

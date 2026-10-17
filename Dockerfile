@@ -13,7 +13,7 @@
 #   docker run --rm simd-ml-kernels ./build/bench_stat --reps 30 --sizes 64,128,256,512
 #
 # Run Python benchmark:
-#   docker run --rm simd-ml-kernels python3 tests/test_bench.py --no-plot
+#   docker run --rm simd-ml-kernels python3 -m simd_ml_kernels selftest
 #
 # Interactive shell:
 #   docker run --rm -it simd-ml-kernels bash
@@ -97,4 +97,4 @@ CMD ["ctest", "--test-dir", "build", "--output-on-failure", "--parallel", "4"]
 #   docker run --rm simd-ml-kernels pytest tests/test_precision.py -v
 #
 # Run Python benchmark:
-#   docker run --rm simd-ml-kernels python3 tests/test_bench.py --no-plot --quick
+#   docker run --rm simd-ml-kernels python3 -m simd_ml_kernels selftest --quick

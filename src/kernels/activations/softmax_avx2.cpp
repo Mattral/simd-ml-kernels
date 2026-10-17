@@ -8,7 +8,7 @@
  * ─── Three-pass AVX2 Implementation ──────────────────────────────────────────
  *
  * Pass 1: AVX2 horizontal max reduction
- *   - Process 8 floats/cycle with _mm256_max_ps
+ *   - 8 floats per _mm256_max_ps
  *   - Final horizontal reduction via vpermf128 + vmax intrinsics
  *
  * Pass 2: AVX2 fast_exp_avx2 + double-precision sum accumulation

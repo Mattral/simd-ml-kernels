@@ -77,15 +77,8 @@ print('Activation smoke tests: PASS')
 ### Run Python tests
 
 ```bash
-# Full suite (requires scipy for reference comparisons)
-pip install scipy
-pytest tests/test_precision.py tests/test_bindings_edge_cases.py -v
-
-# Quick smoke test (no scipy needed)
-pytest tests/test_bindings_edge_cases.py -v
-
-# Python benchmark
-python tests/test_bench.py --quick --no-plot
+python -m simd_ml_kernels selftest   # every kernel vs float64
+pytest tests -v
 ```
 
 ---
@@ -104,22 +97,11 @@ docker run --rm simd-ml-kernels ctest --test-dir build --output-on-failure
 
 ## Reproducible performance benchmarking
 
-For results suitable for publication, lock the CPU frequency and pin to one core:
+Follow the protocol in [docs/BENCHMARKS.md](BENCHMARKS.md):
 
 ```bash
-# Linux: require root or CAP_SYS_NICE
-sudo cpupower frequency-set -g performance
-taskset -c 0 ./build/bench_stat \
-    --reps 50 \
-    --output benchmarks/results/gemm_results.json
-
-# Regression check against committed baseline
-python benchmarks/check_regression.py \
-    --baseline benchmarks/results/gemm_results.json \
-    --current  benchmarks/results/ci_gemm_results.json \
-    --max-regression-pct 15
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+taskset -c 2 python -m simd_ml_kernels bench --json benchmarks/results/<label>_<date>_<commit>.json \
+    --label <label> --core "<which core CPU 2 is>" --note "<power settings>"
+python benchmarks/make_tables.py
 ```
-
-Without frequency locking, `bench_stat` CI widths are typically 3–5× wider
-(shared-CPU noise). These numbers are suitable for longitudinal tracking but
-should not be cited as absolute performance claims.

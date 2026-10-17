@@ -1,9 +1,11 @@
-"""Command-line interface: ``python -m simd_ml_kernels {info,selftest}``.
+"""Command-line interface: ``python -m simd_ml_kernels {info,selftest,bench}``.
 
 ``info``      what was compiled and what this CPU supports.
 ``selftest``  every kernel against a NumPy float64 reference with the error
               bounds the test suite asserts; exits 1 if any check fails. This
               is the one command to run to trust an install (< 1 s).
+``bench``     timings of every kernel and its baseline, optionally as JSON
+              with machine metadata (benchmarks/results/, docs/BENCHMARKS.md).
 """
 
 from __future__ import annotations
@@ -211,6 +213,208 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+# ─── bench ────────────────────────────────────────────────────────────────────
+# Protocol (docs/BENCHMARKS.md): single thread, the process pinned to one core
+# by the caller (taskset / `start /affinity`; the core type is recorded via
+# --core), >= 5 warm-up and >= 30 timed calls per case, median and
+# interquartile range reported. Baselines run in the same process on the same
+# inputs: NumPy's BLAS (OpenBLAS) for GEMM, PyTorch CPU for activations when
+# torch is importable. Outputs are allocated per call for every library (the
+# out-of-place API users call), except GEMM, which writes into a preallocated C.
+
+BENCH_SCHEMA = "simd-ml-kernels-bench/1"
+THREAD_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def _pinned_cpus() -> list[int] | None:
+    if hasattr(os, "sched_getaffinity"):
+        return sorted(os.sched_getaffinity(0))
+    if sys.platform == "win32":
+        import ctypes
+
+        proc, sysmask = ctypes.c_size_t(), ctypes.c_size_t()
+        k32 = ctypes.windll.kernel32
+        if k32.GetProcessAffinityMask(k32.GetCurrentProcess(), ctypes.byref(proc),
+                                      ctypes.byref(sysmask)):
+            return [i for i in range(64) if proc.value >> i & 1]
+    return None
+
+
+def _blas_info() -> dict:
+    try:
+        cfg = np.show_config(mode="dicts")
+        blas = cfg["Build Dependencies"]["blas"]
+        return {"name": blas.get("name"), "version": blas.get("version")}
+    except Exception:  # noqa: BLE001 - older NumPy: no dict mode
+        return {"name": "unknown", "version": "unknown"}
+
+
+def _time_once(fns, warmup, reps):
+    import time
+
+    for _ in range(warmup):
+        for fn in fns:
+            fn()
+    clock = [sk._core._measure_core_ghz(0.005)]
+    ts = np.empty((len(fns), reps))
+    for i in range(reps):
+        for j, fn in enumerate(fns):
+            t0 = time.perf_counter_ns()
+            fn()
+            ts[j, i] = (time.perf_counter_ns() - t0) * 1e-9
+        if i % 5 == 4:
+            clock.append(sk._core._measure_core_ghz(0.005))
+    clock.append(sk._core._measure_core_ghz(0.005))
+    return ts, clock
+
+
+def _time(fns: list[Callable[[], object]], warmup: int, reps: int,
+          min_ghz: float | None) -> tuple[list[dict], dict]:
+    """Time several implementations of the same case, interleaved call by call
+    (A, B, A, B, ...), so that clock and thermal drift during the run affects
+    all of them alike; on the reference laptop the core clock moved between
+    3.1 and 4.0 GHz between consecutive cases timed one after the other.
+
+    The core clock is sampled (5 ms each) before, every 5 timed rounds and
+    after; per-cycle rates use the median sample. A single sample after the
+    case was not enough: one run reported 3.07 GHz for a case whose GEMM then
+    came out at 37.8 flop/cycle, above the 32 flop/cycle an AVX2 core with two
+    256-bit FMA pipes can do. With min_ghz set (e.g. just above the E-core
+    maximum on a hybrid CPU), a case with any sample below it is repeated, up
+    to 3 attempts; the attempt count is recorded."""
+    for attempt in range(1, 4):
+        ts, clock = _time_once(fns, warmup, reps)
+        if min_ghz is None or min(clock) >= min_ghz:
+            break
+    stats = []
+    for row in ts:
+        p25, med, p75 = np.percentile(row, [25, 50, 75])
+        stats.append({"median_s": float(med), "p25_s": float(p25), "p75_s": float(p75),
+                      "min_s": float(row.min()), "reps": reps})
+    c = np.asarray(clock)
+    return stats, {"median": float(np.median(c)), "min": float(c.min()), "max": float(c.max()),
+                   "samples": len(c), "attempts": attempt,
+                   "below_min_ghz": bool(min_ghz is not None and c.min() < min_ghz)}
+
+
+def _record(results, kernel, impl, shape, t, work, unit, clock):
+    ghz = clock["median"]
+    r = {"kernel": kernel, "impl": impl, "shape": list(shape), **t, "core_ghz": clock}
+    rate = work / t["median_s"]
+    if unit == "flop":
+        r["gflops"] = rate * 1e-9
+        r["flop_per_cycle"] = rate / (ghz * 1e9) if ghz == ghz else None
+    else:
+        r["gelem_per_s"] = rate * 1e-9
+        r["elem_per_cycle"] = rate / (ghz * 1e9) if ghz == ghz else None
+    results.append(r)
+    return r
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    bad = {k: os.environ.get(k) for k in THREAD_ENV if os.environ.get(k) != "1"}
+    if bad and not args.allow_threads:
+        print("bench: set " + " ".join(f"{k}=1" for k in bad) + " so the baselines are "
+              "single-threaded (or pass --allow-threads).", file=sys.stderr)
+        return 2
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except ImportError:
+        torch = None
+
+    rng = np.random.default_rng(0)
+    results: list[dict] = []
+    def show(r):
+        rate = (f"{r['gflops']:8.1f} GFLOP/s ({r['flop_per_cycle'] or float('nan'):.1f}/cycle)"
+                if "gflops" in r else
+                f"{r['gelem_per_s']:8.3f} Gelem/s ({r['elem_per_cycle'] or float('nan'):.3f}/cycle)")
+        print(f"  {r['kernel']:<16} {r['impl']:<16} {str(tuple(r['shape'])):<16} "
+              f"median {r['median_s'] * 1e3:9.3f} ms  {rate}  @ {r['core_ghz']['median']:.2f} GHz "
+              f"[{r['core_ghz']['min']:.2f}-{r['core_ghz']['max']:.2f}, attempts {r['core_ghz']['attempts']}]")
+
+    for n in args.sizes:
+        a = rng.standard_normal((n, n)).astype(np.float32)
+        b = rng.standard_normal((n, n)).astype(np.float32)
+        c = np.empty((n, n), np.float32)
+        impls = [("simd_ml_kernels", lambda: sk.sgemm(a, b, C=c)),
+                 ("numpy/" + str(_blas_info()["name"]), lambda: np.matmul(a, b, out=c))]
+        stats, clock = _time([fn for _, fn in impls], args.warmup, args.reps, args.min_ghz)
+        for (impl, _), t in zip(impls, stats):
+            show(_record(results, "sgemm", impl, (n, n, n), t, 2.0 * n ** 3, "flop", clock))
+
+    x = rng.standard_normal(args.elems).astype(np.float32)
+    rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)
+    g = rng.standard_normal(1024).astype(np.float32)
+    be = rng.standard_normal(1024).astype(np.float32)
+    ours = {
+        "gelu_exact": (lambda: sk.gelu(x), x.shape),
+        "gelu_tanh": (lambda: sk.gelu(x, approximate="tanh"), x.shape),
+        "silu": (lambda: sk.silu(x), x.shape),
+        "relu": (lambda: sk.relu(x), x.shape),
+        "softmax": (lambda: sk.softmax(rows), rows.shape),
+        "layer_norm": (lambda: sk.layer_norm(rows, gamma=g, beta=be), rows.shape),
+    }
+    theirs = {}
+    if torch is not None:
+        F = torch.nn.functional
+        xt, rt = torch.from_numpy(x), torch.from_numpy(rows)
+        gt, bt = torch.from_numpy(g), torch.from_numpy(be)
+        theirs = {
+            "gelu_exact": lambda: F.gelu(xt),
+            "gelu_tanh": lambda: F.gelu(xt, approximate="tanh"),
+            "silu": lambda: F.silu(xt),
+            "relu": lambda: torch.relu(xt),
+            "softmax": lambda: torch.softmax(rt, dim=-1),
+            "layer_norm": lambda: F.layer_norm(rt, (1024,), gt, bt, 1e-5),
+        }
+    for name, (fn, shape) in ours.items():
+        impls = [("simd_ml_kernels", fn)]
+        if name in theirs:
+            impls.append(("torch " + torch.__version__, theirs[name]))
+        stats, clock = _time([f for _, f in impls], args.warmup, args.reps, args.min_ghz)
+        for (impl, _), t in zip(impls, stats):
+            show(_record(results, name, impl, shape, t, int(np.prod(shape)), "elem", clock))
+
+    if args.json:
+        import datetime
+
+        doc = {
+            "schema": BENCH_SCHEMA,
+            "machine": {
+                "label": args.label,
+                "cpu_model": cpu_model(),
+                "core": args.core,
+                "pinned_cpus": _pinned_cpus(),
+                "caches": sk._core._cpu_caches(),
+                "logical_cpus": os.cpu_count(),
+                "os": platform.platform(),
+                "note": args.note,
+            },
+            "build": info_dict()["build"],
+            "baselines": {"numpy": np.__version__, "blas": _blas_info(),
+                          "torch": None if torch is None else torch.__version__},
+            "env": {k: os.environ.get(k) for k in THREAD_ENV},
+            "protocol": {"warmup": args.warmup, "reps": args.reps,
+                         "statistic": "median; p25/p75 = interquartile range",
+                         "interleaved": "implementations of a case alternate call by call",
+                         "clock": "core GHz sampled on the same thread (5 ms dependent "
+                                  "add-reg-reg chain, 1 cycle/add) before, every 5 rounds and "
+                                  "after each case; per-cycle rates use the median",
+                         "min_ghz": args.min_ghz},
+            "command": " ".join(["python -m simd_ml_kernels"] + (args.argv or [])),
+            "python": platform.python_version(),
+            "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "results": results,
+        }
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=1)
+            f.write("\n")
+        print(f"wrote {args.json}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m simd_ml_kernels")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -219,5 +423,24 @@ def main(argv: list[str] | None = None) -> int:
     p_info.set_defaults(func=cmd_info)
     p_self = sub.add_parser("selftest", help="check every kernel against float64; exit 1 on failure")
     p_self.set_defaults(func=cmd_selftest)
+    p_bench = sub.add_parser("bench", help="time kernels and baselines; see docs/BENCHMARKS.md")
+    p_bench.add_argument("--sizes", type=lambda v: [int(t) for t in v.split(",")],
+                         default=[128, 256, 512, 1024, 2048], help="square GEMM sizes")
+    p_bench.add_argument("--elems", type=int, default=1 << 20,
+                         help="elements per activation call (multiple of 1024)")
+    p_bench.add_argument("--warmup", type=int, default=5)
+    p_bench.add_argument("--reps", type=int, default=30)
+    p_bench.add_argument("--json", metavar="PATH", help="write results with machine metadata")
+    p_bench.add_argument("--label", default="unlabelled", help="machine label for tables")
+    p_bench.add_argument("--core", default="not recorded",
+                         help="core the process is pinned to, e.g. 'P-core (Lion Cove), CPU 2'")
+    p_bench.add_argument("--note", default="", help="free text, e.g. power settings")
+    p_bench.add_argument("--min-ghz", type=float, default=None,
+                         help="repeat a case (up to 3 attempts) if any clock sample is below "
+                              "this; on hybrid CPUs set it just above the E-core maximum")
+    p_bench.add_argument("--allow-threads", action="store_true",
+                         help="run even if *_NUM_THREADS != 1 (results not publishable)")
+    p_bench.set_defaults(func=cmd_bench)
     args = parser.parse_args(argv)
+    args.argv = list(argv) if argv is not None else sys.argv[1:]
     return args.func(args)
