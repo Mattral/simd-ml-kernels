@@ -1,0 +1,70 @@
+name: Wheels
+
+# Builds wheels with cibuildwheel, installs each in a clean environment and
+# runs selftest (pyproject.toml [tool.cibuildwheel]), then runs one Linux
+# wheel under Intel SDE on CPUs without AVX, with AVX2 and with AVX-512.
+# Wheels are kept as workflow artifacts only: there is no publish step.
+on:
+  pull_request:
+    branches: [main]
+    paths: ["CMakeLists.txt", "pyproject.toml", "src/**", "python/**", ".github/workflows/wheels.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Wheels / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@v2.23.3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sde:
+    name: Linux wheel under Intel SDE -${{ matrix.cpu }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cpu: nhm, expect: scalar }
+          - { cpu: hsw, expect: avx2 }
+          - { cpu: skx, expect: avx512 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-24.04
+          path: wheelhouse
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the cp312 wheel in a clean venv
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install wheelhouse/simd_ml_kernels-*-cp312-cp312-manylinux*_x86_64.whl
+      - name: Install Intel SDE
+        uses: petarpetrovt/setup-sde@v2.4
+        with:
+          environmentVariableName: SDE_PATH
+          sdeVersion: 9.33.0
+      - name: selftest on the runner and under SDE -${{ matrix.cpu }}
+        working-directory: /tmp
+        run: |
+          /tmp/venv/bin/python -m simd_ml_kernels selftest | tail -1
+          "$SDE_PATH/sde64" -${{ matrix.cpu }} -- /tmp/venv/bin/python -m simd_ml_kernels selftest
+          test "$("$SDE_PATH/sde64" -${{ matrix.cpu }} -- /tmp/venv/bin/python -c 'import simd_ml_kernels as s; print(s.detected_isa())')" = "${{ matrix.expect }}"
