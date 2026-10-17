@@ -103,6 +103,36 @@ static bool test_beta_zero_overwrites_poison() {
     return pass;
 }
 
+// K == 0 (BLAS semantics): A·B is an empty sum, so C = beta·C; beta == 0
+// must overwrite C even if it holds NaN. Covers the direct path (M, N <= 128)
+// and the packed path (M > 128), plus the scalar reference naive_sgemm.
+static bool test_k_zero_applies_beta() {
+    bool all_pass = true;
+    for (int M : {7, 300}) {
+        const int N = 9;
+        for (float beta : {0.0f, 0.5f}) {
+            for (int impl = 0; impl < 2; ++impl) {
+                auto C = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
+                const float init = (beta == 0.0f) ? std::nanf("") : 3.0f;
+                std::fill(C.get(), C.get() + M * N, init);
+                const float dummy = 1.0f;  // A and B are never read when K == 0
+                if (impl == 0)
+                    simd_ml::gemm::sgemm_packed(M, N, 0, 1.0f, &dummy, 1, &dummy, N, beta, C.get(), N);
+                else
+                    naive_sgemm(M, N, 0, 1.0f, &dummy, 1, &dummy, N, beta, C.get(), N);
+                const float expect = (beta == 0.0f) ? 0.0f : beta * 3.0f;
+                bool pass = true;
+                for (int i = 0; i < M * N; ++i) pass &= (C[i] == expect);
+                printf("  K=0 %-12s M=%-3d beta=%.1f  C==%.1f: %s\n",
+                       impl == 0 ? "sgemm_packed" : "naive_sgemm", M, beta, expect,
+                       pass ? "PASS" : "FAIL");
+                all_pass &= pass;
+            }
+        }
+    }
+    return all_pass;
+}
+
 /**
  * test_gemm_packed_avx512_full_coverage — Forces 100% of the output through
  * the full-block micro-kernel path, with ZERO edge/tail blocks possible,
@@ -323,6 +353,9 @@ int run_gemm_packed_tests() {
 
     printf(" Edge: beta=0 must overwrite poisoned C:\n");
     all_pass &= test_beta_zero_overwrites_poison();
+
+    printf(" Edge: K=0 gives C = beta*C:\n");
+    all_pass &= test_k_zero_applies_beta();
 
     printf(" AVX-512 dual-kernel dispatch regression guard:\n");
     all_pass &= test_gemm_packed_avx512_full_coverage();

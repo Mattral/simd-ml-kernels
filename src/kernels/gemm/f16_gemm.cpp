@@ -51,7 +51,9 @@ void sgemm_f16_avx2(int M, int N, int K,
     (void)beta; (void)C; (void)ldc;
     return;
 #else
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
+    // The beta pass below runs and the K-loops do nothing.
+    if (M <= 0 || N <= 0 || K < 0) return;
 
     // ── Beta pre-pass: C ← beta * C ──────────────────────────────────────────
     // Mirrors scale_matrix_c in sgemm_packed: beta=0 must zero C explicitly

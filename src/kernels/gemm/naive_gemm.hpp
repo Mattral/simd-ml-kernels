@@ -18,7 +18,8 @@ inline void naive_sgemm(int M, int N, int K,
                         const float* B, int ldb,
                         float beta,
                         float* C, int ldc) {
-    if (M <= 0 || N <= 0 || K <= 0) {
+    // K == 0 is valid (BLAS semantics): the sum is empty, so C = beta·C.
+    if (M <= 0 || N <= 0 || K < 0) {
         return;
     }
 
@@ -28,7 +29,10 @@ inline void naive_sgemm(int M, int N, int K,
             for (int p = 0; p < K; ++p) {
                 sum += A[i * lda + p] * B[p * ldb + j];
             }
-            C[i * ldc + j] = alpha * sum + beta * C[i * ldc + j];
+            // beta == 0 overwrites C without reading it, so NaN/Inf or
+            // uninitialised memory in C does not propagate (BLAS semantics).
+            const float c_old = (beta == 0.0f) ? 0.0f : beta * C[i * ldc + j];
+            C[i * ldc + j] = alpha * sum + c_old;
         }
     }
 }

@@ -544,7 +544,9 @@ void sgemm_packed(int M, int N, int K,
                   const float* __restrict__ B, int ldb,
                   float beta,
                   float*       __restrict__ C, int ldc) {
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
+    // Both paths apply beta first and then run no K iterations.
+    if (M <= 0 || N <= 0 || K < 0) return;
 
     // ── Small-matrix fast path: skip panel packing ────────────────────────────
     // sgemm_packed's packing buffers are fixed-size KC×NC ≈ 2 MB regardless of

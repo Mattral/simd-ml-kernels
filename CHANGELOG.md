@@ -39,6 +39,12 @@ under **Changed** with a migration note.
   `SIMD_ML_BUILD_TESTS`, `SIMD_ML_BUILD_BENCHMARKS`, default ON for CMake users).
 
 ### Fixed
+- GEMM with K = 0 (`sgemm`, `sgemm_f16`, `sgemm_bf16`, and the scalar fallback)
+  returned without touching C: an allocated output held uninitialised memory
+  and `beta` was ignored. It now computes C = beta·C, with beta = 0
+  overwriting C (NaN included), as BLAS does.
+- `layer_norm` on an array whose last axis has length 0 crashed the
+  interpreter (integer division by zero); it now returns an empty array.
 - `layer_norm(x, beta=b)` with `gamma=None` ignored `beta` (#5).
 - Builds with clang/MinGW on Windows: aligned allocation uses C++17 aligned
   `operator new`; the benchmark harness uses `std::chrono` (#8).
