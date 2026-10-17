@@ -29,7 +29,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | Kernel | Implementation | Notes |
 |--------|---------------|-------|
 | **GEMM** (SGEMM) | `avx_matmul.cpp`, `gemm/avx2_gemm_packed.cpp` | Goto/BLIS 5-loop, panel packing, MR×NR register blocking, AVX2/AVX-512 dispatch |
-| **GeLU** | `intrinsic_gelu.cpp` | Fast tanh rational polynomial, branch-free, 8 floats/cycle |
+| **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x * sigmoid(x)` via fast tanh, 8 floats/cycle |
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
@@ -148,7 +148,7 @@ simd-ml-kernels/
 ├── src/
 │   ├── kernels/
 │   │   ├── avx_matmul.cpp              # 6×16 AVX2 + AVX-512 GEMM
-│   │   ├── intrinsic_gelu.cpp          # GeLU (fast tanh approximation)
+│   │   ├── intrinsic_gelu.cpp          # GeLU (exact erf and tanh variants)
 │   │   ├── cache_alloc.hpp             # 64-byte aligned allocator
 │   │   ├── gemm/
 │   │   │   ├── avx2_gemm_packed.cpp    # 8×8 packed GEMM (Goto/BLIS style)

@@ -183,7 +183,7 @@ def bench_gelu(sizes: list[int], reps: int = 10) -> list[dict]:
             # gelu() is out-of-place — input is unchanged, output pre-allocated.
             out = np.empty_like(x_orig)
             t_simd_min, _ = timeit(
-                lambda: simd_ml_kernels.gelu(x_orig),  # returns new array each call
+                lambda: simd_ml_kernels.gelu(x_orig, approximate="tanh"),  # new array each call
                 reps=reps
             )
             gelems_simd = n / t_simd_min / 1e9
@@ -193,7 +193,7 @@ def bench_gelu(sizes: list[int], reps: int = 10) -> list[dict]:
 
             # Accuracy spot-check vs numpy reference (not timed)
             ref = gelu_numpy_ref(x_orig)
-            got = simd_ml_kernels.gelu(x_orig)
+            got = simd_ml_kernels.gelu(x_orig, approximate="tanh")
             max_rel = float(np.max(np.abs(got.astype(np.float64) - ref.astype(np.float64))
                                    / (np.abs(ref.astype(np.float64)) + 1e-7)))
             row["max_rel_err"] = max_rel

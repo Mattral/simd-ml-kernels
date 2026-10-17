@@ -144,18 +144,19 @@ class GEMMConfig:
 
 # ─── Activation Functions ─────────────────────────────────────────────────────
 
-def gelu(x: NDArray[np.float32]) -> NDArray[np.float32]:
+def gelu(x: NDArray[np.float32], approximate: str = "none") -> NDArray[np.float32]:
     """
-    Out-of-place AVX2 GeLU (tanh approximation, max error < 5e-6).
-    Returns a new array; input x is unchanged.
+    GeLU, same definitions as torch.nn.functional.gelu. approximate="none"
+    (default): exact 0.5*x*(1 + erf(x/sqrt(2))), max abs error <= 2e-6;
+    approximate="tanh": tanh formula, <= 2e-6 vs that formula (4.7e-4 from
+    exact). Returns a new array; x is unchanged.
     """
     ...
 
 
-def gelu_inplace(x: NDArray[np.float32]) -> None:
+def gelu_inplace(x: NDArray[np.float32], approximate: str = "none") -> None:
     """
-    In-place AVX2 GeLU: x[:] = GeLU(x).
-    Modifies x directly; returns None.
+    In-place GeLU: x[:] = gelu(x, approximate). x must be writeable.
     """
     ...
 

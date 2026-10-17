@@ -89,17 +89,19 @@ The 6×16 layout in `avx_matmul.cpp` achieves better arithmetic intensity
 
 ### Mathematical form
 
-We implement the **tanh approximation** used universally in BERT/GPT models:
+Two variants, matching `torch.nn.functional.gelu`:
 
 ```
-GeLU(x) ≈ 0.5 · x · [1 + tanh(√(2/π) · (x + 0.044715·x³))]
+approximate="none" (default):  GeLU(x) = 0.5 · x · [1 + erf(x/√2)]
+approximate="tanh":            GeLU(x) ≈ 0.5 · x · [1 + tanh(√(2/π) · (x + 0.044715·x³))]
 ```
 
-**Why not the exact erf path?** `std::erff` is a transcendental function
-requiring ~12 polynomial terms plus a division — approximately 5× slower
-than our rational polynomial tanh approximation for the same accuracy budget.
-The reference scalar path (`gelu_forward_scalar`) uses `erff` as a correctness
-oracle.
+The exact path evaluates erf as a rational minimax approximation
+`x·P(x²)/Q(x²)` (deg 6 / deg 4 in x², XLA `ErfImpl32` coefficients) on x clamped
+to [−4, 4]: 11 FMA/MUL and one VDIVPS per 8 values, no table lookups. Measured
+error bounds are in `docs/api/python_api.md`. The relative throughput of the two
+variants is not measured yet; it is added with the benchmark protocol (ROADMAP).
+`gelu_forward_scalar` (libm `erff`) remains the scalar correctness reference.
 
 ### Rational polynomial for tanh
 
