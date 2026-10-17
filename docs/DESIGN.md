@@ -249,7 +249,11 @@ Two checks keep the units honest:
 - Under Intel SDE the C++ tests and `selftest` run with an emulated CPU:
   `-nhm` (Nehalem, no AVX) uses only the scalar table, `-hsw` scalar and AVX2,
   `-skx` / `-spr` all three. This is how the AVX-512 kernels are tested on
-  machines without AVX-512.
+  machines without AVX-512. It is a local check before a PR, not a CI job:
+  Intel's download server refuses (HTTP 403) the scripted downloads CI would
+  need, and the SDE license does not allow keeping a copy in this repository.
+  In CI, runners with AVX-512 (they vary between AMD Zen 3, Zen 5 and Intel
+  Xeon) run the AVX-512 table natively, and a test fails if they do not.
 
 The SIMD units keep `-ffast-math` (reassociation, no errno, no signed-zero
 or trapping guarantees) but add `-fno-finite-math-only`, so the compiler may

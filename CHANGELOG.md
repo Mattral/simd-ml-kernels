@@ -39,8 +39,8 @@ under **Changed** with a migration note.
 - Wheels with cibuildwheel (`pyproject.toml` `[tool.cibuildwheel]`,
   `.github/workflows/wheels.yml`): manylinux x86_64 and macOS arm64, each
   `selftest`ed after a clean install; built as CI artifacts, not published.
-- CI: every kernel table under Intel SDE (`-nhm`, `-hsw`, `-skx`, `-spr`), and
-  a check that the default table matches the runner's CPU flags.
+- CI checks that the default kernel table matches the runner's CPU flags
+  (an AVX-512 runner must use the AVX-512 table).
 - `selftest` and the Python tests check every kernel table the CPU can run;
   ctest `isa_units` checks the object files contain only their own ISA.
 
