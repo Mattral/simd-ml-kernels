@@ -9,6 +9,8 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
 from ._core import (
+    ArgumentError,
+    DTypeError,
     GEMMConfig,
     avx512_available,
     bf16_avx512bf16_available,
@@ -35,6 +37,8 @@ except PackageNotFoundError:  # imported from a source tree without installing
     __version__ = "unknown"
 
 __all__ = [
+    "ArgumentError",
+    "DTypeError",
     "GEMMConfig",
     "avx512_available",
     "bf16_avx512bf16_available",

@@ -55,11 +55,19 @@
 
 namespace py = pybind11;
 
+// ─── Argument errors ──────────────────────────────────────────────────────────
+// Registered in the module as simd_ml_kernels.DTypeError (bases TypeError,
+// RuntimeError) and simd_ml_kernels.ArgumentError (bases ValueError,
+// RuntimeError). Before 0.3 every argument error was a plain RuntimeError;
+// the extra RuntimeError base keeps `except RuntimeError` working until 0.5.0.
+struct DTypeError    : std::runtime_error { using std::runtime_error::runtime_error; };
+struct ArgumentError : std::runtime_error { using std::runtime_error::runtime_error; };
+
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
 static void check_float32(const py::array& arr, const char* name) {
     if (arr.dtype().kind() != 'f' || arr.dtype().itemsize() != 4) {
-        throw std::runtime_error(
+        throw DTypeError(
             std::string(name) + " must be float32 (dtype=np.float32). "
             "Call arr.astype(np.float32) before passing.");
     }
@@ -67,7 +75,7 @@ static void check_float32(const py::array& arr, const char* name) {
 
 static void check_contiguous(const py::array& arr, const char* name) {
     if (!arr.attr("flags").attr("c_contiguous").cast<bool>()) {
-        throw std::runtime_error(
+        throw ArgumentError(
             std::string(name) + " must be C-contiguous. "
             "Call numpy.ascontiguousarray(arr) before passing.");
     }
@@ -80,10 +88,31 @@ static void validate_array(const py::array& arr, const char* name) {
 
 static void check_writeable(const py::array& arr, const char* name) {
     if (!arr.attr("flags").attr("writeable").cast<bool>()) {
-        throw std::runtime_error(
+        throw ArgumentError(
             std::string(name) + " must be writeable. "
             "The array may be read-only; make a copy first.");
     }
+}
+
+/**
+ * output_matrix — validate a caller-supplied output C without converting it.
+ *
+ * C is written in place, so it must already be exactly what the kernel
+ * writes: a float32, C-contiguous, writeable [M, N] ndarray. Casting it to
+ * py::array_t<float> (the previous code) silently made a converted copy for a
+ * float64 or strided C, wrote the result into that copy and left the caller's
+ * array unchanged.
+ */
+static py::array_t<float> output_matrix(const py::object& C, py::ssize_t M, py::ssize_t N) {
+    if (!py::isinstance<py::array>(C))
+        throw DTypeError("C must be a numpy.ndarray of dtype float32 (or None)");
+    auto arr = py::reinterpret_borrow<py::array>(C);
+    validate_array(arr, "C");
+    check_writeable(arr, "C");
+    if (arr.ndim() != 2 || arr.shape(0) != M || arr.shape(1) != N)
+        throw ArgumentError("C must have shape [" + std::to_string(M) + "×" +
+                            std::to_string(N) + "]");
+    return py::reinterpret_borrow<py::array_t<float>>(arr);
 }
 
 // ─── Binding: sgemm ──────────────────────────────────────────────────────────
@@ -137,7 +166,7 @@ static py::array_t<float> py_sgemm(py::array A,
     // for exactly this call (see IsaOverrideGuard above for the per-call,
     // not-sticky, semantics).
     if (!isa.empty() && isa != "avx2" && isa != "avx512" && isa != "scalar") {
-        throw std::runtime_error(
+        throw ArgumentError(
             "isa must be one of: 'avx2', 'avx512', 'scalar' (got '" + isa + "')");
     }
     if (isa == "scalar") {
@@ -160,15 +189,15 @@ static py::array_t<float> py_sgemm(py::array A,
 
     validate_array(A, "A");
     validate_array(B, "B");
-    if (A.ndim() != 2) throw std::runtime_error("A must be 2-D");
-    if (B.ndim() != 2) throw std::runtime_error("B must be 2-D");
+    if (A.ndim() != 2) throw ArgumentError("A must be 2-D");
+    if (B.ndim() != 2) throw ArgumentError("B must be 2-D");
 
     int M = static_cast<int>(A.shape(0));
     int K = static_cast<int>(A.shape(1));
     int N = static_cast<int>(B.shape(1));
 
     if (B.shape(0) != K) {
-        throw std::runtime_error(
+        throw ArgumentError(
             "Shape mismatch: A is [" + std::to_string(M) + "×" + std::to_string(K) +
             "] but B is [" + std::to_string(B.shape(0)) + "×" + std::to_string(N) + "]");
     }
@@ -183,13 +212,7 @@ static py::array_t<float> py_sgemm(py::array A,
             for (int i = 0; i < M * N; ++i) ptr[i] = 0.0f;
         }
     } else {
-        C_out = C.cast<py::array_t<float>>();
-        validate_array(C_out, "C");
-        check_writeable(C_out, "C");
-        if (C_out.ndim() != 2 || C_out.shape(0) != M || C_out.shape(1) != N) {
-            throw std::runtime_error(
-                "C must have shape [" + std::to_string(M) + "×" + std::to_string(N) + "]");
-        }
+        C_out = output_matrix(C, M, N);
     }
 
     const float* A_ptr = static_cast<const float*>(A.data());
@@ -269,14 +292,14 @@ static py::array_t<float> py_silu(py::array x) {
 // ─── Binding: softmax ────────────────────────────────────────────────────────
 static py::array_t<float> py_softmax(py::array x, int axis = -1) {
     validate_array(x, "x");
-    if (x.ndim() < 1) throw std::runtime_error("softmax requires a non-empty array");
+    if (x.ndim() < 1) throw ArgumentError("softmax requires an array with at least 1 dimension");
 
     int ndim = static_cast<int>(x.ndim());
     if (axis < 0) axis += ndim;
     if (axis < 0 || axis >= ndim)
-        throw std::runtime_error("softmax axis " + std::to_string(axis) + " out of range");
+        throw ArgumentError("softmax axis " + std::to_string(axis) + " out of range");
     if (axis != ndim - 1)
-        throw std::runtime_error(
+        throw ArgumentError(
             "softmax currently supports the last axis only (axis=-1). "
             "For other axes, transpose first.");
 
@@ -314,7 +337,7 @@ static py::array_t<float> py_layer_norm(py::array x,
                                           py::object beta_obj  = py::none(),
                                           float eps = 1e-5f) {
     validate_array(x, "x");
-    if (x.ndim() < 1) throw std::runtime_error("layer_norm requires a non-empty array");
+    if (x.ndim() < 1) throw ArgumentError("layer_norm requires an array with at least 1 dimension");
 
     int ndim     = static_cast<int>(x.ndim());
     int row_size = static_cast<int>(x.shape(ndim - 1));
@@ -329,14 +352,14 @@ static py::array_t<float> py_layer_norm(py::array x,
         gamma_arr = gamma_obj.cast<py::array_t<float>>();
         validate_array(gamma_arr, "gamma");
         if (gamma_arr.size() != row_size)
-            throw std::runtime_error("gamma must have size equal to the last dimension of x");
+            throw ArgumentError("gamma must have size equal to the last dimension of x");
         gamma_ptr = static_cast<const float*>(gamma_arr.data());
     }
     if (!beta_obj.is_none()) {
         beta_arr = beta_obj.cast<py::array_t<float>>();
         validate_array(beta_arr, "beta");
         if (beta_arr.size() != row_size)
-            throw std::runtime_error("beta must have size equal to the last dimension of x");
+            throw ArgumentError("beta must have size equal to the last dimension of x");
         beta_ptr = static_cast<const float*>(beta_arr.data());
     }
 
@@ -419,27 +442,27 @@ static py::array_t<float> py_sgemm_f16(py::array A,
     // Validate A and B: must be float16 (kind='f', itemsize=2) and C-contiguous
     auto check_f16 = [](const py::array& arr, const char* name) {
         if (arr.dtype().kind() != 'f' || arr.dtype().itemsize() != 2) {
-            throw std::runtime_error(
+            throw DTypeError(
                 std::string(name) + " must be float16 (dtype=np.float16). "
                 "Call arr.astype(np.float16) before passing.");
         }
         if (!arr.attr("flags").attr("c_contiguous").cast<bool>()) {
-            throw std::runtime_error(
+            throw ArgumentError(
                 std::string(name) + " must be C-contiguous. "
                 "Call numpy.ascontiguousarray(arr) before passing.");
         }
     };
     check_f16(A, "A");
     check_f16(B, "B");
-    if (A.ndim() != 2) throw std::runtime_error("A must be 2-D");
-    if (B.ndim() != 2) throw std::runtime_error("B must be 2-D");
+    if (A.ndim() != 2) throw ArgumentError("A must be 2-D");
+    if (B.ndim() != 2) throw ArgumentError("B must be 2-D");
 
     int M = static_cast<int>(A.shape(0));
     int K = static_cast<int>(A.shape(1));
     int N = static_cast<int>(B.shape(1));
 
     if (B.shape(0) != static_cast<py::ssize_t>(K)) {
-        throw std::runtime_error(
+        throw ArgumentError(
             "Shape mismatch: A is [" + std::to_string(M) + "×" +
             std::to_string(K) + "] but B is [" +
             std::to_string(B.shape(0)) + "×" + std::to_string(N) + "]");
@@ -454,14 +477,7 @@ static py::array_t<float> py_sgemm_f16(py::array A,
             for (int i = 0; i < M * N; ++i) ptr[i] = 0.0f;
         }
     } else {
-        C_out = C.cast<py::array_t<float>>();
-        validate_array(C_out, "C");
-        check_writeable(C_out, "C");
-        if (C_out.ndim() != 2 || C_out.shape(0) != M || C_out.shape(1) != N) {
-            throw std::runtime_error(
-                "C must have shape [" + std::to_string(M) + "×" +
-                std::to_string(N) + "] and dtype float32");
-        }
+        C_out = output_matrix(C, M, N);
     }
 
     const auto* A_ptr = static_cast<const uint16_t*>(A.data());
@@ -487,51 +503,47 @@ static bool py_f16c_available() {
  * sgemm_bf16(A, B, alpha=1.0, beta=0.0, C=None) -> np.ndarray[float32]
  *
  * BF16-input GEMM: C[fp32] = alpha * A[bf16] @ B[bf16] + beta * C[fp32]
- * A and B must be numpy arrays with dtype=np.float32 reinterpreted as BF16
- * (see notes below), or bfloat16 if supported by the numpy version.
- * Raises ValueError if dtype/shape conditions are not met.
- *
- * NumPy note: numpy >= 2.0 has a native bfloat16 dtype. For earlier versions
- * pass A.view(np.uint16) or use torch.Tensor.numpy() after .view(torch.uint16).
- * The raw uint16 bit patterns of BF16 values are what this function expects.
+ * A and B are uint16 arrays of BF16 bit patterns or ml_dtypes.bfloat16 arrays
+ * (NumPy has no bfloat16 dtype of its own). Raises DTypeError for any other
+ * dtype — float16 included — and ArgumentError for shape/layout problems.
  */
 static py::array_t<float> py_sgemm_bf16(py::array A,
                                           py::array B,
                                           float alpha  = 1.0f,
                                           float beta   = 0.0f,
                                           py::object C = py::none()) {
-    // Accept both bfloat16 (numpy >= 2.0, kind='V', itemsize=2 OR kind='f'
-    // itemsize=2 depending on implementation) and uint16 (explicit bit cast).
-    auto is_bf16_compatible = [](const py::array& arr) {
-        auto dt = arr.dtype();
-        // numpy uint16 (kind='u', itemsize=2): explicit bit-cast
-        // numpy bfloat16 (kind='V', itemsize=2): ml_dtypes or numpy 2.0
-        // We accept both — the bit layout is identical.
-        return (dt.itemsize() == 2 &&
-                (dt.kind() == 'u' || dt.kind() == 'V' || dt.kind() == 'f'));
+    // Accepted: uint16 arrays holding BF16 bit patterns, and ml_dtypes.bfloat16
+    // arrays (NumPy itself has no bfloat16 dtype; ml_dtypes registers one with
+    // kind 'V' and name "bfloat16"). float16 is rejected: it is IEEE binary16
+    // (5-bit exponent, 10-bit mantissa), and reading its bits as BF16 (8-bit
+    // exponent, 7-bit mantissa) gives wrong values without any error.
+    auto check_bf16 = [](const py::array& arr, const char* name) {
+        const auto dt = arr.dtype();
+        const bool is_uint16 = dt.kind() == 'u' && dt.itemsize() == 2;
+        const bool is_ml_dtypes_bf16 =
+            dt.itemsize() == 2 && py::str(dt.attr("name")).cast<std::string>() == "bfloat16";
+        if (is_uint16 || is_ml_dtypes_bf16) return;
+        const std::string got = py::str(dt.attr("name"));
+        std::string msg = std::string(name) +
+            " must hold BF16 values: a uint16 array of BF16 bit patterns or an "
+            "ml_dtypes.bfloat16 array (got " + got + ").";
+        if (dt.kind() == 'f' && dt.itemsize() == 2)
+            msg += " float16 is IEEE half precision, not BF16: use sgemm_f16 for float16 inputs.";
+        throw DTypeError(msg);
     };
-
-    if (!is_bf16_compatible(A))
-        throw std::runtime_error(
-            "A must be uint16 (BF16 bit-cast) or bfloat16 (numpy>=2.0). "
-            "Use A.view(np.uint16) or arr.astype(bfloat16) as appropriate.");
-    if (!is_bf16_compatible(B))
-        throw std::runtime_error(
-            "B must be uint16 (BF16 bit-cast) or bfloat16 (numpy>=2.0). "
-            "Use B.view(np.uint16) or arr.astype(bfloat16) as appropriate.");
-    if (A.ndim() != 2) throw std::runtime_error("A must be 2-D");
-    if (B.ndim() != 2) throw std::runtime_error("B must be 2-D");
-    if (!A.attr("flags").attr("c_contiguous").cast<bool>())
-        throw std::runtime_error("A must be C-contiguous");
-    if (!B.attr("flags").attr("c_contiguous").cast<bool>())
-        throw std::runtime_error("B must be C-contiguous");
+    check_bf16(A, "A");
+    check_bf16(B, "B");
+    if (A.ndim() != 2) throw ArgumentError("A must be 2-D");
+    if (B.ndim() != 2) throw ArgumentError("B must be 2-D");
+    check_contiguous(A, "A");
+    check_contiguous(B, "B");
 
     int M = static_cast<int>(A.shape(0));
     int K = static_cast<int>(A.shape(1));
     int N = static_cast<int>(B.shape(1));
 
     if (B.shape(0) != static_cast<py::ssize_t>(K))
-        throw std::runtime_error(
+        throw ArgumentError(
             "Shape mismatch: A is [" + std::to_string(M) + "×" +
             std::to_string(K) + "] but B is [" +
             std::to_string(B.shape(0)) + "×" + std::to_string(N) + "]");
@@ -545,13 +557,7 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
             std::fill(ptr, ptr + M * N, 0.0f);
         }
     } else {
-        C_out = C.cast<py::array_t<float>>();
-        validate_array(C_out, "C");
-        check_writeable(C_out, "C");
-        if (C_out.ndim() != 2 || C_out.shape(0) != M || C_out.shape(1) != N)
-            throw std::runtime_error(
-                "C must have shape [" + std::to_string(M) + "×" +
-                std::to_string(N) + "] and dtype float32");
+        C_out = output_matrix(C, M, N);
     }
 
     const auto* A_ptr = static_cast<const uint16_t*>(A.data());
@@ -648,6 +654,20 @@ PYBIND11_MODULE(_core, m) {
         "    C = sk.sgemm(A, B)           # SIMD GEMM\n"
         "    y = sk.gelu(x)               # Vectorized GeLU\n"
         "    print(sk.build_info())       # ISA and build details\n";
+
+    // PyErr_NewException accepts a tuple of bases, giving each error two
+    // builtin bases (see the struct definitions above).
+    auto dtype_error = py::register_exception<DTypeError>(
+        m, "DTypeError", py::make_tuple(py::handle(PyExc_TypeError), py::handle(PyExc_RuntimeError)));
+    dtype_error.attr("__doc__") =
+        "An array argument has the wrong dtype. Subclass of TypeError; also of "
+        "RuntimeError (raised before 0.3) until 0.5.0.";
+    auto argument_error = py::register_exception<ArgumentError>(
+        m, "ArgumentError", py::make_tuple(py::handle(PyExc_ValueError), py::handle(PyExc_RuntimeError)));
+    argument_error.attr("__doc__") =
+        "An argument has the wrong shape, layout (C-contiguity, writeability) or "
+        "value. Subclass of ValueError; also of RuntimeError (raised before 0.3) "
+        "until 0.5.0.";
 
     m.def("sgemm", &py_sgemm,
           py::arg("A"), py::arg("B"), py::arg("C") = py::none(),
@@ -786,21 +806,23 @@ A and B store Brain Float 16 values (same exponent as FP32, 7-bit mantissa).
 Output C is always float32 — BF16 accumulation would lose mantissa bits at
 each step. Requires only AVX2 (Haswell+); no special -mavx512bf16 flag.
 
-BF16→FP32 conversion uses the zero-extend+shift trick: BF16 is the top 16
-bits of FP32, so shifting left 16 reconstructs the full float bit pattern
-(3 integer AVX2 instructions per 8 values, cheaper than F16C's VCVTPH2PS).
+BF16→FP32 conversion is exact: BF16 is the top 16 bits of an FP32 value, so
+zero-extending to 32 bits and shifting left by 16 (vpmovzxwd + vpslld, AVX2)
+reconstructs it.
 
 Input formats accepted
 ----------------------
-numpy >= 2.0: pass arrays with dtype=numpy.float32 reinterpreted as BF16
-              using arr.view(np.uint16), or native bfloat16 dtype if available.
-PyTorch:      pass tensor.view(torch.uint16).numpy() for BF16 tensors.
-ml_dtypes:    pass arrays with dtype=ml_dtypes.bfloat16 (itemsize=2).
+uint16:    BF16 bit patterns. From float32 (truncating):
+           (x.view(np.uint32) >> 16).astype(np.uint16)
+ml_dtypes: arrays with dtype=ml_dtypes.bfloat16.
+PyTorch:   bf16_tensor.view(torch.uint16).numpy()
+float16 is rejected with DTypeError: it is IEEE half precision, a different
+format (use sgemm_f16). NumPy itself has no bfloat16 dtype.
 
 Parameters
 ----------
-A     : array-like [M, K], BF16 bit patterns (uint16 or bfloat16 dtype)
-B     : array-like [K, N], BF16 bit patterns (uint16 or bfloat16 dtype)
+A     : ndarray [M, K], uint16 BF16 bit patterns or ml_dtypes.bfloat16, C-contiguous
+B     : ndarray [K, N], uint16 BF16 bit patterns or ml_dtypes.bfloat16, C-contiguous
 alpha : float, default 1.0
 beta  : float, default 0.0  (0 = overwrite C, 1 = accumulate into C)
 C     : ndarray[float32], shape [M, N], optional (allocated if None)
@@ -812,9 +834,10 @@ ndarray[float32], shape [M, N]
 Example
 -------
 >>> import numpy as np, simd_ml_kernels as sk
->>> A_f32 = np.random.randn(64, 256).astype(np.float32)
->>> A_bf16 = A_f32.view(np.uint16)[..., 1::2]  # take upper 16 bits
->>> # Easier: use torch or ml_dtypes for proper BF16 arrays
+>>> to_bf16 = lambda x: (x.view(np.uint32) >> 16).astype(np.uint16)
+>>> A = np.random.randn(64, 256).astype(np.float32)
+>>> B = np.random.randn(256, 32).astype(np.float32)
+>>> C = sk.sgemm_bf16(to_bf16(A), to_bf16(B))   # float32 [64, 32]
 )doc");
 
     m.def("f16c_available", &py_f16c_available,

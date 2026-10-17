@@ -62,8 +62,8 @@ print(gemm)                          # GEMMConfig(alpha=2.0, beta=0.5, isa='avx2
 ```
 
 `isa` must be one of `""`, `"avx2"`, `"avx512"`, `"scalar"` — an invalid
-value raises `ValueError` at construction time (`GEMMConfig`) or `RuntimeError`
-(`sgemm()`, checked on every call). The `isa=` parameter is also accepted
+value raises `ValueError` at construction time (`GEMMConfig`) or
+`ArgumentError` (a `ValueError`; `sgemm()`, checked on every call). The `isa=` parameter is also accepted
 directly by `sgemm()`:
 
 ```python
@@ -231,21 +231,29 @@ simd_ml_kernels.is_aligned(x)   # True on most NumPy allocations ≥ 64 elements
 
 ## Error Handling
 
-All functions raise `RuntimeError` with a descriptive message for invalid inputs:
+| Problem | Exception | Builtin base |
+|---|---|---|
+| wrong dtype (including a `C` output that is not float32, and float16 passed to `sgemm_bf16`) | `simd_ml_kernels.DTypeError` | `TypeError` |
+| wrong shape/ndim, not C-contiguous, read-only output, bad `axis`, invalid `isa` string | `simd_ml_kernels.ArgumentError` | `ValueError` |
+| requested ISA not available on this CPU (`isa="avx512"`, `sgemm_f16` without F16C), `isa="scalar"` (not implemented) | `RuntimeError` | — |
+
+Both custom classes also subclass `RuntimeError`, which every argument error
+was before 0.3, so `except RuntimeError` keeps working until 0.5.0.
+
+Arrays are never converted silently. In particular an output `C` passed to
+`sgemm`/`sgemm_f16`/`sgemm_bf16` must already be a float32, C-contiguous,
+writeable `[M, N]` array, because the result is written into it in place.
 
 ```python
-# Wrong dtype
 simd_ml_kernels.gelu(np.array([1.0, 2.0], dtype=np.float64))
-# RuntimeError: x must be float32 (dtype=np.float32). Call arr.astype(np.float32)...
+# DTypeError: x must be float32 (dtype=np.float32). Call arr.astype(np.float32)...
 
-# Non-contiguous array
 simd_ml_kernels.relu(arr[::2])
-# RuntimeError: x must be C-contiguous. Call numpy.ascontiguousarray(arr)...
+# ArgumentError: x must be C-contiguous. Call numpy.ascontiguousarray(arr)...
 
-# Shape mismatch
 simd_ml_kernels.sgemm(np.zeros((4, 8), dtype=np.float32),
-                   np.zeros((3, 4), dtype=np.float32))
-# RuntimeError: Shape mismatch: A is [4×8] but B is [3×4]
+                      np.zeros((3, 4), dtype=np.float32))
+# ArgumentError: Shape mismatch: A is [4×8] but B is [3×4]
 ```
 
 ---
