@@ -1,25 +1,24 @@
 """
 tests/conftest.py — pytest configuration for the IntrinsicML test suite.
 
-Adds the project root and build directories to sys.path so that
-`import simd_kernels` resolves to the compiled extension without requiring
-a system-wide `pip install`.  The search order is:
+If `simd_kernels` is importable (pip install), the tests use that module.
+Only when it is not installed are build directories added to sys.path, in
+this order:
 
   1. build_ci/   (CMake out-of-source build used locally and in CI)
   2. build/      (alternative build directory name)
   3. Project root (if .so was copied there manually)
 
-This is intentionally a fallback mechanism.  The canonical way to import
-`simd_kernels` in CI is `pip install -e .` (via scikit-build-core), which
-puts the .so on the Python path permanently.  conftest.py exists so that
-`pytest tests/` works immediately after `cmake --build build_ci` without
-any install step.
+Build directories used to take precedence over the installed package, so a
+stale extension left in build/ (e.g. after a failed rebuild) was tested
+silently instead of the freshly installed one. The module actually imported
+is printed in the pytest header.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import sys
-import os
 from pathlib import Path
 
 # Repository root is one level above this file (tests/conftest.py → repo root)
@@ -45,6 +44,15 @@ def _try_add_path(directory: Path) -> bool:
     return False
 
 
-for _d in _SEARCH_DIRS:
-    if _try_add_path(_d):
-        break
+if importlib.util.find_spec("simd_kernels") is None:
+    for _d in _SEARCH_DIRS:
+        if _try_add_path(_d):
+            break
+
+
+def pytest_report_header(config):
+    try:
+        import simd_kernels
+    except ImportError as exc:
+        return f"simd_kernels: not importable ({exc})"
+    return f"simd_kernels: {simd_kernels.__file__}"
