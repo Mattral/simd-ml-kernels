@@ -29,7 +29,7 @@
 ---
 
 ## v0.4 — Activation Kernels ✅
-- [✅] GeLU (Cody–Waite exp-based tanh, < 2e-7 absolute error)
+- [✅] GeLU: exact erf (default) and tanh variants, `approximate=` as in PyTorch; max abs error ≤ 2e-6 for both (measured 9.5e-7 / 1.5e-6, see `docs/api/python_api.md`). An earlier entry here said "< 2e-7"; the measured error of the tanh variant was 1.2e-6.
 - [✅] ReLU (`_mm256_max_ps`, exact)
 - [✅] SiLU/Swish (`x·sigmoid(x)` via fast tanh, < 2e-7 error)
 - [✅] Softmax (numerically stable, max-subtraction, double accumulation)

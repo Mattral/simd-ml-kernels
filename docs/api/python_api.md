@@ -98,29 +98,36 @@ Two important edge cases:
 
 ## Activation Functions
 
-### `gelu(x) → np.ndarray`
+### `gelu(x, approximate="none") → np.ndarray`
 
-Out-of-place GeLU activation (tanh approximation). Input `x` is unchanged.
+Out-of-place GeLU. Input `x` is unchanged.
 
-```python
-x = np.random.randn(65536).astype(np.float32)
-y = simd_ml_kernels.gelu(x)   # y = GeLU(x), x unchanged
-```
-
-### `gelu_inplace(x) → None`
+### `gelu_inplace(x, approximate="none") → None`
 
 In-place GeLU: `x[:] = GeLU(x)`. No allocation. `x` must be writeable.
 
 ```python
-simd_ml_kernels.gelu_inplace(x)   # modifies x in place
+y = simd_ml_kernels.gelu(x)                       # exact, like torch.nn.functional.gelu(x)
+y = simd_ml_kernels.gelu(x, approximate="tanh")   # like gelu(x, approximate='tanh')
+simd_ml_kernels.gelu_inplace(x)                   # modifies x in place
 ```
 
-Both functions use the tanh approximation from BERT/GPT:
-```
-GeLU(x) ≈ 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))
-```
-Max absolute error vs exact GeLU: < 5×10⁻⁴ (formula gap, not implementation error).  
-Max absolute error vs `torch.nn.functional.gelu(x, approximate='tanh')`: < 5×10⁻⁷.
+| `approximate` | formula | max abs error vs float64 (asserted bound / measured) |
+|---|---|---|
+| `"none"` (default) | `0.5·x·(1 + erf(x/√2))` | ≤ 2e-6 / 9.5e-7 on [−10, 10]; ≤ 1e-6 / 4.0e-7 on [−3, 3] |
+| `"tanh"` | `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` | ≤ 2e-6 / 1.5e-6 on [−10, 10] vs the tanh formula |
+
+The two formulas differ from each other by up to 4.7e-4: that is the formula
+gap, not implementation error. Measured on a 400,001-point sweep
+(`tests/test_precision.py::TestGeLU`, `tests/test_gelu.cpp`). erf is a rational
+approximation `x·P(x²)/Q(x²)` with the coefficients of XLA's `ErfImpl32`. For
+x < −4, |GeLU(x)| < 1.3e-4 and only the absolute bound is meaningful. Both
+variants return −0 for x < −10 (|GeLU(−10)| = 7.6e-23), +inf for +inf, −0 for
+−inf and NaN for NaN; the last `n % 8` elements use the same vector kernel
+(masked), so results do not depend on array position.
+
+Before 0.3 `gelu` always used the tanh formula; the default is now exact, as in
+PyTorch. Pass `approximate="tanh"` for the previous behaviour.
 
 ### `relu(x) → np.ndarray`
 

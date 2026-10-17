@@ -227,12 +227,19 @@ static py::array_t<float> py_sgemm(py::array A,
     return C_out;
 }
 
-// ─── Binding: gelu_inplace ───────────────────────────────────────────────────
-/**
- * gelu_inplace(x) — In-place AVX2 GeLU.
- * x[:] = GeLU(x)   (tanh approximation, max error < 5e-6)
- */
-static void py_gelu_inplace(py::array x) {
+// ─── Binding: gelu / gelu_inplace ────────────────────────────────────────────
+// approximate="none" (default, as in PyTorch): exact 0.5·x·(1 + erf(x/√2)).
+// approximate="tanh": the tanh formula, PyTorch's approximate='tanh'.
+using GeluFn = void (*)(const float*, float*, std::size_t);
+
+static GeluFn gelu_variant(const std::string& approximate) {
+    if (approximate == "none") return &gelu_erf_forward_avx2;
+    if (approximate == "tanh") return &gelu_forward_avx2;
+    throw ArgumentError("approximate must be 'none' or 'tanh' (got '" + approximate + "')");
+}
+
+static void py_gelu_inplace(py::array x, const std::string& approximate = "none") {
+    const GeluFn fn = gelu_variant(approximate);
     validate_array(x, "x");
     check_writeable(x, "x");
 
@@ -241,16 +248,12 @@ static void py_gelu_inplace(py::array x) {
 
     {
         py::gil_scoped_release release;
-        gelu_forward_avx2(ptr, ptr, n);
+        fn(ptr, ptr, n);
     }
 }
 
-// ─── Binding: gelu (out-of-place) ────────────────────────────────────────────
-/**
- * gelu(x) -> np.ndarray
- * Returns a new array GeLU(x). Input x is not modified.
- */
-static py::array_t<float> py_gelu(py::array x) {
+static py::array_t<float> py_gelu(py::array x, const std::string& approximate = "none") {
+    const GeluFn fn = gelu_variant(approximate);
     validate_array(x, "x");
 
     std::size_t n = static_cast<std::size_t>(x.size());
@@ -258,7 +261,7 @@ static py::array_t<float> py_gelu(py::array x) {
 
     {
         py::gil_scoped_release release;
-        gelu_forward_avx2(static_cast<const float*>(x.data()), out.mutable_data(), n);
+        fn(static_cast<const float*>(x.data()), out.mutable_data(), n);
     }
     return out;
 }
@@ -712,25 +715,39 @@ doesn't help a packing-bound regime — see DESIGN.md §7 for the full gap
 analysis.
 )doc");
 
-    m.def("gelu_inplace", &py_gelu_inplace,
-          py::arg("x"),
-          R"doc(
-In-place AVX2-vectorized GeLU activation: x[:] = GeLU(x).
+    static const char* gelu_doc = R"doc(
+GeLU activation, element-wise, float32. Same definitions as
+torch.nn.functional.gelu:
 
-Uses the fast tanh approximation:
-    GeLU(x) ≈ 0.5*x*(1 + tanh(√(2/π)*(x + 0.044715*x³)))
+approximate="none" (default): exact  0.5*x*(1 + erf(x/sqrt(2)))
+approximate="tanh":           0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
 
-Polynomial evaluation is fully vectorized — no scalar branches in the hot path.
-Max absolute error vs exact GeLU: < 5e-6 over [-5, 5].
+Accuracy against a float64 evaluation of the same formula (asserted in
+tests/test_precision.py::TestGeLU, dense sweep of [-10, 10]):
+  "none": max abs error <= 2e-6 (measured 9.5e-7); <= 1e-6 on [-3, 3]
+          (measured 4.0e-7). erf is a rational approximation (XLA
+          ErfImpl32 coefficients). For x < -4, where |GeLU(x)| < 1.3e-4,
+          the absolute bound holds but the relative error is large.
+  "tanh": max abs error <= 2e-6 vs the tanh formula (measured 1.5e-6). It
+          differs from the exact GeLU by up to 4.7e-4 (formula difference).
+Both: x < -10 returns -0 (|GeLU(-10)| = 7.6e-23); GeLU(+inf) = +inf,
+GeLU(-inf) = -0, GeLU(NaN) = NaN.
 
 Parameters
 ----------
-x : np.ndarray[float32], any shape, writeable
-)doc");
+x           : np.ndarray[float32], any shape, C-contiguous
+approximate : "none" | "tanh"
+)doc";
 
-    m.def("gelu", &py_gelu,
-          py::arg("x"),
-          "Out-of-place AVX2 GeLU. Returns a new array; input is unchanged.");
+    // pybind11 keeps the doc pointer, so the strings need static storage.
+    static const std::string gelu_out_doc =
+        std::string(gelu_doc) + "\nReturns a new array; x is not modified.\n";
+    static const std::string gelu_inplace_doc =
+        std::string(gelu_doc) + "\nIn place: x[:] = gelu(x); x must be writeable.\n";
+    m.def("gelu", &py_gelu, py::arg("x"), py::arg("approximate") = "none",
+          gelu_out_doc.c_str());
+    m.def("gelu_inplace", &py_gelu_inplace, py::arg("x"), py::arg("approximate") = "none",
+          gelu_inplace_doc.c_str());
 
     m.def("relu", &py_relu,
           py::arg("x"),

@@ -21,6 +21,11 @@ under **Changed** with a migration note.
     installed headers moved from `include/simd_kernels/` to
     `include/simd_ml_kernels/`. The CMake package was never published, so no
     alias is provided.
+- **`gelu` / `gelu_inplace` default to exact GeLU**, `0.5·x·(1 + erf(x/√2))`,
+  matching `torch.nn.functional.gelu`; `approximate="tanh"` selects the tanh
+  formula used before. Outputs of the default call change by up to 4.7e-4
+  (the gap between the two formulas). Migration: pass `approximate="tanh"` to
+  keep the old results. Both variants are within 2e-6 of float64.
 - `f16c_available()` and `bf16_avx512bf16_available()` now also require the OS
   to have enabled the YMM / ZMM register state (XGETBV), not only the CPUID bit.
 - **Argument errors have specific types.** Wrong dtype raises
@@ -39,6 +44,14 @@ under **Changed** with a migration note.
   `SIMD_ML_BUILD_TESTS`, `SIMD_ML_BUILD_BENCHMARKS`, default ON for CMake users).
 
 ### Fixed
+- `gelu(-inf)` returned NaN; it now returns -0 (x < -10 returns -0). The last
+  `n % 8` elements of `gelu` were computed with libm `tanhf` instead of the
+  vector kernel, so a value's result depended on its position; the tail now
+  uses the same kernel with masked loads/stores. `gelu_inplace` called a
+  function whose arguments were declared `__restrict__` with aliased pointers
+  (undefined behaviour); the qualifier is removed.
+- The `gelu_inplace` docstring claimed max error < 5e-6 vs exact GeLU; the
+  tanh formula differs from exact GeLU by up to 4.7e-4.
 - GEMM with K = 0 (`sgemm`, `sgemm_f16`, `sgemm_bf16`, and the scalar fallback)
   returned without touching C: an allocated output held uninitialised memory
   and `beta` was ignored. It now computes C = beta·C, with beta = 0

@@ -12,6 +12,8 @@ Requirements:
     pip install -e .  # or: cmake --build build && cp build/simd_ml_kernels*.so .
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -201,65 +203,104 @@ class TestGEMM:
 # ─── GeLU Tests ──────────────────────────────────────────────────────────────
 
 class TestGeLU:
-    """Verify SIMD GeLU matches the fast tanh approximation reference."""
+    """GeLU, both variants, against float64 evaluations of the same formula.
 
-    GELU_TOL = 1e-4    # relative component: Cody-Waite exp-tanh, < 2e-7 abs tanh error
+    The bounds asserted here are the ones quoted in the gelu() docstring.
+    """
+
+    GELU_TOL = 1e-4    # relative component for random-input comparisons
     GELU_ATOL = 1e-6   # absolute floor: GeLU crosses zero at x=0, needs an absolute bound
                        # near the crossing (see assert_close docstring for why this matters)
+    SWEEP = np.linspace(-10.0, 10.0, 400_001).astype(np.float32)
 
+    @staticmethod
+    def _erf_ref(x):
+        x64 = np.asarray(x, dtype=np.float64)
+        erf = np.vectorize(math.erf)(x64 / math.sqrt(2.0))
+        return 0.5 * x64 * (1.0 + erf)
+
+    def test_default_is_exact(self):
+        x = RNG.standard_normal(1000).astype(np.float32)
+        np.testing.assert_array_equal(simd_ml_kernels.gelu(x),
+                                      simd_ml_kernels.gelu(x, approximate="none"))
+
+    def test_exact_sweep_bound(self):
+        x = self.SWEEP
+        err = np.abs(simd_ml_kernels.gelu(x).astype(np.float64) - self._erf_ref(x))
+        assert err.max() <= 2e-6, f"max abs err {err.max():.3e} on [-10, 10]"
+        core = np.abs(x) <= 3.0
+        assert err[core].max() <= 1e-6, f"max abs err {err[core].max():.3e} on [-3, 3]"
+
+    def test_tanh_sweep_bound(self):
+        x = self.SWEEP
+        out = simd_ml_kernels.gelu(x, approximate="tanh").astype(np.float64)
+        err = np.abs(out - gelu_tanh_numpy(x))
+        assert err.max() <= 2e-6, f"max abs err {err.max():.3e} on [-10, 10]"
+
+    def test_tanh_vs_exact_formula_gap(self):
+        """The two formulas differ by up to ~4.7e-4; documents why both exist."""
+        x = self.SWEEP
+        gap = np.abs(simd_ml_kernels.gelu(x, approximate="tanh").astype(np.float64)
+                     - self._erf_ref(x))
+        assert 4e-4 < gap.max() < 5e-4
+
+    @pytest.mark.parametrize("approximate", ["none", "tanh"])
     @pytest.mark.parametrize("n", [1, 7, 8, 9, 16, 64, 1024, 65536])
-    def test_gelu_vs_tanh_approx(self, n):
+    def test_random_inputs_all_sizes(self, approximate, n):
         x = RNG.uniform(-3.0, 3.0, size=n).astype(np.float32)
-        ref = gelu_tanh_numpy(x)
-        out = simd_ml_kernels.gelu(x)
+        ref = self._erf_ref(x) if approximate == "none" else gelu_tanh_numpy(x)
+        out = simd_ml_kernels.gelu(x, approximate=approximate)
         assert_close(out, ref, rtol=self.GELU_TOL, atol=self.GELU_ATOL,
-                    label=f"GeLU n={n}")
+                     label=f"GeLU({approximate}) n={n}")
 
-    def test_gelu_sweep_full_range(self):
-        """Dense sweep over [-5, 5] where the polynomial approximation is valid."""
-        x = np.arange(-5.0, 5.0 + 1e-12, 0.001, dtype=np.float32)
-        ref = gelu_tanh_numpy(x)
-        out = simd_ml_kernels.gelu(x)
-        max_abs_err = float(np.max(np.abs(out.astype(np.float64) - ref)))
-        assert max_abs_err < 1e-4, (
-            f"GeLU sweep [-5,5]: max_abs_err={max_abs_err:.2e} > 1e-4"
-        )
+    @pytest.mark.parametrize("approximate", ["none", "tanh"])
+    def test_tail_matches_vector_body_bitwise(self, approximate):
+        """Elements in the last n % 8 go through the same kernel (masked), so
+        a value's result does not depend on its position in the array."""
+        x = RNG.standard_normal(16).astype(np.float32)
+        full = simd_ml_kernels.gelu(x, approximate=approximate)       # all in 8-wide body
+        part = simd_ml_kernels.gelu(x[:13].copy(), approximate=approximate)  # 8..12 in tail
+        np.testing.assert_array_equal(part, full[:13])
 
-    def test_gelu_inplace_equals_outofplace(self):
-        x = RNG.standard_normal(8192).astype(np.float32)
-        out_oop = simd_ml_kernels.gelu(x.copy())
+    @pytest.mark.parametrize("approximate", ["none", "tanh"])
+    @pytest.mark.parametrize("offset", [0, 9])   # vector body / masked tail
+    def test_special_values(self, approximate, offset):
+        special = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0, 1e-40, -1e-40],
+                           dtype=np.float32)
+        x = np.zeros(offset + special.size, np.float32)
+        x[offset:] = special
+        out = simd_ml_kernels.gelu(x, approximate=approximate)[offset:]
+        assert out[0] == np.inf
+        assert out[1] == 0.0
+        assert np.isnan(out[2])
+        assert out[3] == 0.0 and out[4] == 0.0
+        assert np.all(np.abs(out[5:]) <= 1e-40)
+
+    def test_invalid_approximate(self):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="approximate"):
+            simd_ml_kernels.gelu(np.ones(4, np.float32), approximate="erf")
+
+    @pytest.mark.parametrize("approximate", ["none", "tanh"])
+    def test_inplace_equals_outofplace(self, approximate):
+        x = RNG.standard_normal(8195).astype(np.float32)
+        out_oop = simd_ml_kernels.gelu(x, approximate=approximate)
         x_ip = x.copy()
-        simd_ml_kernels.gelu_inplace(x_ip)
-        assert np.allclose(out_oop, x_ip, rtol=1e-6), \
-            "In-place and out-of-place GeLU must agree"
+        simd_ml_kernels.gelu_inplace(x_ip, approximate=approximate)
+        np.testing.assert_array_equal(out_oop, x_ip)
 
-    def test_gelu_negative_saturation(self):
-        """For x ≪ 0, GeLU(x) → 0."""
-        x = np.full(64, -10.0, dtype=np.float32)
-        out = simd_ml_kernels.gelu(x)
-        assert np.allclose(out, 0.0, atol=1e-5), "GeLU(-10) should be ≈ 0"
-
-    def test_gelu_positive_passthrough(self):
-        """For large x > 0, GeLU(x) ≈ x."""
-        x = np.full(64, 10.0, dtype=np.float32)
-        out = simd_ml_kernels.gelu(x)
-        assert np.allclose(out, x, rtol=1e-3), "GeLU(10) should be ≈ 10"
-
-    def test_gelu_output_shape_preserved(self):
+    def test_output_shape_preserved(self):
         for shape in [(8,), (4, 16), (2, 3, 32)]:
             x = rand_array(int(np.prod(shape))).reshape(shape)
-            out = simd_ml_kernels.gelu(x)
-            assert out.shape == shape, f"shape {shape} not preserved"
+            assert simd_ml_kernels.gelu(x).shape == shape
 
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
-    def test_gelu_vs_pytorch_tanh_approx(self):
-        """Cross-check against torch.nn.functional.gelu(approximate='tanh')."""
+    @pytest.mark.parametrize("approximate", ["none", "tanh"])
+    def test_vs_pytorch(self, approximate):
         x_np = RNG.standard_normal(4096).astype(np.float32)
-        x_pt = torch.from_numpy(x_np)
-        ref = F.gelu(x_pt, approximate="tanh").numpy()
-        got = simd_ml_kernels.gelu(x_np)
+        ref = F.gelu(torch.from_numpy(x_np), approximate=approximate).numpy()
+        got = simd_ml_kernels.gelu(x_np, approximate=approximate)
         assert_close(got, ref, rtol=self.GELU_TOL, atol=self.GELU_ATOL,
-                    label="vs PyTorch GeLU")
+                     label=f"vs PyTorch GeLU({approximate})")
 
 
 # ─── ReLU Tests ──────────────────────────────────────────────────────────────
