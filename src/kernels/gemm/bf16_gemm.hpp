@@ -38,7 +38,7 @@
  * implementation uses the AVX2 zero-extend path on all hardware.
  *
  * ─── See also ─────────────────────────────────────────────────────────────────
- * docs/ROADMAP.md §v0.9, docs/DESIGN.md §10, f16_gemm.hpp (FP16 variant)
+ * docs/ROADMAP.md §v0.9, docs/DESIGN.md §4, f16_gemm.hpp (FP16 variant)
  */
 
 #include <cstdint>

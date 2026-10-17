@@ -6,37 +6,18 @@ Thank you for your interest in contributing. simd-ml-kernels values transparency
 
 ## Quick start
 
-```bash
-git clone https://github.com/Mattral/simd-ml-kernels.git
-cd simd-ml-kernels
-
-# C++ build and tests
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-
-# Python extension and tests
-pip install -e . --no-build-isolation
-pytest tests/test_precision.py tests/test_bindings_edge_cases.py -v
-```
-
-See `docs/setup.md` for full prerequisites and optional flags.
+Build, test and benchmark commands, the repository map and the rules every
+change follows are in [AGENTS.md](AGENTS.md). Full prerequisites and CMake
+options are in [docs/setup.md](docs/setup.md).
 
 ---
 
 ## Where to contribute
 
-### High-value areas (aligned with ROADMAP.md)
-
-| Area | Status | Entry point |
-|---|---|---|
-| Skip panel packing for small N (packed kernel is slower than scalar at N=64) | 🔴 Planned v0.9 | `src/kernels/gemm/avx2_gemm_packed.cpp` |
-| BF16/FP16 GEMM | 🔴 Planned v0.9 | new file under `src/kernels/gemm/` |
-| Auto-tuned tile sizes (MC/KC/NC re-derived for Sapphire Rapids / Zen 4) | 🔴 Planned v0.9 | `src/kernels/gemm/avx2_gemm_packed.hpp` |
-| Benchmark results on new hardware | 🟡 Always welcome | `docs/BENCHMARKS.md` |
-| Bug reports with repro steps | 🟡 Always welcome | GitHub Issues |
-
-Before starting significant work, open an issue first to avoid duplicating effort.
+Planned work, in order, is in [docs/ROADMAP.md](docs/ROADMAP.md). Benchmark
+results from hardware not yet in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and
+bug reports with a reproducer are always welcome. Open an issue before
+starting significant work.
 
 ---
 
@@ -119,41 +100,7 @@ cmake --build build --parallel 2>&1 | grep warning
 
 ## Adding a new kernel
 
-Follow this checklist exactly. Skipping steps is the primary source of bugs in this codebase.
-
-**Step 1: Scalar reference**
-Write the mathematically correct scalar implementation first. No SIMD yet. This is your correctness oracle.
-
-```cpp
-// src/kernels/activations/my_kernel_avx2.cpp
-static void my_kernel_scalar(const float* in, float* out, int n) {
-    for (int i = 0; i < n; ++i) {
-        // exact formula, no approximations
-        out[i] = std::some_function(in[i]);
-    }
-}
-```
-
-**Step 2: Measure scalar accuracy**
-Compute max absolute error of your scalar implementation against a double-precision reference. Document the result.
-
-**Step 3: Declare in `activations.hpp`**
-Add a declaration with a comment stating the algorithm and error bound.
-
-**Step 4: AVX2 implementation**
-Use `simd_math.hpp` for `fast_exp_avx2` and `tanh_avx2` rather than re-implementing them. Document every non-obvious intrinsic choice.
-
-**Step 5: Scalar tail**
-All AVX2 loops must have a scalar tail for `n % 8` remaining elements.
-
-**Step 6: C++ correctness test**
-Add cases to `tests/test_activations.cpp` following the existing pattern. Test: edge sizes (1, 7, 8, 9), full AVX2 sizes (64, 1024), wide sweeps over the input range.
-
-**Step 7: Python binding**
-Add to `pybind_entry.cpp`, `python/simd_ml_kernels/_core.pyi`, and document in `docs/api/python_api.md`.
-
-**Step 8: Python precision test**
-Add a `TestMyKernel` class to `tests/test_precision.py`. Include a `@pytest.mark.skipif(not HAS_TORCH, ...)` cross-check against PyTorch if applicable.
+Follow the checklist in [AGENTS.md](AGENTS.md#adding-a-kernel).
 
 **Never use a naive relative-error metric** — `|actual - ref| / (|ref| + eps)`
 with a tiny `eps` (e.g. `1e-7`) is numerically unstable for any function that
@@ -170,28 +117,16 @@ helper in `tests/test_precision.py`, which implements the combined
 Pick `atol` based on the kernel's documented absolute error bound near zero
 (typically `1e-5` to `1e-6` for the tanh-based activations in this project).
 
-**Step 9: Run all tests**
-```bash
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-pytest tests/test_precision.py tests/test_bindings_edge_cases.py -v
-```
-
-All must pass with zero warnings.
-
-**Step 10: Update ROADMAP.md**
-Mark the item ✅ in ROADMAP.md.
-
 ---
 
 ## Adding a GEMM tile variant
 
 GEMM tile variants (`MR`, `NR`, `MC`, `KC`, `NC`) require special care:
 
-1. Derive the new constants from first principles (show your cache-level derivation, see `docs/design/cache_hierarchy.md`)
+1. Derive the new constants from first principles (show the cache-level derivation, as in `docs/DESIGN.md` §2.3)
 2. Add a `#define VARIANT_NAME` compile-time guard
 3. Test with the *existing* `test_gemm_packed.cpp` test suite — all sizes must pass, including non-power-of-two
-4. Benchmark with `bench_stat --reps 50` on a pinned core and document the result in `docs/BENCHMARKS.md`
+4. Benchmark with `python -m simd_ml_kernels bench --json` on a pinned core and commit the JSON (see below)
 5. Do not change the default tile sizes without a clear documented performance improvement on representative hardware
 
 ---
@@ -211,13 +146,13 @@ GEMM tile variants (`MR`, `NR`, `MC`, `KC`, `NC`) require special care:
 
 ## Benchmark contributions
 
-If you run benchmarks on hardware not yet represented in `docs/BENCHMARKS.md`, contributions are especially valuable. Please include:
-
-- Exact CPU model (`lscpu | grep "Model name"`)
-- Cache sizes (`lscpu | grep -E "L1d|L2|L3"`)
-- Compiler version (`g++ --version`)
-- Whether CPU frequency was locked (`cpupower frequency-info`)
-- Full `bench_stat --reps 50` output as JSON (commit to `benchmarks/results/`)
+Run `python -m simd_ml_kernels bench --json` with the protocol in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) (one pinned core, thread variables
+set to 1, from a clean commit that is on `main`) and open a PR that adds the
+JSON to `benchmarks/results/` and the regenerated tables
+(`python benchmarks/make_tables.py`). The JSON records the CPU, caches,
+compiler, flags, commit and baseline versions; add anything else relevant
+(power settings, frequency locking) with `--note`.
 
 ---
 

@@ -35,7 +35,7 @@ cmake --build build --parallel
 ./build/bench
 
 # Statistical benchmark (30-rep wall-clock, 95% CI, JSON output)
-./build/bench_stat --reps 30 --output benchmarks/results/ci_results.json
+./build/bench_stat --reps 30 --output /tmp/bench_stat.json   # not the published format
 
 # C++ test suite
 ctest --test-dir build --output-on-failure
@@ -47,7 +47,7 @@ ctest --test-dir build --output-on-failure
 |---|---|---|
 | `-DSIMD_ML_OPENMP=ON` | OFF | Enable OpenMP multi-threaded GEMM |
 | `-DBENCH_OPENBLAS=ON` | OFF | Link OpenBLAS for baseline comparison in `bench_stat` |
-| `-DSIMD_ML_SANITIZE=ON` | OFF | Enable AddressSanitizer + UBSan in test binaries |
+| `-DSIMD_ML_SANITIZE=ON` | OFF | Instrument every target (kernels included) with ASan + UBSan |
 
 ---
 

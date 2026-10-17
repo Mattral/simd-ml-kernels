@@ -6,7 +6,7 @@
  * Goto/BLIS-style 5-loop tiling, and panel packing for cache efficiency.
  *
  * ─── Design overview ──────────────────────────────────────────────────────────
- * See docs/DESIGN.md §2–3 for cache-blocking rationale and §3.2 for the 8×8
+ * See docs/DESIGN.md §2 for the cache-blocking rationale and the 8×8
  * register-tile choice.  Tile sizes:
  *
  *   MR=8, NR=8   — micro-kernel register block (8 YMM accumulators)

@@ -16,7 +16,7 @@ import math
 import os
 import platform
 import sys
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -317,6 +317,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         print("bench: set " + " ".join(f"{k}=1" for k in bad) + " so the baselines are "
               "single-threaded (or pass --allow-threads).", file=sys.stderr)
         return 2
+    torch: Any
     try:
         import torch
 
@@ -338,8 +339,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
         a = rng.standard_normal((n, n)).astype(np.float32)
         b = rng.standard_normal((n, n)).astype(np.float32)
         c = np.empty((n, n), np.float32)
-        impls = [("simd_ml_kernels", lambda: sk.sgemm(a, b, C=c)),
-                 ("numpy/" + str(_blas_info()["name"]), lambda: np.matmul(a, b, out=c))]
+        impls: list[tuple[str, Callable[[], object]]] = [
+            ("simd_ml_kernels", lambda: sk.sgemm(a, b, C=c)),
+            ("numpy/" + str(_blas_info()["name"]), lambda: np.matmul(a, b, out=c)),
+        ]
         stats, clock = _time([fn for _, fn in impls], args.warmup, args.reps, args.min_ghz)
         for (impl, _), t in zip(impls, stats):
             show(_record(results, "sgemm", impl, (n, n, n), t, 2.0 * n ** 3, "flop", clock))

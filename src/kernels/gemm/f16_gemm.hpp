@@ -23,7 +23,7 @@
  * patterns — the same layout used by numpy.float16).
  *
  * ─── See also ─────────────────────────────────────────────────────────────────
- * docs/ROADMAP.md §v0.9, docs/DESIGN.md §10
+ * docs/ROADMAP.md §v0.9, docs/DESIGN.md §4
  */
 
 #include <cstdint>

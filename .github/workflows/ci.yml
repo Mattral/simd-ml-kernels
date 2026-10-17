@@ -129,7 +129,8 @@ jobs:
             "numpy>=1.24" \
             "scipy>=1.11" \
             "pytest>=7.4" \
-            ml_dtypes
+            ml_dtypes \
+            mypy
           # Install CPU-only PyTorch to enable the 4 cross-validation tests
           # (test_gelu_vs_pytorch_tanh_approx, test_silu_vs_pytorch,
           #  test_softmax_vs_pytorch_2d, test_layer_norm_vs_pytorch)
@@ -158,12 +159,23 @@ jobs:
       - name: Run Python tests
         run: python3 -m pytest tests -v --tb=short
 
+      # Names in _core.pyi vs the compiled module (missing or extra functions).
+      # Parameters and defaults are compared by tests/test_stubs.py: stubtest
+      # cannot read pybind11 signatures (no __text_signature__).
+      - name: Type stubs match the module (mypy.stubtest)
+        run: python3 -m mypy.stubtest simd_ml_kernels --allowlist tests/stubtest_allowlist.txt
+
       - name: Benchmark CLI smoke test (tiny sizes; numbers not used)
         env:
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
           MKL_NUM_THREADS: "1"
         run: python3 -m simd_ml_kernels bench --sizes 128 --elems 65536 --warmup 1 --reps 3 --json /tmp/bench.json
+
+      - name: Examples run (examples/)
+        run: |
+          python3 examples/mlp_block.py
+          python3 examples/bench_to_json.py /tmp/example.json --sizes 128 --reps 3
 
       - name: Benchmark tables match committed JSON
         run: python3 benchmarks/make_tables.py --check
