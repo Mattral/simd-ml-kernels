@@ -358,36 +358,25 @@ class TestLayerNorm:
     LN_TOL = 1e-4
     LN_ATOL = 1e-5  # normalized output crosses zero regularly — see assert_close docstring
 
-    @pytest.mark.parametrize("n", [8, 64, 128, 256, 512, 768, 1024])
-    def test_layer_norm_zero_mean_unit_std(self, n):
-        """Without gamma/beta, output should have mean≈0 and std≈1."""
-        x = RNG.standard_normal(n).astype(np.float32)
-        out = simd_kernels.layer_norm(x)
-        assert abs(float(out.mean())) < 1e-4, \
-            f"LayerNorm n={n}: mean={float(out.mean()):.4e} ≠ 0"
-        assert abs(float(out.std()) - 1.0) < 1e-3, \
-            f"LayerNorm n={n}: std={float(out.std()):.5f} ≠ 1"
+    @pytest.mark.parametrize("use_gamma", [False, True])
+    @pytest.mark.parametrize("use_beta", [False, True])
+    @pytest.mark.parametrize("n", [1, 7, 8, 9, 17, 64, 768, 1027])
+    def test_layer_norm_affine_combinations(self, n, use_gamma, use_beta):
+        """Every gamma/beta combination matches the float64 reference.
 
-    @pytest.mark.parametrize("n", [64, 256, 768])
-    def test_layer_norm_with_affine(self, n):
-        """With gamma/beta, output must match the numpy reference."""
-        x     = RNG.standard_normal(n).astype(np.float32)
-        gamma = (1.0 + 0.1 * RNG.standard_normal(n)).astype(np.float32)
-        beta  = (0.01 * RNG.standard_normal(n)).astype(np.float32)
+        n covers the scalar tail alone, whole 8-wide AVX2 blocks, and both.
+        Inputs have mean 50 and std 100; beta has unit scale, so dropping it
+        would be off by O(1), far outside atol=1e-5 / rtol=1e-4.
+        """
+        x     = (50.0 + 100.0 * RNG.standard_normal((3, n))).astype(np.float32)
+        gamma = RNG.standard_normal(n).astype(np.float32) if use_gamma else None
+        beta  = RNG.standard_normal(n).astype(np.float32) if use_beta else None
 
         ref = layer_norm_numpy(x, gamma, beta)
         out = simd_kernels.layer_norm(x, gamma=gamma, beta=beta)
 
         assert_close(out, ref, rtol=self.LN_TOL, atol=self.LN_ATOL,
-                    label=f"LayerNorm affine n={n}")
-
-    def test_layer_norm_2d_batch(self):
-        """LayerNorm applied to each row of a 2D array."""
-        x     = RNG.standard_normal((16, 128)).astype(np.float32)
-        out   = simd_kernels.layer_norm(x)
-        ref   = layer_norm_numpy(x)
-        assert_close(out, ref, rtol=self.LN_TOL, atol=self.LN_ATOL,
-                    label="LayerNorm 2D")
+                    label=f"LayerNorm n={n} gamma={use_gamma} beta={use_beta}")
 
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
     def test_layer_norm_vs_pytorch(self):
