@@ -15,40 +15,40 @@ import numpy as np
 
 
 def main() -> int:
-    import simd_kernels
+    import simd_ml_kernels
 
-    print("simd_kernels module file:", simd_kernels.__file__)
-    print("build_info():", simd_kernels.build_info())
-    print("detected_isa():", simd_kernels.detected_isa())
+    print("simd_ml_kernels module file:", simd_ml_kernels.__file__)
+    print("build_info():", simd_ml_kernels.build_info())
+    print("detected_isa():", simd_ml_kernels.detected_isa())
 
     rng = np.random.default_rng(0)
 
     A = rng.standard_normal((32, 32)).astype(np.float32)
     B = rng.standard_normal((32, 32)).astype(np.float32)
-    C = simd_kernels.sgemm(A, B)
+    C = simd_ml_kernels.sgemm(A, B)
     assert C.shape == (32, 32), f"sgemm: bad shape {C.shape}"
     assert np.all(np.isfinite(C)), "sgemm: non-finite output"
 
     x = rng.standard_normal(1024).astype(np.float32)
 
-    y = simd_kernels.gelu(x)
+    y = simd_ml_kernels.gelu(x)
     assert y.shape == x.shape, f"gelu: bad shape {y.shape}"
     assert np.all(np.isfinite(y)), "gelu: non-finite output"
 
-    y = simd_kernels.relu(x)
+    y = simd_ml_kernels.relu(x)
     assert y.shape == x.shape, f"relu: bad shape {y.shape}"
 
-    y = simd_kernels.silu(x)
+    y = simd_ml_kernels.silu(x)
     assert y.shape == x.shape, f"silu: bad shape {y.shape}"
 
-    y = simd_kernels.softmax(x)
+    y = simd_ml_kernels.softmax(x)
     assert y.shape == x.shape, f"softmax: bad shape {y.shape}"
     assert abs(float(y.sum()) - 1.0) < 1e-4, "softmax: rows do not sum to 1"
 
-    y = simd_kernels.layer_norm(x)
+    y = simd_ml_kernels.layer_norm(x)
     assert y.shape == x.shape, f"layer_norm: bad shape {y.shape}"
 
-    gemm = simd_kernels.GEMMConfig(alpha=1.0, beta=0.0)
+    gemm = simd_ml_kernels.GEMMConfig(alpha=1.0, beta=0.0)
     C2 = gemm(A, B)
     assert np.allclose(C, C2, rtol=1e-4), "GEMMConfig output diverges from sgemm"
 

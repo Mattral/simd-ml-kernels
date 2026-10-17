@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 
 # ─── Project metadata ──────────────────────────────────────────────────────────
 [project]
-name            = "simd-ml-microkernels"
+name            = "simd-ml-kernels"
 version         = "0.2.0"
 description     = "Hand-vectorized AVX2 GEMM and ML activation microkernels with Python bindings"
 readme          = "README.md"
@@ -26,15 +26,17 @@ bench = ["matplotlib>=3.7", "tabulate>=0.9"]
 all   = ["pytest>=7.4", "scipy>=1.11", "matplotlib>=3.7", "tabulate>=0.9"]
 
 [project.urls]
-Homepage   = "https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads"
+Homepage   = "https://github.com/Mattral/simd-ml-kernels"
 Preprint   = "https://zenodo.org/records/20616502"
-Issues     = "https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads/issues"
+Issues     = "https://github.com/Mattral/simd-ml-kernels/issues"
 
 # ─── scikit-build-core CMake settings ─────────────────────────────────────────
 [tool.scikit-build]
 cmake.build-type = "Release"
 build.verbose    = false
-wheel.packages   = []     # C extension only — no Python package directory
+# simd_ml_kernels: the package (the compiled _core module is installed into it).
+# simd_kernels: deprecated import alias, kept until 0.5.0.
+wheel.packages   = ["python/simd_ml_kernels", "python/simd_kernels"]
 # Only install the Python extension module into the wheel. Without this,
 # scikit-build-core packages everything the project's CMakeLists.txt
 # install() rules touch — static lib, public headers, CMake package config,

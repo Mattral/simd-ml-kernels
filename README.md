@@ -1,20 +1,26 @@
-# IntrinsicML
+# simd-ml-kernels
 
 **Transparent Hand-Vectorized SIMD Microkernels for Machine Learning**
 
-[![CI](https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads/actions/workflows/ci.yml)
-[![Weekly Benchmark](https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads/actions/workflows/bench.yml/badge.svg)](https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads/actions/workflows/bench.yml)
+[![CI](https://github.com/Mattral/simd-ml-kernels/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattral/simd-ml-kernels/actions/workflows/ci.yml)
+[![Weekly Benchmark](https://github.com/Mattral/simd-ml-kernels/actions/workflows/bench.yml/badge.svg)](https://github.com/Mattral/simd-ml-kernels/actions/workflows/bench.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python ≥3.9](https://img.shields.io/badge/Python-≥3.9-3776ab)](https://www.python.org/)
 [![Preprint](https://img.shields.io/badge/Preprint-Zenodo-orange)](https://zenodo.org/records/20616502)
 
-IntrinsicML is an open-source C++17 library of clean, well-documented
+simd-ml-kernels is an open-source C++17 library of clean, well-documented
 hand-vectorized microkernels for core ML primitives. It deliberately occupies
 the middle ground between toy textbook code and opaque production BLAS:
 production techniques (panel packing, register blocking, software prefetching)
 but every design decision explained in source comments and documentation.
 
 **Preprint**: [IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for ML Workloads](https://zenodo.org/records/20616502)
+
+**Naming**: one name everywhere: repository and PyPI distribution `simd-ml-kernels`,
+import `simd_ml_kernels`. The project was previously called IntrinsicML (the preprint
+title), the repository `SIMD-Microkernels-for-ML-Workloads` (GitHub redirects old links),
+and the import `simd_kernels`, which still works but emits a `DeprecationWarning` and
+will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -43,7 +49,7 @@ pip install -e .
 
 ```python
 import numpy as np
-import simd_kernels as sk
+import simd_ml_kernels as sk
 
 A = np.random.randn(256, 256).astype(np.float32)
 B = np.random.randn(256, 256).astype(np.float32)
@@ -79,8 +85,8 @@ ctest --test-dir build --output-on-failure
 ### Docker
 
 ```bash
-docker build -t intrinsicml .
-docker run --rm intrinsicml ./bench
+docker build -t simd-ml-kernels .
+docker run --rm simd-ml-kernels ./bench
 ```
 
 ---
@@ -138,7 +144,7 @@ Optional: `libopenblas-dev` for `./bench_stat` baseline comparisons (`-DBENCH_OP
 ## Repository Layout
 
 ```
-SIMD-Microkernels-for-ML-Workloads/
+simd-ml-kernels/
 ├── src/
 │   ├── kernels/
 │   │   ├── avx_matmul.cpp              # 6×16 AVX2 + AVX-512 GEMM
@@ -189,7 +195,8 @@ SIMD-Microkernels-for-ML-Workloads/
 │   └── guardrail.yml                   # Static analysis + security
 ├── CMakeLists.txt
 ├── pyproject.toml
-├── simd_kernels.pyi                    # Type stubs for IDE support
+├── python/simd_ml_kernels/             # Python package: __init__.py, _core.pyi stubs
+├── python/simd_kernels/                # Deprecated import alias
 ├── Dockerfile
 └── README.md
 ```
@@ -210,7 +217,7 @@ pytest tests/test_bindings_edge_cases.py -v
 
 # Quick smoke test
 python -c "
-import numpy as np, simd_kernels as sk
+import numpy as np, simd_ml_kernels as sk
 A = np.random.randn(32, 32).astype(np.float32)
 C = sk.sgemm(A, A.T)
 x = np.random.randn(1024).astype(np.float32)

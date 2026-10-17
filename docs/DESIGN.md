@@ -1,4 +1,4 @@
-# IntrinsicML — Design Document
+# simd-ml-kernels — Design Document
 
 **Version**: 2.0  
 **Status**: Living document — updated as major architectural decisions are made.
@@ -7,7 +7,7 @@
 
 ## 1. Project Goals
 
-IntrinsicML occupies a specific niche: a **pedagogically transparent yet
+simd-ml-kernels occupies a specific niche: a **pedagogically transparent yet
 engineering-complete** reference implementation of SIMD microkernels for ML.
 
 | Axis               | What we are                         | What we are not |

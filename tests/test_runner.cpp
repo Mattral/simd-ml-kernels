@@ -1,8 +1,8 @@
 /**
  * test_runner.cpp — Standalone C++ test runner (no framework dependencies).
  *
- * Links against simd_kernels_lib (performance build) and simd_kernels_precision_lib
- * (correctness build, no -ffast-math). See tests/CMakeLists.txt for link order.
+ * Links against simd_ml_kernels_lib only, built with the flags that ship.
+ * See tests/CMakeLists.txt.
  *
  * SIMD_ML_X86_AVAILABLE is injected by CMake (1 on x86_64, 0 on ARM/other).
  * When it is 0 the x86/AVX2 test files are not compiled and their run_*()
@@ -31,7 +31,7 @@ int run_thread_tests();
 
 int main() {
     printf("╔══════════════════════════════════════════╗\n");
-    printf("║  IntrinsicML  ·  C++ Test Suite          ║\n");
+    printf("║  simd-ml-kernels  ·  C++ Test Suite      ║\n");
 #if SIMD_ML_X86_AVAILABLE
     printf("║  Architecture: x86_64 (AVX2/FMA path)   ║\n");
 #else

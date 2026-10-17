@@ -1,8 +1,8 @@
 # Python API Reference
 
-**Module**: `simd_kernels`  
-**Import**: `import simd_kernels`  
-**Type stubs**: `simd_kernels.pyi` (IDE autocompletion)
+**Module**: `simd_ml_kernels`  
+**Import**: `import simd_ml_kernels`  
+**Type stubs**: `python/simd_ml_kernels/_core.pyi` (IDE autocompletion)
 
 All kernels operate on **float32 NumPy arrays**, release the **GIL** during computation (threading-safe), and require **C-contiguous** memory layout. Call `numpy.ascontiguousarray(arr)` if needed.
 
@@ -25,16 +25,16 @@ Compute `C = alpha * A @ B + beta * C` (single-precision GEMM).
 Returns the `[M, N]` result array (same object as `C` if provided).
 
 ```python
-import numpy as np, simd_kernels
+import numpy as np, simd_ml_kernels
 
 A = np.random.randn(256, 512).astype(np.float32)
 B = np.random.randn(512, 128).astype(np.float32)
 
 # Simple GEMM (allocates output)
-C = simd_kernels.sgemm(A, B)
+C = simd_ml_kernels.sgemm(A, B)
 
 # In-place with scaling: C = 2*A@B + 0.5*C
-simd_kernels.sgemm(A, B, C, alpha=2.0, beta=0.5)
+simd_ml_kernels.sgemm(A, B, C, alpha=2.0, beta=0.5)
 ```
 
 **Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 register tile, AVX2 FMA). See `docs/DESIGN.md §2–3`.
@@ -55,7 +55,7 @@ change dispatch — the compiled kernel uses fixed compile-time constants.
 Auto-tuned tile selection is planned (`docs/ROADMAP.md §v0.9`).
 
 ```python
-gemm = simd_kernels.GEMMConfig(alpha=2.0, beta=0.5, isa="avx2")
+gemm = simd_ml_kernels.GEMMConfig(alpha=2.0, beta=0.5, isa="avx2")
 C = gemm(A, B)                      # uses stored alpha=2.0, beta=0.5, forces AVX2
 C = gemm(A, B, alpha=1.0, beta=0.0) # per-call alpha/beta override (isa stays "avx2")
 print(gemm)                          # GEMMConfig(alpha=2.0, beta=0.5, isa='avx2')
@@ -67,9 +67,9 @@ value raises `ValueError` at construction time (`GEMMConfig`) or `RuntimeError`
 directly by `sgemm()`:
 
 ```python
-C = simd_kernels.sgemm(A, B, isa="avx2")     # forces the 8×8 AVX2 kernel
-C = simd_kernels.sgemm(A, B, isa="avx512")   # forces the 8×16 AVX-512 kernel
-C = simd_kernels.sgemm(A, B)                 # "" = auto-detect (default)
+C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # forces the 8×8 AVX2 kernel
+C = simd_ml_kernels.sgemm(A, B, isa="avx512")   # forces the 8×16 AVX-512 kernel
+C = simd_ml_kernels.sgemm(A, B)                 # "" = auto-detect (default)
 ```
 
 **`isa=` genuinely forces a specific kernel** — this is a real per-call
@@ -82,10 +82,10 @@ change behavior for subsequent calls that omit `isa=`.
 Two important edge cases:
 
 - **`isa="avx512"` on hardware without AVX-512F+DQ raises `RuntimeError`.**
-  Check `simd_kernels.avx512_available()` first if you're not sure:
+  Check `simd_ml_kernels.avx512_available()` first if you're not sure:
   ```python
-  if simd_kernels.avx512_available():
-      C = simd_kernels.sgemm(A, B, isa="avx512")
+  if simd_ml_kernels.avx512_available():
+      C = simd_ml_kernels.sgemm(A, B, isa="avx512")
   ```
 - **`isa="scalar"` raises `RuntimeError` ("not yet implemented"), not a
   silent fallback.** No forced full-matrix scalar path exists for
@@ -104,7 +104,7 @@ Out-of-place GeLU activation (tanh approximation). Input `x` is unchanged.
 
 ```python
 x = np.random.randn(65536).astype(np.float32)
-y = simd_kernels.gelu(x)   # y = GeLU(x), x unchanged
+y = simd_ml_kernels.gelu(x)   # y = GeLU(x), x unchanged
 ```
 
 ### `gelu_inplace(x) → None`
@@ -112,7 +112,7 @@ y = simd_kernels.gelu(x)   # y = GeLU(x), x unchanged
 In-place GeLU: `x[:] = GeLU(x)`. No allocation. `x` must be writeable.
 
 ```python
-simd_kernels.gelu_inplace(x)   # modifies x in place
+simd_ml_kernels.gelu_inplace(x)   # modifies x in place
 ```
 
 Both functions use the tanh approximation from BERT/GPT:
@@ -127,7 +127,7 @@ Max absolute error vs `torch.nn.functional.gelu(x, approximate='tanh')`: < 5×10
 ReLU activation: `output[i] = max(0, x[i])`. Exact (no approximation).
 
 ```python
-y = simd_kernels.relu(x)
+y = simd_ml_kernels.relu(x)
 ```
 
 ### `silu(x) → np.ndarray`
@@ -137,7 +137,7 @@ Implemented as `x · 0.5·(1 + tanh(x/2))` using the Cody–Waite fast tanh.
 Max absolute error: < 2×10⁻⁷ vs float32 reference.
 
 ```python
-y = simd_kernels.silu(x)
+y = simd_ml_kernels.silu(x)
 ```
 
 ### `softmax(x, axis=-1) → np.ndarray`
@@ -147,7 +147,7 @@ Uses max-subtraction and double-precision accumulation to prevent overflow.
 
 ```python
 logits = np.random.randn(32, 1000).astype(np.float32)
-probs  = simd_kernels.softmax(logits)       # shape [32, 1000], rows sum to 1
+probs  = simd_ml_kernels.softmax(logits)       # shape [32, 1000], rows sum to 1
 ```
 
 Currently only the **last axis** (`axis=-1`) is supported. For other axes, transpose first.
@@ -167,7 +167,7 @@ x     = np.random.randn(16, 768).astype(np.float32)
 gamma = np.ones(768,  dtype=np.float32)   # scale
 beta  = np.zeros(768, dtype=np.float32)   # shift
 
-y = simd_kernels.layer_norm(x, gamma=gamma, beta=beta)
+y = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
 # y has zero mean and unit std per row (before affine)
 ```
 
@@ -194,7 +194,7 @@ Return the current OpenMP thread count (always 1 without OpenMP).
 Return build metadata as a Python dictionary.
 
 ```python
-info = simd_kernels.build_info()
+info = simd_ml_kernels.build_info()
 # Example output:
 # {
 #   'isa_compiled': 'AVX2+FMA3',
@@ -214,8 +214,8 @@ Return the runtime-detected ISA string: `'avx512'`, `'avx2'`, `'sse42'`, or `'sc
 Return `True` if this CPU supports AVX-512F+DQ (the instructions required by `sgemm_packed`'s 8×16 micro-kernel), independent of any `isa=` override. Check this before requesting `isa="avx512"` explicitly to avoid a `RuntimeError` on unsupported hardware:
 
 ```python
-if simd_kernels.avx512_available():
-    C = simd_kernels.sgemm(A, B, isa="avx512")
+if simd_ml_kernels.avx512_available():
+    C = simd_ml_kernels.sgemm(A, B, isa="avx512")
 ```
 
 ### `is_aligned(arr: np.ndarray) → bool`
@@ -224,7 +224,7 @@ Return `True` if `arr.data` is 64-byte aligned. Useful for verifying that NumPy 
 
 ```python
 x = np.empty(1024, dtype=np.float32)
-simd_kernels.is_aligned(x)   # True on most NumPy allocations ≥ 64 elements
+simd_ml_kernels.is_aligned(x)   # True on most NumPy allocations ≥ 64 elements
 ```
 
 ---
@@ -235,15 +235,15 @@ All functions raise `RuntimeError` with a descriptive message for invalid inputs
 
 ```python
 # Wrong dtype
-simd_kernels.gelu(np.array([1.0, 2.0], dtype=np.float64))
+simd_ml_kernels.gelu(np.array([1.0, 2.0], dtype=np.float64))
 # RuntimeError: x must be float32 (dtype=np.float32). Call arr.astype(np.float32)...
 
 # Non-contiguous array
-simd_kernels.relu(arr[::2])
+simd_ml_kernels.relu(arr[::2])
 # RuntimeError: x must be C-contiguous. Call numpy.ascontiguousarray(arr)...
 
 # Shape mismatch
-simd_kernels.sgemm(np.zeros((4, 8), dtype=np.float32),
+simd_ml_kernels.sgemm(np.zeros((4, 8), dtype=np.float32),
                    np.zeros((3, 4), dtype=np.float32))
 # RuntimeError: Shape mismatch: A is [4×8] but B is [3×4]
 ```
@@ -252,4 +252,4 @@ simd_kernels.sgemm(np.zeros((4, 8), dtype=np.float32),
 
 ## Type Stubs
 
-The file `simd_kernels.pyi` provides full type annotations for IDE support (Pylance, Pyright, mypy). After `pip install -e .`, type checkers will resolve `simd_kernels` automatically.
+The file `python/simd_ml_kernels/_core.pyi` provides full type annotations for IDE support (Pylance, Pyright, mypy). After `pip install -e .`, type checkers will resolve `simd_ml_kernels` automatically.

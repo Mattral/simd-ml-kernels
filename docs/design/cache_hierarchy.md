@@ -1,6 +1,6 @@
 # Cache Hierarchy and Tile Size Derivation
 
-IntrinsicML's GEMM implementation explicitly targets all three cache levels.
+simd-ml-kernels's GEMM implementation explicitly targets all three cache levels.
 The tile constants MC, KC, NC are derived to keep specific panels resident at
 specific cache levels during the 5-loop computation.
 

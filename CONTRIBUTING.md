@@ -1,14 +1,14 @@
-# Contributing to IntrinsicML
+# Contributing to simd-ml-kernels
 
-Thank you for your interest in contributing. IntrinsicML values transparency, correctness, and rigour above all else. A pull request that is correct and well-documented is always preferred over one that is fast but opaque.
+Thank you for your interest in contributing. simd-ml-kernels values transparency, correctness, and rigour above all else. A pull request that is correct and well-documented is always preferred over one that is fast but opaque.
 
 ---
 
 ## Quick start
 
 ```bash
-git clone https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads.git
-cd SIMD-Microkernels-for-ML-Workloads
+git clone https://github.com/Mattral/simd-ml-kernels.git
+cd simd-ml-kernels
 
 # C++ build and tests
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -62,7 +62,7 @@ static void pack_b_panel(...);
 ```
 
 **Comments — the most important rule**
-Every non-trivial design decision must be documented where it is made. This is the core value of IntrinsicML. Comments explain *why*, not *what*:
+Every non-trivial design decision must be documented where it is made. This is the core value of simd-ml-kernels. Comments explain *why*, not *what*:
 
 ```cpp
 // GOOD: explains the design decision
@@ -111,7 +111,7 @@ cmake --build build --parallel 2>&1 | grep warning
 ### Python
 
 - **Python ≥ 3.9**, type hints on all public functions
-- All public functions must be in `simd_kernels.pyi` (type stubs)
+- All public functions must be in `python/simd_ml_kernels/_core.pyi` (type stubs)
 - Tests use `pytest`. New kernels need tests in `tests/test_precision.py`
 - Test tolerance rationale must be commented: why is this tolerance correct?
 
@@ -150,7 +150,7 @@ All AVX2 loops must have a scalar tail for `n % 8` remaining elements.
 Add cases to `tests/test_activations.cpp` following the existing pattern. Test: edge sizes (1, 7, 8, 9), full AVX2 sizes (64, 1024), wide sweeps over the input range.
 
 **Step 7: Python binding**
-Add to `pybind_entry.cpp`, `simd_kernels.pyi`, and document in `docs/api/python_api.md`.
+Add to `pybind_entry.cpp`, `python/simd_ml_kernels/_core.pyi`, and document in `docs/api/python_api.md`.
 
 **Step 8: Python precision test**
 Add a `TestMyKernel` class to `tests/test_precision.py`. Include a `@pytest.mark.skipif(not HAS_TORCH, ...)` cross-check against PyTorch if applicable.

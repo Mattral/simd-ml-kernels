@@ -1,4 +1,4 @@
-# IntrinsicML — Benchmark Results & Analysis
+# simd-ml-kernels — Benchmark Results & Analysis
 
 All numbers below are from the CI build environment. They are provided as a
 **relative reference** — actual throughput depends heavily on microarchitecture,
@@ -124,7 +124,7 @@ cmake --build build --parallel
   openblas       1024    124.0
 ```
 
-| N    | IntrinsicML (GFLOPS) | OpenBLAS (GFLOPS) | IntrinsicML / OpenBLAS | vs pre-AVX-512 |
+| N    | simd-ml-kernels (GFLOPS) | OpenBLAS (GFLOPS) | simd-ml-kernels / OpenBLAS | vs pre-AVX-512 |
 |------|----------------------|--------------------|------------------------|----------------|
 | 64   | 6.4                  | 165.0              | 3.9%                   | 3.7% (≈ unchanged) |
 | 128  | 29.5                 | 102.0              | 28.9%                  | 26.6% (+2.3 pt) |
@@ -134,14 +134,14 @@ cmake --build build --parallel
 
 **Honest positioning:**
 
-- **Small matrices (N ≤ 64) — IntrinsicML is far behind (3.9%), and AVX-512
+- **Small matrices (N ≤ 64) — simd-ml-kernels is far behind (3.9%), and AVX-512
   barely moved this number.** This is expected: at N=64 the algorithm is
   packing-overhead-bound, not FMA-throughput-bound, so doubling the SIMD
   width (the AVX-512 change) has almost nothing to work with — packing cost
   dominates regardless of how fast the inner FMA loop runs. Skipping packing
   below a size threshold (direct unpacked micro-kernel call) remains the
   correct fix for this regime and is tracked in `docs/ROADMAP.md §v0.9`.
-- **Medium-to-large matrices (N ≥ 256) — IntrinsicML improved from ~46–49%
+- **Medium-to-large matrices (N ≥ 256) — simd-ml-kernels improved from ~46–49%
   to 55–59% of OpenBLAS** after adding the AVX-512 8×16 micro-kernel
   (`docs/ROADMAP.md §v0.8`). This is a genuine, repeated-trial-verified
   improvement — not noise — closing 7–13 percentage points of the gap. The

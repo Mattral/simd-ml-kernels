@@ -25,8 +25,8 @@ pip install "pybind11[global]>=2.11" numpy scipy pytest
 ## C++ build (standalone bench and tests)
 
 ```bash
-git clone https://github.com/Mattral/SIMD-Microkernels-for-ML-Workloads.git
-cd SIMD-Microkernels-for-ML-Workloads
+git clone https://github.com/Mattral/simd-ml-kernels.git
+cd simd-ml-kernels
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -59,14 +59,14 @@ pip install -e . --no-build-isolation
 
 # Verify the extension loads
 python -c "
-import simd_kernels, numpy as np
-print(simd_kernels.build_info())
+import simd_ml_kernels, numpy as np
+print(simd_ml_kernels.build_info())
 A = np.random.randn(64, 64).astype(np.float32)
-C = simd_kernels.sgemm(A, A.T)
+C = simd_ml_kernels.sgemm(A, A.T)
 print('GEMM smoke test: PASS, shape =', C.shape)
 x = np.random.randn(1024).astype(np.float32)
-y = simd_kernels.gelu(x)
-y = simd_kernels.layer_norm(x)
+y = simd_ml_kernels.gelu(x)
+y = simd_ml_kernels.layer_norm(x)
 print('Activation smoke tests: PASS')
 "
 ```
@@ -92,9 +92,9 @@ python tests/test_bench.py --quick --no-plot
 A fully pinned development environment is provided:
 
 ```bash
-docker build -t intrinsicml .
-docker run --rm intrinsicml ./build/bench
-docker run --rm intrinsicml ctest --test-dir build --output-on-failure
+docker build -t simd-ml-kernels .
+docker run --rm simd-ml-kernels ./build/bench
+docker run --rm simd-ml-kernels ctest --test-dir build --output-on-failure
 ```
 
 ---

@@ -1,12 +1,12 @@
 # Architecture
 
-IntrinsicML is organized as a layered C++17 library with a pybind11 Python front-end.
+simd-ml-kernels is organized as a layered C++17 library with a pybind11 Python front-end.
 The diagram below shows the full dependency graph.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Python / NumPy Layer                         │
-│   simd_kernels.*  (pybind11, GIL-release, shape validation)    │
+│   simd_ml_kernels.*  (pybind11, GIL-release, shape validation)    │
 └────────────────────────────┬────────────────────────────────────┘
                              │
               ┌──────────────┼──────────────┐

@@ -241,7 +241,7 @@ int main(int argc, char** argv) {
     pin_to_core(0);
 
     printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║   IntrinsicML Statistical Benchmark (bench_stat)            ║\n");
+    printf("║   simd-ml-kernels Statistical Benchmark (bench_stat)        ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n");
     printf("  Warmup reps: %d  |  Measurement reps: %d\n", cfg.warmup_reps, cfg.meas_reps);
     printf("  Reporting: min / mean ± 95%%CI / median  [GFLOPS]\n\n");

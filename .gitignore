@@ -16,8 +16,8 @@ Makefile
 *.so
 *.pyd
 *.dylib
-simd_kernels*.so
-simd_kernels*.pyd
+_core*.so
+_core*.pyd
 
 # ─── Python cache and packaging ───────────────────────────────────────────────
 __pycache__/

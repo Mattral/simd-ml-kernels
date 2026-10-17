@@ -1,6 +1,6 @@
 # GEMM Algorithm: Goto/BLIS 5-Loop Structure
 
-IntrinsicML implements the Goto (2008) / BLIS-style packed GEMM in two complementary kernels. This document describes the shared algorithmic structure.
+simd-ml-kernels implements the Goto (2008) / BLIS-style packed GEMM in two complementary kernels. This document describes the shared algorithmic structure.
 
 ---
 
