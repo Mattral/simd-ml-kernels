@@ -39,8 +39,8 @@ namespace gemm {
  * AMD Piledriver+). However, we check explicitly so callers can raise a clean
  * error rather than SIGILL if somehow running on a CPU that lacks it.
  *
- * Uses __builtin_cpu_supports at runtime (compile-time -mf16c enables the
- * intrinsics; runtime check guards the actual dispatch).
+ * Uses CPUID + XGETBV at runtime via dispatch::CpuFeatures (compile-time
+ * -mf16c enables the intrinsics; the runtime check guards the dispatch).
  */
 bool f16c_available() noexcept;
 

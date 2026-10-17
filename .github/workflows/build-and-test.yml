@@ -47,7 +47,7 @@ jobs:
           python3 -c "
           import simd_kernels, numpy as np
           A = np.random.randn(32, 32).astype(np.float32)
-          C = simd_kernels.sgemm(A, A.T)
+          C = simd_kernels.sgemm(A, np.ascontiguousarray(A.T))
           x = np.random.randn(1024).astype(np.float32)
           y = simd_kernels.gelu(x)
           y = simd_kernels.layer_norm(x)
