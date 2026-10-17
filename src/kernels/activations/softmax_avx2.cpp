@@ -32,7 +32,12 @@
  * Expected speedup: 2–4× for n ≥ 256 vs the scalar path on all platforms.
  */
 
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "softmax_avx2.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
+#endif
+
 #include "activations.hpp"
+#include <immintrin.h>
 #include "../simd_math.hpp"    // fast_exp_avx2
 #include <cmath>
 #include <cstddef>
@@ -40,13 +45,11 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <immintrin.h>
 
 namespace activations {
 
 // ─── AVX2 horizontal max of an __m256 register ───────────────────────────────
 // Used in Pass 1 to reduce 8 floats to 1 max value.
-#ifdef __AVX2__
 static inline float hmax_avx2(__m256 v) {
     // Swap 128-bit lanes and take element-wise max
     __m256 hi  = _mm256_permute2f128_ps(v, v, 1);   // swap lo/hi 128-bit halves
@@ -59,7 +62,6 @@ static inline float hmax_avx2(__m256 v) {
     m4          = _mm_max_ss(m4, shuf);
     return _mm_cvtss_f32(m4);
 }
-#endif
 
 // ─── Non-finite rows ──────────────────────────────────────────────────────────
 // torch.softmax computes exp(x - max(x)) / sum. If the row contains a NaN, or
@@ -93,7 +95,6 @@ static void fill_nan(float* output, int n) {
 void softmax_row_avx2(const float* input, float* output, int n) {
     if (n <= 0) return;
 
-#ifdef __AVX2__
     // ── Pass 1: AVX2 max reduction + NaN/+inf detection ───────────────────────
     float maxv;
     bool  nonfinite = false;   // any NaN or +inf in the row
@@ -189,28 +190,6 @@ void softmax_row_avx2(const float* input, float* output, int n) {
         }
     }
 
-#else  // !__AVX2__ — scalar reference path
-    float maxv = input[0];
-    bool nonfinite = nan_or_pos_inf(input[0]);
-    for (int i = 1; i < n; ++i) {
-        nonfinite |= nan_or_pos_inf(input[i]);
-        if (input[i] > maxv) maxv = input[i];
-    }
-    if (nonfinite || f32_bits(maxv) == F32_NEG_INF) {
-        fill_nan(output, n);
-        return;
-    }
-
-    double sum = 0.0;
-    for (int i = 0; i < n; ++i) {
-        double e  = std::exp(static_cast<double>(input[i] - maxv));
-        output[i] = static_cast<float>(e);
-        sum      += e;
-    }
-
-    float inv_sum = static_cast<float>(1.0 / sum);
-    for (int i = 0; i < n; ++i) output[i] *= inv_sum;
-#endif
 }
 
 } // namespace activations

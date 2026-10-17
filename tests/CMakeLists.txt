@@ -1,49 +1,20 @@
 # tests/CMakeLists.txt — C++ test targets
 #
-# simd_tests links exactly one kernel library: simd_ml_kernels_lib, compiled with
-# the same flags that ship in the Python extension, so the tests check the code
-# users run. The test sources themselves (float64 references, tolerance checks)
-# are compiled with PRECISION_FLAGS, i.e. without -ffast-math.
-#
-# There used to be a second library, simd_kernels_precision_lib, that compiled
-# the same kernel sources without -ffast-math and was linked after
-# simd_ml_kernels_lib. Two definitions of each kernel symbol is an ODR violation,
-# and because the linker resolves each symbol from the first archive that
-# provides it, every kernel object actually came from simd_ml_kernels_lib
-# (verified by comparing .text sizes in the map file); the precision library
-# was never used.
+# simd_tests links simd_ml_kernels_lib, the same objects that ship in the
+# Python extension. The test code itself (float64 references, tolerance
+# checks) is compiled with BASE_FLAGS only: no -mavx*, no -ffast-math. It
+# reaches the SIMD kernels through the kernel tables (dispatch/kernels.hpp)
+# and runs each test on every table this CPU supports, so the binary runs on
+# any x86-64 CPU and, under Intel SDE, covers the AVX2 and AVX-512 paths too.
 #
 # Sanitizers: configure with -DSIMD_ML_SANITIZE=ON. The top-level CMakeLists
-# then instruments every target, kernels included, so simd_tests itself is the
-# ASan/UBSan run.
+# then instruments every target, kernels included.
 
-# ─── doctest dependency ───────────────────────────────────────────────────────
-find_package(doctest CONFIG QUIET)
-if(NOT doctest_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        doctest
-        GIT_REPOSITORY https://github.com/doctest/doctest.git
-        GIT_TAG v2.4.12
-        # EXCLUDE_FROM_ALL: prevents doctest's own install() rules from running
-        # when the user runs `cmake --install`. Only our project artifacts install.
-        EXCLUDE_FROM_ALL
-    )
-    FetchContent_MakeAvailable(doctest)
-endif()
-
-# ─── Main C++ test runner ─────────────────────────────────────────────────────
-# On non-x86 hosts only the alignment test and a stub runner are compiled.
-# All AVX2-specific test files (gelu, gemm, gemm_packed, activations, threads)
-# include x86 intrinsic headers directly and must be excluded on ARM.
-# test_runner.cpp uses SIMD_ML_X86_AVAILABLE to guard their call-sites.
-set(TEST_SRCS_COMMON
+set(TEST_SRCS
     test_runner.cpp
     test_alignment.cpp
-)
-set(TEST_SRCS_X86
+    test_dispatch.cpp
     test_gelu.cpp
-    test_gemm.cpp
     test_gemm_packed.cpp
     test_gemm_f16.cpp
     test_gemm_bf16.cpp
@@ -51,28 +22,36 @@ set(TEST_SRCS_X86
     test_threads.cpp
 )
 if(SIMD_ML_ENABLE_X86)
-    set(TEST_SRCS ${TEST_SRCS_COMMON} ${TEST_SRCS_X86})
-else()
-    set(TEST_SRCS ${TEST_SRCS_COMMON})
+    list(APPEND TEST_SRCS test_gemm.cpp)   # avx_matmul.cpp: an AVX2 unit
 endif()
 add_executable(simd_tests ${TEST_SRCS})
 target_include_directories(simd_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/kernels
     ${CMAKE_SOURCE_DIR}/src
 )
-# Pass x86 availability as a preprocessor constant so test_runner.cpp can
-# conditionally call run_gelu_tests(), run_gemm_tests(), etc.
 if(SIMD_ML_ENABLE_X86)
     target_compile_definitions(simd_tests PRIVATE SIMD_ML_X86_AVAILABLE=1)
-    # test_gemm_f16.cpp uses F16C intrinsics (helper converters); give it
-    # the same -mf16c flag we pass to f16_gemm.cpp in the kernel library.
-    if(COMPILER_HAS_F16C)
-        set_source_files_properties(test_gemm_f16.cpp
-            PROPERTIES COMPILE_OPTIONS "-mf16c")
-    endif()
 else()
     target_compile_definitions(simd_tests PRIVATE SIMD_ML_X86_AVAILABLE=0)
 endif()
 target_link_libraries(simd_tests PRIVATE simd_ml_kernels_lib)
-target_compile_options(simd_tests PRIVATE ${PRECISION_FLAGS})
+target_compile_options(simd_tests PRIVATE ${BASE_FLAGS})
 add_test(NAME simd_tests COMMAND simd_tests)
+
+# ─── ISA units contain only their own ISA ─────────────────────────────────────
+# check_isa_units.py disassembles the object files: the scalar unit (dispatch
+# and scalar kernels) must contain no VEX/EVEX instruction, the AVX2 units no
+# EVEX (AVX-512) instruction, and no symbol may be emitted out of line by two
+# units built with different flags (an inline or template function the linker
+# could pick from the wrong unit). The bindings are compiled with BASE_FLAGS
+# too; the SDE runs in CI (-nhm: no AVX) check them at run time.
+if(SIMD_ML_ENABLE_X86 AND CMAKE_OBJDUMP AND CMAKE_NM
+   AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT SIMD_ML_SANITIZE)
+    set(_units "")
+    foreach(isa IN LISTS SIMD_ML_ISAS)
+        list(APPEND _units "--unit=${isa}=$<JOIN:$<TARGET_OBJECTS:simd_ml_isa_${isa}>,|>")
+    endforeach()
+    add_test(NAME isa_units
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_isa_units.py
+                     --objdump ${CMAKE_OBJDUMP} --nm ${CMAKE_NM} ${_units})
+endif()

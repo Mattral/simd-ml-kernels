@@ -1,8 +1,7 @@
 # AGENTS.md
 
-How to build, test, measure and extend simd-ml-kernels. Read this before
-changing code; it is the only file you need for the routine tasks below.
-Background on each kernel is in [docs/DESIGN.md](docs/DESIGN.md).
+How to build, test, measure and extend simd-ml-kernels; the only file needed
+for the routine tasks below. Background: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Commands
 
@@ -27,33 +26,37 @@ python benchmarks/make_tables.py       # regenerate README/BENCHMARKS tables fro
 ```
 
 Pitfalls:
-- `build_info()["git_commit"]` is taken when CMake configures. A reused build
-  directory reports the commit it was configured at; `-dirty` marks local
-  changes. Benchmark only from a clean, fresh configure.
-- The tests import the *installed* package. Re-run `pip install .` after
-  changing C++ code, or the tests run the old extension.
+- `build_info()["git_commit"]` is taken at CMake configure time (`-dirty`:
+  local changes); benchmark only from a clean, fresh configure.
+- The tests import the *installed* package: `pip install .` after C++ changes.
 - CMake options: `SIMD_ML_OPENMP` (threaded GEMM), `BENCH_OPENBLAS` (link BLAS
-  into `bench_stat`), `SIMD_ML_ENABLE_X86=OFF` (non-x86 scalar build).
+  into `bench_stat`), `SIMD_ML_NATIVE` (`-march=native` everywhere; local
+  benchmarks only), `SIMD_ML_ENABLE_X86=OFF` (scalar-only build).
+- `SIMD_ML_ISA=scalar|avx2` caps the kernel table, e.g. to benchmark AVX2 on
+  an AVX-512 machine. AVX-512 without AVX-512 hardware: run under Intel SDE,
+  `sde64 -skx -- python -m simd_ml_kernels selftest` (or `-nhm` for no AVX).
 
 ## Repository map
 
 ```
-src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32 GEMM behind sgemm: small-matrix path, 5-loop packed GEMM,
-                                             8x8 AVX2 and 8x16 AVX-512 micro-kernels
-src/kernels/gemm/{f16,bf16}_gemm.*           FP16 / BF16-input GEMM, FP32 accumulate
-src/kernels/gemm/gemm_dispatcher.cpp         CPUID + XGETBV feature detection, cache detection, ISA label
-src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM
-src/kernels/avx_matmul.{hpp,cpp}             second FP32 GEMM (6x16 / 6x32), C++ only: tests and bench
-src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh
-src/kernels/activations/                     relu, silu, softmax, layer_norm (+ activations.hpp)
+src/dispatch/kernels.hpp, dispatch.cpp       KernelTable per ISA, CPUID + XGETBV, table selection, SIMD_ML_ISA
+src/kernels/scalar_kernels.cpp               scalar unit: every kernel in portable C++, the scalar table
+src/kernels/kernels_{avx2,avx512}.cpp        the AVX2 / AVX-512 tables
+src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32 GEMM, AVX2: small-matrix path, 5-loop packed GEMM, 8x8 kernel
+src/kernels/gemm/avx512_gemm_packed.cpp      FP32 GEMM, AVX-512: 8x16 kernel
+src/kernels/gemm/{f16,bf16}_gemm.*           FP16 / BF16-input GEMM, FP32 accumulate (AVX2)
+src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM (tests)
+src/kernels/avx_matmul*.cpp                  second FP32 GEMM (6x16 AVX2 / 6x32 AVX-512), C++ only: tests and bench
+src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh (AVX2)
+src/kernels/activations/                     relu, silu, softmax, layer_norm (AVX2; + activations.hpp)
 src/kernels/simd_math.hpp                    fast_exp_avx2, tanh_avx2
 src/kernels/cache_alloc.hpp                  64-byte aligned allocation, prefetch helpers
-src/dispatch/                                CpuFeatures, CacheLevel, kernel registry declarations
 src/bindings/pybind_entry.cpp                every Python entry point: validation, GIL release, docstrings
 src/main_bench.cpp, src/bench_stat.cpp       C++ harnesses (development only)
 python/simd_ml_kernels/                      __init__.py (re-exports), _core.pyi (stubs), _cli.py (info/selftest/bench)
 python/simd_kernels/                         deprecated import alias (removed in 0.5.0)
-tests/test_*.cpp                             C++ tests: one binary, simd_tests; run_*() suites called from test_runner.cpp
+tests/test_*.cpp                             C++ tests: one binary, simd_tests, each suite run on every usable table
+tests/check_isa_units.py                     ctest isa_units: no out-of-ISA instruction or shared inline code in a unit
 tests/test_*.py                              float64 references, edge cases, CLI, stubs
 benchmarks/results/*.json                    committed benchmark results; make_tables.py renders them
 examples/                                    short runnable scripts, run in CI
@@ -95,22 +98,27 @@ Code and repository
 
 1. **Header**: declare it in the kernel's header (`activations/activations.hpp`
    for elementwise ops) with the formula and the error bound you will test.
-2. **Code paths**: AVX2+FMA in a `*_avx2.cpp`; an AVX-512 path only if it is
-   measured to be faster; a scalar path for the tail (or masked loads, as in
-   `intrinsic_gelu.cpp`) and for builds without AVX2 (`#ifndef __AVX2__`).
-   Reuse `simd_math.hpp`; use `make_aligned_array<T>()` for scratch buffers.
-3. **Build**: add the `.cpp` to `KERNEL_SRCS` in `CMakeLists.txt`.
-4. **Dispatch**: if the kernel has more than one ISA path, select it at run time
-   from `CpuFeatures` (never from compile-time macros alone) and report the
-   choice where `detected_isa()` / `build_info()` can show it.
-5. **Binding**: a `py_<name>` function in `pybind_entry.cpp` using
-   `validate_array` / `check_writeable`, `DTypeError` / `ArgumentError`, and
-   `py::gil_scoped_release` around the kernel; a NumPy-style docstring.
+2. **Code paths**: a scalar version in `scalar_kernels.cpp` (no intrinsics,
+   IEEE special values handled); AVX2+FMA in a `*_avx2.cpp` (scalar tail or
+   masked loads, as in `intrinsic_gelu.cpp`); an AVX-512 version only if it is
+   measured to be faster. Reuse `simd_math.hpp`; `make_aligned_array<T>()` for
+   scratch buffers. Never call an ISA unit's function from outside its unit
+   except through a table.
+3. **Build**: add each `.cpp` to `SIMD_ML_{SCALAR,AVX2,AVX512}_SRCS` in
+   `CMakeLists.txt` (its unit decides its flags).
+4. **Dispatch**: add a field to `KernelTable` (`dispatch/kernels.hpp`) and set
+   it in all three tables (`scalar_kernels.cpp`, `kernels_avx2.cpp`,
+   `kernels_avx512.cpp`; AVX-512 may point at the AVX2 function).
+5. **Binding**: a `py_<name>` function in `pybind_entry.cpp` that calls
+   `simd_ml::kernels().<field>`, using `validate_array` / `check_writeable`,
+   `DTypeError` / `ArgumentError`, and `py::gil_scoped_release` around the
+   kernel; a NumPy-style docstring.
 6. **Python surface**: export it in `python/simd_ml_kernels/__init__.py`
    (`__all__` too) and add it to `_core.pyi` (stubtest and
    `tests/test_stubs.py` fail otherwise).
-7. **Tests**: a C++ test in `tests/test_*.cpp` (registered in
-   `tests/test_runner.cpp`), a Python test against float64 in
+7. **Tests**: a C++ test in `tests/test_*.cpp` calling `T->field` inside
+   `for_each_kernel_table` (registered in `tests/test_runner.cpp`), a Python
+   test against float64 (pytest runs it once per usable table) in
    `tests/test_precision.py`, argument errors in
    `tests/test_bindings_edge_cases.py`, and a check in `selftest`
    (`selftest_checks()` in `_cli.py`) with the same tolerance.
@@ -118,8 +126,9 @@ Code and repository
    if it needs a new table, to `benchmarks/make_tables.py`.
 9. **Docs**: a row in the README kernel table, its entry in
    `docs/api/python_api.md`, a section in `docs/DESIGN.md`, a CHANGELOG line.
-10. **Verify**: `pip install .`, `selftest`, `pytest tests`, `ctest`, the ASan
-    build, and stubtest, all passing; no new compiler warnings.
+10. **Verify**: `pip install .`, `selftest`, `pytest tests`, `ctest` (including
+    `isa_units`), the ASan build, stubtest, and `selftest` under SDE `-nhm`
+    and `-skx`, all passing; no new compiler warnings.
 
 ## Results and their schema
 

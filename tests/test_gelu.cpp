@@ -3,18 +3,20 @@
  *
  * Two distinct correctness criteria:
  *
- * 1. AVX2 fast path (gelu_forward_avx2) vs tanh-formula reference:
+ * Run on every kernel table the CPU supports (kernel_tables.hpp).
+ *
+ * 1. tanh variant (KernelTable::gelu_tanh) vs tanh-formula reference:
  *    GeLU_tanh(x) = 0.5*x*(1 + tanh(√(2/π)*(x + 0.044715*x³)))
  *    Expected tolerance: < 2e-5  (Cody–Waite exp error budget × scaling)
  *
- * 2. AVX2 exact path (gelu_erf_forward_avx2) vs float64 erf reference:
+ * 2. exact variant (KernelTable::gelu_erf) vs float64 erf reference:
  *    GeLU_erf(x) = 0.5*x*(1 + erf(x/√2))
  *    Bound: 2e-6 absolute on [-10, 10] (the bound in the Python docstring).
  *
  * 3. Scalar exact path (gelu_forward_scalar) vs erff reference:
  *    Expected tolerance: < 1e-5  (FP32 rounding only)
  *
- * 4. Both AVX2 paths: special values (±inf, NaN, ±0, subnormals) in the 8-wide
+ * 4. Both variants: special values (±inf, NaN, ±0, subnormals) in the 8-wide
  *    body and in the masked tail, and tail results bitwise equal to the body.
  *
  * Note: gelu_forward_avx2 (tanh formula) and gelu_forward_scalar (erf formula)
@@ -31,6 +33,10 @@
 #include <cstring>
 #include "../src/kernels/cache_alloc.hpp"
 #include "../src/kernels/intrinsic_gelu.hpp"
+#include "kernel_tables.hpp"
+
+// The table the test functions below call into (set by the runner).
+static const simd_ml::KernelTable* T = nullptr;
 
 // Reference implementation of the TANH-approximation GeLU (not erff)
 // Used to test the AVX2 fast path to correct tolerances.
@@ -47,14 +53,14 @@ static float gelu_erf_ref(float x) {
     return 0.5f * x * (1.0f + std::erff(x * INV_SQRT2));
 }
 
-static bool test_gelu_avx2_vs_tanh_ref(int n, float lo, float hi,
+static bool test_gelu_tanh_vs_ref(int n, float lo, float hi,
                                          double tol = 2e-5) {
     auto inp = make_aligned_array<float>(n);
     auto out = make_aligned_array<float>(n);
     for (int i = 0; i < n; ++i)
         inp[i] = lo + (hi - lo) * i / std::max(n - 1, 1);
 
-    gelu_forward_avx2(inp.get(), out.get(), n);
+    T->gelu_tanh(inp.get(), out.get(), n);
 
     double max_abs = 0.0;
     int worst_idx = 0;
@@ -64,7 +70,7 @@ static bool test_gelu_avx2_vs_tanh_ref(int n, float lo, float hi,
         if (err > max_abs) { max_abs = err; worst_idx = i; }
     }
     bool pass = (max_abs < tol);
-    printf("  avx2_vs_tanh_ref  [%5.1f,%5.1f] n=%-7d  max_abs_err=%.2e  %s",
+    printf("  tanh_vs_ref      [%5.1f,%5.1f] n=%-7d  max_abs_err=%.2e  %s",
            lo, hi, n, max_abs, pass ? "PASS" : "FAIL");
     if (!pass)
         printf("  (worst x=%.4f out=%.6f ref=%.6f)",
@@ -74,13 +80,13 @@ static bool test_gelu_avx2_vs_tanh_ref(int n, float lo, float hi,
     return pass;
 }
 
-static bool test_gelu_erf_avx2_vs_ref(int n, float lo, float hi, double tol = 2e-6) {
+static bool test_gelu_erf_vs_ref(int n, float lo, float hi, double tol = 2e-6) {
     auto inp = make_aligned_array<float>(n);
     auto out = make_aligned_array<float>(n);
     for (int i = 0; i < n; ++i)
         inp[i] = lo + (hi - lo) * i / std::max(n - 1, 1);
 
-    gelu_erf_forward_avx2(inp.get(), out.get(), n);
+    T->gelu_erf(inp.get(), out.get(), n);
 
     double max_abs = 0.0;
     int worst = 0;
@@ -91,7 +97,7 @@ static bool test_gelu_erf_avx2_vs_ref(int n, float lo, float hi, double tol = 2e
         if (err > max_abs) { max_abs = err; worst = i; }
     }
     const bool pass = max_abs <= tol;
-    printf("  erf_avx2_vs_f64   [%5.1f,%5.1f] n=%-7d  max_abs_err=%.2e  %s",
+    printf("  erf_vs_f64       [%5.1f,%5.1f] n=%-7d  max_abs_err=%.2e  %s",
            lo, hi, n, max_abs, pass ? "PASS" : "FAIL");
     if (!pass) printf("  (worst x=%.4f)", (double)inp[worst]);
     printf("\n");
@@ -161,10 +167,10 @@ static bool test_gelu_inplace(int n) {
 
     // Out-of-place
     auto out = make_aligned_array<float>(n);
-    gelu_forward_avx2(buf1.get(), out.get(), n);
+    T->gelu_tanh(buf1.get(), out.get(), n);
 
     // In-place on a copy
-    gelu_forward_avx2(buf2.get(), buf2.get(), n);
+    T->gelu_tanh(buf2.get(), buf2.get(), n);
 
     double max_diff = 0.0;
     for (int i = 0; i < n; ++i)
@@ -181,21 +187,21 @@ static bool test_gelu_saturation() {
     auto inp = make_aligned_array<float>(8);
     auto out = make_aligned_array<float>(8);
     for (int i = 0; i < 8; ++i) inp[i] = 15.0f;
-    gelu_forward_avx2(inp.get(), out.get(), 8);
+    T->gelu_tanh(inp.get(), out.get(), 8);
     bool pos_ok = true;
     for (int i = 0; i < 8; ++i)
         if (std::abs(out[i] - 15.0f) > 0.01f) { pos_ok = false; break; }
 
     // GeLU(large negative) ≈ 0
     for (int i = 0; i < 8; ++i) inp[i] = -15.0f;
-    gelu_forward_avx2(inp.get(), out.get(), 8);
+    T->gelu_tanh(inp.get(), out.get(), 8);
     bool neg_ok = true;
     for (int i = 0; i < 8; ++i)
         if (std::abs(out[i]) > 0.01f) { neg_ok = false; break; }
 
     // GeLU(0) == 0
     for (int i = 0; i < 8; ++i) inp[i] = 0.0f;
-    gelu_forward_avx2(inp.get(), out.get(), 8);
+    T->gelu_tanh(inp.get(), out.get(), 8);
     bool zero_ok = true;
     for (int i = 0; i < 8; ++i)
         if (std::abs(out[i]) > 1e-6f) { zero_ok = false; break; }
@@ -213,7 +219,7 @@ static bool test_gelu_no_nan_inf(int n) {
     for (int i = 0; i < n; ++i)
         inp[i] = -88.0f + 176.0f * i / std::max(n - 1, 1);
 
-    gelu_forward_avx2(inp.get(), out.get(), n);
+    T->gelu_tanh(inp.get(), out.get(), n);
 
     bool ok = true;
     for (int i = 0; i < n; ++i)
@@ -225,40 +231,44 @@ static bool test_gelu_no_nan_inf(int n) {
 
 int run_gelu_tests() {
     printf("\n── GeLU Correctness Tests ──\n");
-    bool all = true;
+    // gelu_forward_scalar is also the float32 oracle of some tests below.
+    printf(" gelu_forward_scalar vs erff reference (should match to < 1e-5):\n");
+    bool oracle_ok = test_gelu_scalar_vs_erf_ref(1024, -5.0f, 5.0f);
+    oracle_ok &= test_gelu_scalar_vs_erf_ref(512, -3.0f, 3.0f);
+    const bool all = oracle_ok & for_each_kernel_table([](const simd_ml::KernelTable& t) {
+        T = &t;
+        bool ok = true;
 
-    printf(" AVX2 fast path vs tanh-formula reference (should match to < 2e-5):\n");
-    all &= test_gelu_avx2_vs_tanh_ref(1024,  -5.0f,  5.0f);
-    all &= test_gelu_avx2_vs_tanh_ref(8192,  -3.0f,  3.0f);
-    all &= test_gelu_avx2_vs_tanh_ref(512,   -0.5f,  0.5f);
-    all &= test_gelu_avx2_vs_tanh_ref(256,    2.0f,  8.0f);
-    all &= test_gelu_avx2_vs_tanh_ref(256,   -8.0f, -2.0f);
-    all &= test_gelu_avx2_vs_tanh_ref(7,     -5.0f,  5.0f);   // tail
-    all &= test_gelu_avx2_vs_tanh_ref(1,      0.0f,  0.0f);   // single
+        printf(" tanh variant vs tanh-formula reference (should match to < 2e-5):\n");
+        ok &= test_gelu_tanh_vs_ref(1024,  -5.0f,  5.0f);
+        ok &= test_gelu_tanh_vs_ref(8192,  -3.0f,  3.0f);
+        ok &= test_gelu_tanh_vs_ref(512,   -0.5f,  0.5f);
+        ok &= test_gelu_tanh_vs_ref(256,    2.0f,  8.0f);
+        ok &= test_gelu_tanh_vs_ref(256,   -8.0f, -2.0f);
+        ok &= test_gelu_tanh_vs_ref(7,     -5.0f,  5.0f);   // tail
+        ok &= test_gelu_tanh_vs_ref(1,      0.0f,  0.0f);   // single
 
-    printf(" AVX2 exact (erf) path vs float64 reference (bound 2e-6, 1e-6 on [-3,3]):\n");
-    all &= test_gelu_erf_avx2_vs_ref(400001, -10.0f, 10.0f);
-    all &= test_gelu_erf_avx2_vs_ref(60001,   -3.0f,  3.0f, 1e-6);
-    all &= test_gelu_erf_avx2_vs_ref(7,       -5.0f,  5.0f);   // tail only
+        printf(" exact (erf) variant vs float64 reference (bound 2e-6, 1e-6 on [-3,3]):\n");
+        ok &= test_gelu_erf_vs_ref(400001, -10.0f, 10.0f);
+        ok &= test_gelu_erf_vs_ref(60001,   -3.0f,  3.0f, 1e-6);
+        ok &= test_gelu_erf_vs_ref(7,       -5.0f,  5.0f);   // tail only
 
-    printf(" Special values and tail consistency (both variants):\n");
-    all &= test_gelu_special_values(gelu_forward_avx2, "tanh");
-    all &= test_gelu_special_values(gelu_erf_forward_avx2, "erf");
-    all &= test_gelu_tail_matches_body(gelu_forward_avx2, "tanh");
-    all &= test_gelu_tail_matches_body(gelu_erf_forward_avx2, "erf");
+        printf(" Special values and tail consistency (both variants):\n");
+        ok &= test_gelu_special_values(T->gelu_tanh, "tanh");
+        ok &= test_gelu_special_values(T->gelu_erf, "erf");
+        ok &= test_gelu_tail_matches_body(T->gelu_tanh, "tanh");
+        ok &= test_gelu_tail_matches_body(T->gelu_erf, "erf");
 
-    printf(" Scalar path vs erff reference (should match to < 1e-5):\n");
-    all &= test_gelu_scalar_vs_erf_ref(1024,  -5.0f,  5.0f);
-    all &= test_gelu_scalar_vs_erf_ref(512,   -3.0f,  3.0f);
+        printf(" In-place vs out-of-place consistency:\n");
+        ok &= test_gelu_inplace(8);
+        ok &= test_gelu_inplace(1024);
+        ok &= test_gelu_inplace(65536);
 
-    printf(" In-place vs out-of-place consistency:\n");
-    all &= test_gelu_inplace(8);
-    all &= test_gelu_inplace(1024);
-    all &= test_gelu_inplace(65536);
-
-    printf(" Saturation and boundary behaviour:\n");
-    all &= test_gelu_saturation();
-    all &= test_gelu_no_nan_inf(10000);
+        printf(" Saturation and boundary behaviour:\n");
+        ok &= test_gelu_saturation();
+        ok &= test_gelu_no_nan_inf(10000);
+        return ok;
+    });
 
     printf("  Overall: %s\n", all ? "ALL PASS" : "SOME FAILURES");
     return all ? 0 : 1;

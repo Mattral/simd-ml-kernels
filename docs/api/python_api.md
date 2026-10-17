@@ -37,7 +37,7 @@ C = simd_ml_kernels.sgemm(A, B)
 simd_ml_kernels.sgemm(A, B, C, alpha=2.0, beta=0.5)
 ```
 
-**Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 register tile, AVX2 FMA). See `docs/DESIGN.md` §2.
+**Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 AVX2 or 8×16 AVX-512 register tile; a plain loop in the scalar table). See `docs/DESIGN.md` §2.
 
 ### `GEMMConfig` — callable GEMM configuration object
 
@@ -61,38 +61,24 @@ C = gemm(A, B, alpha=1.0, beta=0.0) # per-call alpha/beta override (isa stays "a
 print(gemm)                          # GEMMConfig(alpha=2.0, beta=0.5, isa='avx2')
 ```
 
-`isa` must be one of `""`, `"avx2"`, `"avx512"`, `"scalar"` — an invalid
+`isa` must be one of `""`, `"scalar"`, `"avx2"`, `"avx512"`: an invalid
 value raises `ValueError` at construction time (`GEMMConfig`) or
-`ArgumentError` (a `ValueError`; `sgemm()`, checked on every call). The `isa=` parameter is also accepted
-directly by `sgemm()`:
+`ArgumentError` (a `ValueError`) from `sgemm()`. `sgemm()` accepts the same
+argument:
 
 ```python
-C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # forces the 8×8 AVX2 kernel
-C = simd_ml_kernels.sgemm(A, B, isa="avx512")   # forces the 8×16 AVX-512 kernel
-C = simd_ml_kernels.sgemm(A, B)                 # "" = auto-detect (default)
+C = simd_ml_kernels.sgemm(A, B)                 # "" = the table chosen for this CPU
+C = simd_ml_kernels.sgemm(A, B, isa="scalar")   # portable C++ kernel
+C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # 8×8 AVX2 kernel
+C = simd_ml_kernels.sgemm(A, B, isa="avx512")   # 8×16 AVX-512 kernel
 ```
 
-**`isa=` genuinely forces a specific kernel** — this is a real per-call
-override, not just a validated-and-ignored hint. Useful for benchmarking
-AVX2 vs AVX-512 on the same AVX-512-capable machine, or for reproducing a
-specific numeric result independent of what hardware auto-detection would
-otherwise choose. The override applies **only to that call** — it does not
-change behavior for subsequent calls that omit `isa=`.
-
-Two important edge cases:
-
-- **`isa="avx512"` on hardware without AVX-512F+DQ raises `RuntimeError`.**
-  Check `simd_ml_kernels.avx512_available()` first if you're not sure:
-  ```python
-  if simd_ml_kernels.avx512_available():
-      C = simd_ml_kernels.sgemm(A, B, isa="avx512")
-  ```
-- **`isa="scalar"` raises `RuntimeError` ("not yet implemented"), not a
-  silent fallback.** No forced full-matrix scalar path exists for
-  `sgemm_packed` yet — scalar code only runs internally for small edge/tail
-  blocks that don't fill a complete register tile. Silently falling back to
-  SIMD when the user explicitly asked for scalar would be a transparency
-  violation, so this is a hard error instead.
+`isa=` runs that kernel table for this call only, e.g. to compare AVX2 and
+AVX-512 on one machine. A table that this build does not include, or that
+this CPU cannot run, raises `RuntimeError`; `build_info()["isa_usable"]` lists
+the usable ones. To change the table for every function and the whole
+process, set the environment variable `SIMD_ML_ISA` (`scalar`, `avx2` or
+`avx512`; it caps the choice) before importing.
 
 ---
 
@@ -182,7 +168,7 @@ y = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
 # y has zero mean and unit std per row (before affine)
 ```
 
-**Implementation**: 3-pass AVX2 (mean → variance → normalize) with double-precision horizontal accumulation to prevent catastrophic cancellation.
+**Implementation**: 3 passes (mean → variance → normalize) with the sums in double precision to prevent catastrophic cancellation.
 
 ---
 
@@ -202,32 +188,30 @@ Return the current OpenMP thread count (always 1 without OpenMP).
 
 ### `build_info() → dict`
 
-Return build metadata as a Python dictionary.
+Build metadata (`python -m simd_ml_kernels info` prints it with the CPU's
+features):
 
-```python
-info = simd_ml_kernels.build_info()
-# Example output:
-# {
-#   'isa_compiled': 'AVX2+FMA3',
-#   'fma': True,
-#   'alignment': '64-byte (C++17 aligned operator new)',
-#   'build_timestamp': 'Jun 20 2026 14:22:11',
-#   'runtime_isa': 'avx2'
-# }
-```
+| Key | Meaning |
+|---|---|
+| `version`, `git_commit`, `compiler`, `build_timestamp` | the build; `git_commit` is taken at CMake configure time, `-dirty` marks local changes |
+| `isa_compiled` | kernel tables in this build, e.g. `"scalar avx2 avx512"` (only `"scalar"` off x86-64) |
+| `isa_usable` | those this CPU and OS can run |
+| `isa_flags` | compiler flags of each usable table's units |
+| `runtime_isa` | the table every call uses (same as `detected_isa()`) |
+| `kernel_flags`, `sgemm_tile` | that table's flags and GEMM micro-kernel shape |
+| `openmp` | whether GEMM can use more than one thread |
+| `alignment` | allocation alignment of internal buffers |
 
 ### `detected_isa() → str`
 
-Return the runtime-detected ISA string: `'avx512'`, `'avx2'`, `'sse42'`, or `'scalar'`. This reflects the process-wide default (computed once at startup) — it does **not** change based on any `isa=` override used on individual `sgemm()` calls.
+The kernel table every call uses: `'avx512'`, `'avx2'` or `'scalar'`; chosen
+once, on first use (docs/DESIGN.md §6). `sgemm(..., isa=...)` does not change
+it.
 
 ### `avx512_available() → bool`
 
-Return `True` if this CPU supports AVX-512F+DQ (the instructions required by `sgemm_packed`'s 8×16 micro-kernel), independent of any `isa=` override. Check this before requesting `isa="avx512"` explicitly to avoid a `RuntimeError` on unsupported hardware:
-
-```python
-if simd_ml_kernels.avx512_available():
-    C = simd_ml_kernels.sgemm(A, B, isa="avx512")
-```
+`True` if this build includes the AVX-512 kernels and this CPU and OS can run
+them (AVX-512F/DQ/BW/VL and OS ZMM state).
 
 ### `is_aligned(arr: np.ndarray) → bool`
 
@@ -246,7 +230,7 @@ simd_ml_kernels.is_aligned(x)   # True on most NumPy allocations ≥ 64 elements
 |---|---|---|
 | wrong dtype (including a `C` output that is not float32, and float16 passed to `sgemm_bf16`) | `simd_ml_kernels.DTypeError` | `TypeError` |
 | wrong shape/ndim, not C-contiguous, read-only output, bad `axis`, invalid `isa` string | `simd_ml_kernels.ArgumentError` | `ValueError` |
-| requested ISA not available on this CPU (`isa="avx512"`, `sgemm_f16` without F16C), `isa="scalar"` (not implemented) | `RuntimeError` | — |
+| `isa=` names a table this build or CPU cannot run | `RuntimeError` | — |
 
 Both custom classes also subclass `RuntimeError`, which every argument error
 was before 0.3, so `except RuntimeError` keeps working until 0.5.0.

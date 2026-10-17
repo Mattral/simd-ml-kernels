@@ -1,15 +1,14 @@
 /**
  * test_gemm_packed.cpp — Correctness tests for avx2_gemm_packed (8×8 micro-kernel).
  *
- * Tests the BLIS-style packed kernel (simd_ml::gemm::sgemm_packed) against the
- * scalar triple-loop reference (naive_sgemm) across:
+ * Tests KernelTable::sgemm of every table the CPU supports (scalar, AVX2 8x8,
+ * AVX-512 8x16) against the scalar triple-loop reference (naive_sgemm) across:
  *   - Square sizes (1, 7, 8, 9, 16, 127, 128, 129, 256, 512, 1024)
  *   - Non-square / non-power-of-two sizes (edge/tail handling)
  *   - Alpha/beta scaling paths
  *   - beta=0 overwrite correctness (C must not accumulate prior garbage)
  *
- * Tolerance: 1e-4 absolute. The precision build uses -O2 without -ffast-math,
- * so FP rounding is close to IEEE 754. For larger K the error can reach ~K×ε_mach;
+ * Tolerance: 1e-4 absolute. For larger K the error can reach ~K×ε_mach;
  * the 1e-4 cap is generous enough to cover K=1024 (worst case ~1024×1.2e-7 ≈ 1.2e-4).
  */
 
@@ -20,6 +19,10 @@
 #include "../src/kernels/gemm/avx2_gemm_packed.hpp"
 #include "../src/kernels/gemm/naive_gemm.hpp"
 #include "../src/kernels/cache_alloc.hpp"
+#include "kernel_tables.hpp"
+
+// The table the test functions below call into (set by the runner).
+static const simd_ml::KernelTable* T = nullptr;
 
 static void fill_random(float* buf, int n, unsigned seed = 42) {
     unsigned s = seed;
@@ -55,7 +58,7 @@ static bool test_sgemm_packed(int M, int N, int K,
             C_ref[i] = alpha * AB[i] + beta * C_ref[i];
     }
 
-    simd_ml::gemm::sgemm_packed(M, N, K, alpha, A.get(), K, B.get(), N, beta, C_got.get(), N);
+    T->sgemm(M, N, K, alpha, A.get(), K, B.get(), N, beta, C_got.get(), N);
 
     float max_err = 0.0f;
     int   worst   = -1;
@@ -89,7 +92,7 @@ static bool test_beta_zero_overwrites_poison() {
     fill_random(B.get(), N * N, 21);
     std::fill(C.get(), C.get() + N * N, 1e30f);  // poison
 
-    simd_ml::gemm::sgemm_packed(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C.get(), N);
+    T->sgemm(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C.get(), N);
 
     auto C_ref = make_aligned_array<float>(N * N);
     naive_sgemm(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C_ref.get(), N);
@@ -117,14 +120,14 @@ static bool test_k_zero_applies_beta() {
                 std::fill(C.get(), C.get() + M * N, init);
                 const float dummy = 1.0f;  // A and B are never read when K == 0
                 if (impl == 0)
-                    simd_ml::gemm::sgemm_packed(M, N, 0, 1.0f, &dummy, 1, &dummy, N, beta, C.get(), N);
+                    T->sgemm(M, N, 0, 1.0f, &dummy, 1, &dummy, N, beta, C.get(), N);
                 else
                     naive_sgemm(M, N, 0, 1.0f, &dummy, 1, &dummy, N, beta, C.get(), N);
                 const float expect = (beta == 0.0f) ? 0.0f : beta * 3.0f;
                 bool pass = true;
                 for (int i = 0; i < M * N; ++i) pass &= (C[i] == expect);
                 printf("  K=0 %-12s M=%-3d beta=%.1f  C==%.1f: %s\n",
-                       impl == 0 ? "sgemm_packed" : "naive_sgemm", M, beta, expect,
+                       impl == 0 ? T->name : "naive_sgemm", M, beta, expect,
                        pass ? "PASS" : "FAIL");
                 all_pass &= pass;
             }
@@ -170,7 +173,7 @@ static bool test_gemm_packed_avx512_full_coverage() {
     std::fill(C_got.get(), C_got.get() + M * N, 0.0f);
 
     naive_sgemm(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_ref.get(), N);
-    simd_ml::gemm::sgemm_packed(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_got.get(), N);
+    T->sgemm(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_got.get(), N);
 
     float max_err = 0.0f;
     for (int i = 0; i < M * N; ++i)
@@ -179,106 +182,14 @@ static bool test_gemm_packed_avx512_full_coverage() {
     bool pass = (max_err < 1e-4f);
     printf("  AVX-512 full-coverage [%dx%dx%d]  isa=%s  max_abs=%.2e  %s\n",
            M, N, K,
-           simd_ml::gemm::gemm_packed_isa_is_avx512() ? "avx512(8x16)" : "avx2(8x8)",
+           T->sgemm_tile,
            max_err, pass ? "PASS" : "FAIL");
     return pass;
 }
 
-/**
- * test_gemm_isa_override — Verifies set_gemm_isa_override genuinely changes
- * sgemm_packed's kernel dispatch (not inferred from numeric equivalence,
- * which could mask a broken override on hardware where auto and forced
- * happen to coincide — checked directly via gemm_packed_isa_is_avx512()).
- *
- * Also verifies numerical correctness under each forced path and that
- * resetting the override restores auto-detection.
- */
-static bool test_gemm_isa_override() {
-    using namespace simd_ml::gemm;
-    bool all_pass = true;
-
-    const bool hw_avx512 = gemm_packed_avx512_hardware_available();
-
-    // Force AVX2: is_avx512() must report false regardless of hardware
-    set_gemm_isa_override("avx2");
-    bool avx2_forced_ok = !gemm_packed_isa_is_avx512();
-    printf("  force avx2  -> is_avx512()==false: %s\n", avx2_forced_ok ? "PASS" : "FAIL");
-    all_pass &= avx2_forced_ok;
-
-    // Numerical correctness while forced to AVX2
-    {
-        const int N = 96;  // multiple of 8 (AVX2 NR) with edge-block coverage too
-        auto A = make_aligned_array<float>(N * N);
-        auto B = make_aligned_array<float>(N * N);
-        auto C = make_aligned_array<float>(N * N);
-        auto C_ref = make_aligned_array<float>(N * N);
-        fill_random(A.get(), N * N, 55);
-        fill_random(B.get(), N * N, 66);
-        naive_sgemm(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C_ref.get(), N);
-        sgemm_packed(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C.get(), N);
-        float max_err = 0.0f;
-        for (int i = 0; i < N * N; ++i)
-            max_err = std::max(max_err, std::fabs(C[i] - C_ref[i]));
-        bool ok = max_err < 1e-4f;
-        printf("  force avx2  numerical correctness [%dx%d]: max_abs=%.2e  %s\n",
-               N, N, max_err, ok ? "PASS" : "FAIL");
-        all_pass &= ok;
-    }
-
-    // Force AVX-512: only meaningful to assert true if hardware actually
-    // supports it (the function is defensively safe on unsupported hw —
-    // see header doc comment — so it would correctly report false there).
-    set_gemm_isa_override("avx512");
-    bool avx512_forced_ok = hw_avx512 ? gemm_packed_isa_is_avx512()
-                                       : !gemm_packed_isa_is_avx512();
-    printf("  force avx512 -> is_avx512()==%-5s: %s  (hw_avx512=%s)\n",
-           hw_avx512 ? "true" : "false", avx512_forced_ok ? "PASS" : "FAIL",
-           hw_avx512 ? "yes" : "no");
-    all_pass &= avx512_forced_ok;
-
-    if (hw_avx512) {
-        const int N = 96;
-        auto A = make_aligned_array<float>(N * N);
-        auto B = make_aligned_array<float>(N * N);
-        auto C = make_aligned_array<float>(N * N);
-        auto C_ref = make_aligned_array<float>(N * N);
-        fill_random(A.get(), N * N, 77);
-        fill_random(B.get(), N * N, 88);
-        naive_sgemm(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C_ref.get(), N);
-        sgemm_packed(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C.get(), N);
-        float max_err = 0.0f;
-        for (int i = 0; i < N * N; ++i)
-            max_err = std::max(max_err, std::fabs(C[i] - C_ref[i]));
-        bool ok = max_err < 1e-4f;
-        printf("  force avx512 numerical correctness [%dx%d]: max_abs=%.2e  %s\n",
-               N, N, max_err, ok ? "PASS" : "FAIL");
-        all_pass &= ok;
-    }
-
-    // Reset must restore auto-detection (raw hardware capability)
-    set_gemm_isa_override("");
-    bool reset_ok = gemm_packed_isa_is_avx512() == hw_avx512;
-    printf("  reset override -> matches raw hw (%s): %s\n",
-           hw_avx512 ? "avx512" : "avx2", reset_ok ? "PASS" : "FAIL");
-    all_pass &= reset_ok;
-
-    // Unknown override string must be treated as auto (defensive default)
-    set_gemm_isa_override("nonsense");
-    bool unknown_defaults_to_auto = gemm_packed_isa_is_avx512() == hw_avx512;
-    printf("  unknown override defaults to auto:    %s\n",
-           unknown_defaults_to_auto ? "PASS" : "FAIL");
-    all_pass &= unknown_defaults_to_auto;
-    set_gemm_isa_override(nullptr);  // leave clean for subsequent tests
-
-    return all_pass;
-}
-
 static bool test_small_gemm_direct_path() {
-    // ── Direct-path correctness (sgemm_direct_avx2 vs naive_sgemm) ──────────
-    // Tests the no-packing fast path in isolation.  Each case is at or below
-    // SMALL_GEMM_THRESHOLD (128) so sgemm_packed would dispatch here anyway,
-    // but calling sgemm_direct_avx2 directly lets us verify the function
-    // itself, not just the dispatch decision.
+    // ── Small sizes (<= SMALL_GEMM_THRESHOLD): the AVX2/AVX-512 tables run the
+    // unpacked sgemm_direct_avx2 path here; the scalar table its only path.
     bool all_pass = true;
     struct Case { int M, N, K; float alpha, beta; const char* label; };
     const Case cases[] = {
@@ -306,9 +217,9 @@ static bool test_small_gemm_direct_path() {
                     c.alpha, A.get(), c.K, B.get(), c.N,
                     c.beta,  C_ref.get(), c.N);
 
-        simd_ml::gemm::sgemm_direct_avx2(c.M, c.N, c.K,
-                                          c.alpha, A.get(), c.K, B.get(), c.N,
-                                          c.beta,  C_got.get(), c.N);
+        T->sgemm(c.M, c.N, c.K,
+                 c.alpha, A.get(), c.K, B.get(), c.N,
+                 c.beta,  C_got.get(), c.N);
 
         float max_err = 0.0f;
         for (int i = 0; i < c.M * c.N; ++i)
@@ -333,39 +244,37 @@ static bool test_small_gemm_direct_path() {
 
 int run_gemm_packed_tests() {
     printf("\n── Packed GEMM Correctness Tests ──\n");
-    bool all_pass = true;
+    const bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
+        T = &t;
+        bool ok = true;
 
-    printf("  Runtime ISA: %s\n",
-           simd_ml::gemm::gemm_packed_isa_is_avx512() ? "AVX-512 (8x16 kernel)" : "AVX2 (8x8 kernel)");
+        printf(" Standard sizes (α=1, β=0):\n");
+        for (int s : {1, 7, 8, 9, 16, 127, 128, 129, 256, 512, 1024})
+            ok &= test_sgemm_packed(s, s, s);
 
-    printf(" Standard sizes (α=1, β=0):\n");
-    for (int s : {1, 7, 8, 9, 16, 127, 128, 129, 256, 512, 1024})
-        all_pass &= test_sgemm_packed(s, s, s);
+        printf(" Non-square edge cases:\n");
+        ok &= test_sgemm_packed(1,   4096, 4096);
+        ok &= test_sgemm_packed(13,  31,   37);
+        ok &= test_sgemm_packed(32,  7,    17);
 
-    printf(" Non-square edge cases:\n");
-    all_pass &= test_sgemm_packed(1,   4096, 4096);
-    all_pass &= test_sgemm_packed(13,  31,   37);
-    all_pass &= test_sgemm_packed(32,  7,    17);
+        printf(" Alpha/beta scaling:\n");
+        ok &= test_sgemm_packed(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/99);
+        ok &= test_sgemm_packed(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/77);
 
-    printf(" Alpha/beta scaling:\n");
-    all_pass &= test_sgemm_packed(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/99);
-    all_pass &= test_sgemm_packed(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/77);
+        printf(" Edge: beta=0 must overwrite poisoned C:\n");
+        ok &= test_beta_zero_overwrites_poison();
 
-    printf(" Edge: beta=0 must overwrite poisoned C:\n");
-    all_pass &= test_beta_zero_overwrites_poison();
+        printf(" Edge: K=0 gives C = beta*C:\n");
+        ok &= test_k_zero_applies_beta();
 
-    printf(" Edge: K=0 gives C = beta*C:\n");
-    all_pass &= test_k_zero_applies_beta();
+        printf(" AVX-512 dual-kernel dispatch regression guard:\n");
+        ok &= test_gemm_packed_avx512_full_coverage();
 
-    printf(" AVX-512 dual-kernel dispatch regression guard:\n");
-    all_pass &= test_gemm_packed_avx512_full_coverage();
-
-    printf(" ISA override mechanism (isa= forcing):\n");
-    all_pass &= test_gemm_isa_override();
-
-    printf(" Small-matrix direct path (SMALL_GEMM_THRESHOLD=%d, v0.9):\n",
-           simd_ml::gemm::SMALL_GEMM_THRESHOLD);
-    all_pass &= test_small_gemm_direct_path();
+        printf(" Small-matrix direct path (SMALL_GEMM_THRESHOLD=%d, v0.9):\n",
+               simd_ml::gemm::SMALL_GEMM_THRESHOLD);
+        ok &= test_small_gemm_direct_path();
+        return ok;
+    });
 
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;

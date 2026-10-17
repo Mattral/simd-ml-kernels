@@ -19,8 +19,8 @@ void gelu_erf_forward_avx2(const float* input,
                            std::size_t  n);
 
 /**
- * gelu_forward_scalar — Scalar fallback GeLU implementation for correctness
- * validation and non-AVX2 builds.
+ * gelu_forward_scalar — exact GeLU with libm erff (scalar_kernels.cpp): the
+ * scalar kernel and the tests' float32 reference. x < -10 returns -0.
  */
 void gelu_forward_scalar(const float* input,
                           float*       output,

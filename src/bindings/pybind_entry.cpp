@@ -55,7 +55,7 @@
 #include "../kernels/gemm/bf16_gemm.hpp"
 #include "../kernels/intrinsic_gelu.hpp"
 #include "../kernels/cache_alloc.hpp"
-#include "../dispatch/kernel_registry.hpp"
+#include "../dispatch/kernels.hpp"
 
 namespace py = pybind11;
 
@@ -137,27 +137,24 @@ static py::array_t<float> output_matrix(const py::object& C, py::ssize_t M, py::
  */
 
 /**
- * IsaOverrideGuard — RAII wrapper around simd_ml::gemm::set_gemm_isa_override.
- *
- * Saves the current thread-local override on construction, applies the
- * requested one, and restores the previous value on destruction (including
- * on the exception path) — so a single sgemm(..., isa=...) call cannot leak
- * its override into unrelated subsequent calls on the same thread.
+ * table_for_isa — the kernel table for sgemm's isa= argument: "" is the
+ * table chosen for this CPU (kernels()); "scalar", "avx2" or "avx512" force
+ * that table for this call, and raise if this build or CPU cannot run it.
  */
-class IsaOverrideGuard {
-public:
-    explicit IsaOverrideGuard(const std::string& isa)
-        : previous_(simd_ml::gemm::get_gemm_isa_override()) {
-        simd_ml::gemm::set_gemm_isa_override(isa.empty() ? nullptr : isa.c_str());
+static const simd_ml::KernelTable& table_for_isa(const std::string& isa) {
+    if (isa.empty()) return simd_ml::kernels();
+    for (int i = 0; i < simd_ml::kNumIsa; ++i) {
+        const auto id = static_cast<simd_ml::Isa>(i);
+        if (isa != simd_ml::isa_name(id)) continue;
+        if (const simd_ml::KernelTable* t = simd_ml::kernels_for(id)) return *t;
+        throw std::runtime_error(
+            "isa='" + isa + "' was requested but " +
+            (simd_ml::isa_compiled(id) ? "this CPU cannot run it" : "this build does not include it") +
+            ". Use isa='' (the kernels chosen for this CPU) or check "
+            "simd_ml_kernels.build_info()['isa_usable'].");
     }
-    ~IsaOverrideGuard() {
-        simd_ml::gemm::set_gemm_isa_override(previous_.c_str());
-    }
-    IsaOverrideGuard(const IsaOverrideGuard&) = delete;
-    IsaOverrideGuard& operator=(const IsaOverrideGuard&) = delete;
-private:
-    std::string previous_;
-};
+    throw ArgumentError("isa must be one of: '', 'scalar', 'avx2', 'avx512' (got '" + isa + "')");
+}
 
 static py::array_t<float> py_sgemm(py::array A,
                                      py::array B,
@@ -165,31 +162,7 @@ static py::array_t<float> py_sgemm(py::array A,
                                      float alpha    = 1.0f,
                                      float beta     = 0.0f,
                                      const std::string& isa = "") {
-    // isa="" (default) uses the runtime auto-detected kernel — this is what
-    // essentially all callers want. Explicit values force a specific kernel
-    // for exactly this call (see IsaOverrideGuard above for the per-call,
-    // not-sticky, semantics).
-    if (!isa.empty() && isa != "avx2" && isa != "avx512" && isa != "scalar") {
-        throw ArgumentError(
-            "isa must be one of: 'avx2', 'avx512', 'scalar' (got '" + isa + "')");
-    }
-    if (isa == "scalar") {
-        // Honest error rather than silently falling back to auto: a forced
-        // full-matrix scalar GEMM path is not implemented for sgemm_packed
-        // (scalar code only runs internally for small edge/tail blocks).
-        throw std::runtime_error(
-            "isa='scalar' is not yet implemented for sgemm_packed "
-            "(scalar_sgemm() is available separately as a reference "
-            "implementation, but is not wired into sgemm's isa= override). "
-            "Use isa='avx2' or isa='avx512' to force a SIMD kernel, or "
-            "isa='' for automatic hardware detection.");
-    }
-    if (isa == "avx512" && !simd_ml::gemm::gemm_packed_avx512_hardware_available()) {
-        throw std::runtime_error(
-            "isa='avx512' was requested but this CPU does not support "
-            "AVX-512F+DQ. Use isa='avx2' or isa='' (auto-detect) instead. "
-            "Check simd_ml_kernels.avx512_available() to query hardware support.");
-    }
+    const simd_ml::KernelTable& table = table_for_isa(isa);
 
     validate_array(A, "A");
     validate_array(B, "B");
@@ -225,8 +198,7 @@ static py::array_t<float> py_sgemm(py::array A,
 
     {
         py::gil_scoped_release release;
-        IsaOverrideGuard guard(isa);   // no-op restore if isa == "" (auto)
-        simd_ml::gemm::sgemm_packed(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
+        table.sgemm(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
     }
     return C_out;
 }
@@ -234,16 +206,14 @@ static py::array_t<float> py_sgemm(py::array A,
 // ─── Binding: gelu / gelu_inplace ────────────────────────────────────────────
 // approximate="none" (default, as in PyTorch): exact 0.5·x·(1 + erf(x/√2)).
 // approximate="tanh": the tanh formula, PyTorch's approximate='tanh'.
-using GeluFn = void (*)(const float*, float*, std::size_t);
-
-static GeluFn gelu_variant(const std::string& approximate) {
-    if (approximate == "none") return &gelu_erf_forward_avx2;
-    if (approximate == "tanh") return &gelu_forward_avx2;
+static simd_ml::UnaryFn gelu_variant(const std::string& approximate) {
+    if (approximate == "none") return simd_ml::kernels().gelu_erf;
+    if (approximate == "tanh") return simd_ml::kernels().gelu_tanh;
     throw ArgumentError("approximate must be 'none' or 'tanh' (got '" + approximate + "')");
 }
 
 static void py_gelu_inplace(py::array x, const std::string& approximate = "none") {
-    const GeluFn fn = gelu_variant(approximate);
+    const simd_ml::UnaryFn fn = gelu_variant(approximate);
     validate_array(x, "x");
     check_writeable(x, "x");
 
@@ -257,7 +227,7 @@ static void py_gelu_inplace(py::array x, const std::string& approximate = "none"
 }
 
 static py::array_t<float> py_gelu(py::array x, const std::string& approximate = "none") {
-    const GeluFn fn = gelu_variant(approximate);
+    const simd_ml::UnaryFn fn = gelu_variant(approximate);
     validate_array(x, "x");
 
     std::size_t n = static_cast<std::size_t>(x.size());
@@ -277,7 +247,7 @@ static py::array_t<float> py_relu(py::array x) {
     py::array_t<float> out(x.request().shape);
     {
         py::gil_scoped_release release;
-        activations::relu_avx2(static_cast<const float*>(x.data()),
+        simd_ml::kernels().relu(static_cast<const float*>(x.data()),
                                 out.mutable_data(), static_cast<int>(n));
     }
     return out;
@@ -290,7 +260,7 @@ static py::array_t<float> py_silu(py::array x) {
     py::array_t<float> out(x.request().shape);
     {
         py::gil_scoped_release release;
-        activations::silu_avx2(static_cast<const float*>(x.data()),
+        simd_ml::kernels().silu(static_cast<const float*>(x.data()),
                                 out.mutable_data(), static_cast<int>(n));
     }
     return out;
@@ -319,12 +289,13 @@ static py::array_t<float> py_softmax(py::array x, int axis = -1) {
     for (int i = 0; i < ndim - 1; ++i)
         rows = static_cast<int>(rows * buf.shape[i]);
 
+    const simd_ml::RowFn softmax_row = simd_ml::kernels().softmax_row;
     {
         py::gil_scoped_release release;
         for (int r = 0; r < rows; ++r) {
             const float* row_in  = in_ptr  + static_cast<std::size_t>(r) * row_size;
             float*       row_out = out_ptr + static_cast<std::size_t>(r) * row_size;
-            activations::softmax_row_avx2(row_in, row_out, row_size);
+            softmax_row(row_in, row_out, row_size);
         }
     }
     return out;
@@ -376,13 +347,14 @@ static py::array_t<float> py_layer_norm(py::array x,
     py::array_t<float> out(buf.shape);
     const float* in_ptr = static_cast<const float*>(x.data());
     float*       out_ptr = out.mutable_data();
+    const simd_ml::LayerNormFn layer_norm_row = simd_ml::kernels().layer_norm_row;
 
     {
         py::gil_scoped_release release;
         for (int r = 0; r < rows; ++r) {
             const float* row_in  = in_ptr  + static_cast<std::size_t>(r) * row_size;
             float*       row_out = out_ptr + static_cast<std::size_t>(r) * row_size;
-            activations::layer_norm_avx2(row_in, row_out, row_size, gamma_ptr, beta_ptr, eps);
+            layer_norm_row(row_in, row_out, row_size, gamma_ptr, beta_ptr, eps);
         }
     }
     return out;
@@ -416,26 +388,30 @@ static int py_get_num_threads() {
 // ─── Binding: build_info ─────────────────────────────────────────────────────
 static py::dict build_info() {
     py::dict info;
-#ifdef __AVX512F__
-    info["isa_compiled"] = "AVX-512F+DQ";
-#elif defined(__AVX2__)
-    info["isa_compiled"] = "AVX2+FMA3";
-#else
-    info["isa_compiled"] = "scalar (no AVX2)";
-#endif
-#ifdef __FMA__
-    info["fma"] = true;
-#else
-    info["fma"] = false;
-#endif
+    std::string compiled, usable;
+    py::dict isa_flags;
+    for (int i = 0; i < simd_ml::kNumIsa; ++i) {
+        const auto id = static_cast<simd_ml::Isa>(i);
+        if (!simd_ml::isa_compiled(id)) continue;
+        compiled += (compiled.empty() ? "" : " ") + std::string(simd_ml::isa_name(id));
+        if (const simd_ml::KernelTable* t = simd_ml::kernels_for(id)) {
+            usable += (usable.empty() ? "" : " ") + std::string(t->name);
+            isa_flags[t->name] = t->flags;
+        }
+    }
+    const simd_ml::KernelTable& active = simd_ml::kernels();
+    info["isa_compiled"]    = compiled;          // units in this build
+    info["isa_usable"]      = usable;            // ... that this CPU can run
+    info["isa_flags"]       = isa_flags;         // compiler flags of each usable unit
+    info["sgemm_tile"]      = active.sgemm_tile;
     info["alignment"]       = "64-byte (C++17 aligned operator new)";
     info["build_timestamp"] = std::string(__DATE__) + " " + std::string(__TIME__);
-    info["runtime_isa"]     = simd_ml::dispatch::detected_isa();
+    info["runtime_isa"]     = active.name;       // the table every call uses
     info["openmp"]          = kHasOpenMP;
     info["version"]         = SIMD_ML_VERSION;
     info["git_commit"]      = SIMD_ML_GIT_COMMIT;
     info["compiler"]        = SIMD_ML_COMPILER;
-    info["kernel_flags"]    = SIMD_ML_KERNEL_FLAGS;
+    info["kernel_flags"]    = active.flags;      // flags of that table's units
     return info;
 }
 
@@ -504,21 +480,13 @@ static bool py_is_aligned(py::array arr) {
  * Half-precision GEMM: C[fp32] = alpha * A[fp16] @ B[fp16] + beta * C[fp32]
  *
  * A and B must be numpy arrays with dtype=np.float16. C (output) is float32
- * to avoid overflow in intermediate sums. Raises RuntimeError if F16C is not
- * available on this CPU (check simd_ml_kernels.f16c_available() first).
+ * to avoid overflow in intermediate sums.
  */
 static py::array_t<float> py_sgemm_f16(py::array A,
                                          py::array B,
                                          float alpha   = 1.0f,
                                          float beta    = 0.0f,
                                          py::object C  = py::none()) {
-    // Check F16C availability (runtime, not compile-time)
-    if (!simd_ml::gemm::f16c_available()) {
-        throw std::runtime_error(
-            "sgemm_f16 requires F16C instructions which are not available on "
-            "this CPU. Check simd_ml_kernels.f16c_available() before calling.");
-    }
-
     // Validate A and B: must be float16 (kind='f', itemsize=2) and C-contiguous
     auto check_f16 = [](const py::array& arr, const char* name) {
         if (arr.dtype().kind() != 'f' || arr.dtype().itemsize() != 2) {
@@ -566,9 +534,7 @@ static py::array_t<float> py_sgemm_f16(py::array A,
 
     {
         py::gil_scoped_release release;
-        simd_ml::gemm::sgemm_f16_avx2(M, N, K,
-                                       alpha, A_ptr, K, B_ptr, N,
-                                       beta,  C_ptr, N);
+        simd_ml::kernels().sgemm_f16(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
     }
     return C_out;
 }
@@ -646,9 +612,7 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
 
     {
         py::gil_scoped_release release;
-        simd_ml::gemm::sgemm_bf16_avx2(M, N, K,
-                                        alpha, A_ptr, K, B_ptr, N,
-                                        beta,  C_ptr, N);
+        simd_ml::kernels().sgemm_bf16(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
     }
     return C_out;
 }
@@ -685,7 +649,7 @@ struct GEMMConfig {
     void validate() const {
         if (!isa.empty() && isa != "avx2" && isa != "avx512" && isa != "scalar") {
             throw py::value_error(
-                "isa must be one of: 'avx2', 'avx512', 'scalar' (got '" + isa + "')");
+                "isa must be one of: '', 'scalar', 'avx2', 'avx512' (got '" + isa + "')");
         }
         for (auto [name, val] : std::initializer_list<std::pair<const char*, int>>{
                 {"tile_m", tile_m}, {"tile_n", tile_n}, {"tile_k", tile_k},
@@ -763,16 +727,11 @@ B     : np.ndarray[float32], shape [K, N], C-contiguous
 C     : np.ndarray[float32], shape [M, N], optional (allocated if None)
 alpha : float, default 1.0
 beta  : float, default 0.0  (0 = overwrite C, 1 = accumulate into C)
-isa   : str, default "" (auto-detect). One of "", "avx2", "avx512".
-        Forces this specific call to use the named kernel instead of the
-        runtime auto-detected one — e.g. for benchmarking AVX2 vs AVX-512
-        on the same AVX-512-capable machine. Requesting "avx512" on
-        hardware without AVX-512F+DQ raises RuntimeError (check
-        simd_ml_kernels.avx512_available() first). This override applies only
-        to this call — it does not change behavior for subsequent calls.
-        "scalar" is validated as a recognized value but raises
-        RuntimeError ("not yet implemented") rather than silently falling
-        back, since no forced full-matrix scalar path exists yet.
+isa   : str, default "" (the kernels chosen for this CPU, detected_isa()).
+        "scalar", "avx2" or "avx512" run that kernel table for this call
+        only, e.g. to compare AVX2 and AVX-512 on one machine. A table this
+        build or CPU cannot run raises RuntimeError; build_info()["isa_usable"]
+        lists the ones that work.
 
 Returns
 -------
@@ -780,10 +739,10 @@ np.ndarray[float32] of shape [M, N] — same object as C if provided.
 
 Notes
 -----
-Uses a Goto/BLIS-style packed GEMM with register blocking (8×8 AVX2 or
-8×16 AVX-512 micro-tile, auto-dispatched at runtime unless isa= forces a
-choice), panel packing, and FMA intrinsics. Throughput relative to
-OpenBLAS on named hardware: docs/BENCHMARKS.md.
+Goto/BLIS-style packed GEMM with an 8×8 (AVX2) or 8×16 (AVX-512) FMA
+micro-kernel above 128 in any dimension, an unpacked loop below; the scalar
+table uses a plain row-by-row loop. Throughput relative to OpenBLAS on
+named hardware: docs/BENCHMARKS.md.
 )doc");
 
     static const char* gelu_doc = R"doc(
@@ -822,11 +781,11 @@ approximate : "none" | "tanh"
 
     m.def("relu", &py_relu,
           py::arg("x"),
-          "Return ReLU(x) = max(0, x) computed with AVX2 vectorization.");
+          "Return ReLU(x) = max(0, x).");
 
     m.def("silu", &py_silu,
           py::arg("x"),
-          "Return SiLU(x) = x * sigmoid(x) using AVX2 vectorization.");
+          "Return SiLU(x) = x * sigmoid(x).");
 
     m.def("softmax", &py_softmax,
           py::arg("x"), py::arg("axis") = -1,
@@ -838,7 +797,7 @@ approximate : "none" | "tanh"
           py::arg("beta")  = py::none(),
           py::arg("eps")   = 1e-5f,
           R"doc(
-Apply Layer Normalization over the last axis using AVX2 vectorization.
+Apply Layer Normalization over the last axis.
 
 output = (x - mean) / sqrt(var + eps) * gamma + beta
 
@@ -864,17 +823,19 @@ np.ndarray[float32] same shape as x.
           "Return the current OpenMP thread count used by GEMM.");
 
     m.def("build_info", &build_info,
-          "Return a dict with ISA, FMA support, alignment, and build details.");
+          "Return build details: version, commit, compiler, the kernel tables compiled\n"
+          "(isa_compiled) and usable on this CPU (isa_usable), the active table\n"
+          "(runtime_isa) with its flags (kernel_flags) and GEMM tile (sgemm_tile), OpenMP.");
 
     m.def("detected_isa", []() {
-        return std::string(simd_ml::dispatch::detected_isa());
-    }, "Return the runtime-detected ISA label (avx512|avx2|sse42|scalar).");
+        return std::string(simd_ml::kernels().name);
+    }, "Return the kernel table every call uses: 'avx512', 'avx2' or 'scalar' (see build_info()).");
 
     m.def("avx512_available", []() {
-        return simd_ml::gemm::gemm_packed_avx512_hardware_available();
+        return simd_ml::kernels_for(simd_ml::Isa::avx512) != nullptr;
     }, R"doc(
-Return True if this CPU supports AVX-512F+DQ (the instructions required by
-sgemm_packed's 8x16 micro-kernel), independent of any isa= override.
+Return True if this build includes the AVX-512 kernels and this CPU and OS can
+run them (AVX-512F/DQ/BW/VL and OS ZMM state), independent of SIMD_ML_ISA.
 
 Useful for checking before requesting isa='avx512' explicitly:
 
@@ -896,7 +857,7 @@ BF16-input GEMM: C[float32] = alpha * A[bfloat16] @ B[bfloat16] + beta * C[float
 
 A and B store Brain Float 16 values (same exponent as FP32, 7-bit mantissa).
 Output C is always float32 — BF16 accumulation would lose mantissa bits at
-each step. Requires only AVX2 (Haswell+); no special -mavx512bf16 flag.
+each step. Runs on every CPU (AVX2 table: zero-extend + shift in registers).
 
 BF16→FP32 conversion is exact: BF16 is the top 16 bits of an FP32 value, so
 zero-extending to 32 bits and shifting left by 16 (vpmovzxwd + vpslld, AVX2)
@@ -933,7 +894,8 @@ Example
 )doc");
 
     m.def("f16c_available", &py_f16c_available,
-          "Return True if this CPU supports F16C instructions (required by sgemm_f16).");
+          "Return True if this CPU supports F16C (vcvtph2ps). The AVX2 kernels require it; "
+          "sgemm_f16 itself runs everywhere (the scalar table converts in software).");
 
     m.def("sgemm_f16", &py_sgemm_f16,
           py::arg("A"), py::arg("B"),
@@ -946,8 +908,9 @@ A and B must have dtype=np.float16 (IEEE 754 half-precision, 16-bit).
 C (output) is always float32 — accumulation in FP16 would lose precision
 at K > 64, so the output stays in full precision.
 
-Requires F16C instructions (Haswell+, AMD Piledriver+). Check
-simd_ml_kernels.f16c_available() before calling; raises RuntimeError if absent.
+Runs on every CPU: the AVX2 table converts with F16C, the scalar table in
+software (exact for all inputs, subnormals included). Before 0.3 this raised
+RuntimeError on CPUs without F16C.
 
 Parameters
 ----------
@@ -963,23 +926,33 @@ ndarray[float32] of shape [M, N]
 
 Notes
 -----
-Uses F16C (_mm256_cvtph_ps) to convert 8 FP16 values to FP32 in a single
-instruction, then accumulates with AVX2 FMA (_mm256_fmadd_ps). No panel
-packing — appropriate for the batch sizes (1–128) common in LLM inference
-where the entire working set fits in L2 cache.
+AVX2 table: F16C converts 8 values per instruction, FMA accumulates; no
+packing or cache blocking (docs/DESIGN.md §4), so large sizes are slow.
 
 Example
 -------
 >>> import numpy as np, simd_ml_kernels as sk
->>> if sk.f16c_available():
-...     A = np.random.randn(64, 256).astype(np.float16)
-...     B = np.random.randn(256, 64).astype(np.float16)
-...     C = sk.sgemm_f16(A, B)   # float32 output
+>>> A = np.random.randn(64, 256).astype(np.float16)
+>>> B = np.random.randn(256, 64).astype(np.float16)
+>>> C = sk.sgemm_f16(A, B)   # float32 output
 )doc");
 
     m.def("_measure_core_ghz", &py_measure_core_ghz, py::arg("seconds") = 0.05,
           "Core clock of the calling thread in GHz (dependent integer-add chain). "
           "Private: used by `python -m simd_ml_kernels bench`.");
+    m.def("_set_isa", [](const std::string& isa) {
+        for (int i = 0; i < simd_ml::kNumIsa; ++i) {
+            const auto id = static_cast<simd_ml::Isa>(i);
+            if (isa == simd_ml::isa_name(id)) {
+                if (!simd_ml::use_kernels(id))
+                    throw std::runtime_error("isa='" + isa + "' cannot run here");
+                return;
+            }
+        }
+        throw ArgumentError("isa must be one of: 'scalar', 'avx2', 'avx512' (got '" + isa + "')");
+    }, py::arg("isa"),
+          "Make this kernel table the active one for the whole process. Private: used by "
+          "`python -m simd_ml_kernels selftest` and the tests to cover every usable table.");
     m.def("_cpu_caches", &py_cpu_caches,
           "Caches of the core this thread runs on, from CPUID leaf 4 / 0x8000001D. "
           "Private: used by `python -m simd_ml_kernels bench` and `info`.");
@@ -1002,7 +975,7 @@ Parameters
 ----------
 alpha   : float, default 1.0    — scalar multiplier for A@B
 beta    : float, default 0.0    — scalar multiplier for C (0 = overwrite)
-isa     : str, default ""       — ISA hint: "", "avx2", "avx512", "scalar"
+isa     : str, default ""       — as sgemm(isa=...): "", "scalar", "avx2", "avx512"
 tile_m  : int, default 128      — M-panel tile (future auto-tuning)
 tile_n  : int, default 2048     — N-panel tile (future auto-tuning)
 tile_k  : int, default 256      — K-panel tile (future auto-tuning)

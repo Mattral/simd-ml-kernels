@@ -34,7 +34,8 @@
  *    A 2× unroll in K exposes more ILP to the out-of-order scheduler while
  *    keeping the source code auditable. The unroll factor is not tuned.
  *
- * Compilation flags expected: -O3 -march=native -mfma
+ * An AVX2 unit; the 6×32 AVX-512 micro-kernel is in avx_matmul_avx512.cpp and is
+ * called only when kernels_for(Isa::avx512) says the CPU can run it.
  */
 
 #include "cache_alloc.hpp"
@@ -43,13 +44,15 @@
 #include <cstring>
 #include <algorithm>
 
-#ifdef __AVX512F__
-#  include <immintrin.h>
-#elif defined(__AVX2__)
-#  include <immintrin.h>
-#else
-#  error "avx_matmul.cpp requires at least AVX2. Compile with -mavx2 -mfma."
+#include "../dispatch/kernels.hpp"
+
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "avx_matmul.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
 #endif
+#include <immintrin.h>
+
+// 6×32 AVX-512 micro-kernel, in the AVX-512 unit avx_matmul_avx512.cpp.
+void gemm_micro_6x32_avx512(int kc, const float* A, const float* B, float* C, int ldc) noexcept;
 
 // ─── Tiling constants ─────────────────────────────────────────────────────────
 static constexpr int MC = 64;     // M-tile: rows of A / C per outer-M block
@@ -79,7 +82,6 @@ static constexpr int NR = 16;     // Micro-kernel col register count (2 AVX2 vec
  *   - Independent FMA chains for k and k+1
  *   - Prefetch for B panel rows 2 steps ahead
  */
-#ifdef __AVX2__
 static void gemm_micro_6x16_avx2(int kc,
                                    const float* __restrict__ A_panel,
                                    const float* __restrict__ B_panel,
@@ -176,92 +178,8 @@ static void gemm_micro_6x16_avx2(int kc,
     _mm256_storeu_ps(C + 4*ldc + 0, c4lo); _mm256_storeu_ps(C + 4*ldc + 8, c4hi);
     _mm256_storeu_ps(C + 5*ldc + 0, c5lo); _mm256_storeu_ps(C + 5*ldc + 8, c5hi);
 }
-#endif  // __AVX2__
 
 // ─── AVX-512 6×32 Micro-kernel ────────────────────────────────────────────────
-#ifdef __AVX512F__
-/**
- * gemm_micro_6x32_avx512 — 6×32 blocking using dual 512-bit ZMM accumulators.
- *
- * Doubles the N-width vs the AVX2 6×16 kernel using AVX-512's wider 512-bit
- * registers AND its much larger physical register file (32 ZMM vs 16 YMM),
- * so there is no register-pressure trade-off here the way there was choosing
- * between the AVX2 8×8 and 6×16 layouts.
- *
- * ─── Register budget (32 ZMM available) ──────────────────────────────────────
- *   12 ZMM  — accumulators: 6 rows × 2 halves (lo=cols[0:16), hi=cols[16:32))
- *    2 ZMM  — B panel (b_lo, b_hi) reloaded each k-step
- *    1 ZMM  — A broadcast (reused per row per k-step)
- *   15 ZMM total — 17 registers of headroom vs. the 32 available; zero
- *   spill risk even with aggressive unrolling.
- *
- * ─── Correctness note (see ROADMAP.md §v0.8 history) ────────────────────────
- * An earlier version of this kernel declared NR512=32 but only ever loaded
- * and accumulated ONE __m512 (16 floats) per row — silently leaving the
- * upper 16 columns of every 32-wide output tile untouched. That bug is why
- * AVX-512 dispatch was disabled for an entire release cycle. This version
- * is proven correct via tests/test_gemm.cpp's
- * test_gemm_avx512_full_coverage(), which forces 100% of the output
- * through this exact kernel (M and N chosen so no edge/tail block can
- * mask a broken full-block path) and independently checks both
- * accumulator halves against a scalar reference.
- */
-static void gemm_micro_6x32_avx512(int kc,
-                                    const float* __restrict__ A_panel,
-                                    const float* __restrict__ B_panel,
-                                    float*       __restrict__ C,
-                                    int ldc) noexcept {
-    // Load existing C values — both halves of all 6 rows (accumulate, not overwrite)
-    __m512 c0_lo = _mm512_loadu_ps(C + 0*ldc +  0), c0_hi = _mm512_loadu_ps(C + 0*ldc + 16);
-    __m512 c1_lo = _mm512_loadu_ps(C + 1*ldc +  0), c1_hi = _mm512_loadu_ps(C + 1*ldc + 16);
-    __m512 c2_lo = _mm512_loadu_ps(C + 2*ldc +  0), c2_hi = _mm512_loadu_ps(C + 2*ldc + 16);
-    __m512 c3_lo = _mm512_loadu_ps(C + 3*ldc +  0), c3_hi = _mm512_loadu_ps(C + 3*ldc + 16);
-    __m512 c4_lo = _mm512_loadu_ps(C + 4*ldc +  0), c4_hi = _mm512_loadu_ps(C + 4*ldc + 16);
-    __m512 c5_lo = _mm512_loadu_ps(C + 5*ldc +  0), c5_hi = _mm512_loadu_ps(C + 5*ldc + 16);
-
-    const float* ap = A_panel;
-    const float* bp = B_panel;
-
-    for (int k = 0; k < kc; ++k, ap += MR, bp += 32) {
-        // Load BOTH halves of the 32-wide B panel row for this k-step.
-        __m512 b_lo = _mm512_loadu_ps(bp);       // cols [0, 16)
-        __m512 b_hi = _mm512_loadu_ps(bp + 16);  // cols [16, 32)
-
-        __m512 a0 = _mm512_set1_ps(ap[0]);
-        c0_lo = _mm512_fmadd_ps(a0, b_lo, c0_lo);
-        c0_hi = _mm512_fmadd_ps(a0, b_hi, c0_hi);
-
-        __m512 a1 = _mm512_set1_ps(ap[1]);
-        c1_lo = _mm512_fmadd_ps(a1, b_lo, c1_lo);
-        c1_hi = _mm512_fmadd_ps(a1, b_hi, c1_hi);
-
-        __m512 a2 = _mm512_set1_ps(ap[2]);
-        c2_lo = _mm512_fmadd_ps(a2, b_lo, c2_lo);
-        c2_hi = _mm512_fmadd_ps(a2, b_hi, c2_hi);
-
-        __m512 a3 = _mm512_set1_ps(ap[3]);
-        c3_lo = _mm512_fmadd_ps(a3, b_lo, c3_lo);
-        c3_hi = _mm512_fmadd_ps(a3, b_hi, c3_hi);
-
-        __m512 a4 = _mm512_set1_ps(ap[4]);
-        c4_lo = _mm512_fmadd_ps(a4, b_lo, c4_lo);
-        c4_hi = _mm512_fmadd_ps(a4, b_hi, c4_hi);
-
-        __m512 a5 = _mm512_set1_ps(ap[5]);
-        c5_lo = _mm512_fmadd_ps(a5, b_lo, c5_lo);
-        c5_hi = _mm512_fmadd_ps(a5, b_hi, c5_hi);
-    }
-
-    // Write back BOTH halves of every row — this is the exact line the
-    // original buggy version omitted for the "hi" half.
-    _mm512_storeu_ps(C + 0*ldc +  0, c0_lo);  _mm512_storeu_ps(C + 0*ldc + 16, c0_hi);
-    _mm512_storeu_ps(C + 1*ldc +  0, c1_lo);  _mm512_storeu_ps(C + 1*ldc + 16, c1_hi);
-    _mm512_storeu_ps(C + 2*ldc +  0, c2_lo);  _mm512_storeu_ps(C + 2*ldc + 16, c2_hi);
-    _mm512_storeu_ps(C + 3*ldc +  0, c3_lo);  _mm512_storeu_ps(C + 3*ldc + 16, c3_hi);
-    _mm512_storeu_ps(C + 4*ldc +  0, c4_lo);  _mm512_storeu_ps(C + 4*ldc + 16, c4_hi);
-    _mm512_storeu_ps(C + 5*ldc +  0, c5_lo);  _mm512_storeu_ps(C + 5*ldc + 16, c5_hi);
-}
-#endif  // __AVX512F__
 
 // ─── Panel packing ────────────────────────────────────────────────────────────
 
@@ -389,13 +307,8 @@ void simd_sgemm(int M, int N, int K,
     // inner_NR MUST match the nr_block passed to pack_B below and the nr
     // check in the dispatch condition — this triple-consistency is exactly
     // what broke before (inner_NR was 32 while the kernel only handled 16).
-#if defined(__AVX512F__)
-    const bool use_avx512 = __builtin_cpu_supports("avx512f") &&
-                            __builtin_cpu_supports("avx512dq");
+    const bool use_avx512 = avx_matmul_isa_is_avx512();
     const int inner_NR = use_avx512 ? 32 : NR;
-#else
-    constexpr int inner_NR = NR;
-#endif
 
     // ── 5-Loop GEMM ───────────────────────────────────────────────────────────
     //
@@ -452,27 +365,8 @@ void simd_sgemm(int M, int N, int K,
                             // three-way consistency (inner_NR / pack_B nr_block /
                             // kernel choice) is exactly what broke silently before.
                             const float* Bμ = B_pack.get() + (jj / inner_NR) * kc * inner_NR;
-                            bool handled = false;
-#if defined(__AVX512F__)
-                            if (use_avx512) {
-                                gemm_micro_6x32_avx512(kc, Aμ, Bμ, C_ptr, ldc);
-                                handled = true;
-                            }
-#endif
-                            if (!handled) {
-#ifdef __AVX2__
-                                gemm_micro_6x16_avx2(kc, Aμ, Bμ, C_ptr, ldc);
-#else
-                                // Non-AVX2 fallback: Aμ is packed with alpha already folded in,
-                                // but scalar_block reads the ORIGINAL A pointer, so alpha must
-                                // be passed explicitly here (unlike the AVX2 path where the
-                                // micro-kernel operates on alpha-pre-scaled Aμ).
-                                scalar_block(MR, inner_NR, kc, alpha,
-                                             A + (i+ii)*lda + k, lda,
-                                             B + k*ldb + (j+jj), ldb,
-                                             C_ptr, ldc);
-#endif
-                            }
+                            if (use_avx512) gemm_micro_6x32_avx512(kc, Aμ, Bμ, C_ptr, ldc);
+                            else            gemm_micro_6x16_avx2(kc, Aμ, Bμ, C_ptr, ldc);
                         } else {
                             // Edge/tail block: use original (unpacked) A and B.
                             // alpha is applied here; beta was applied upfront.
@@ -507,9 +401,5 @@ void scalar_sgemm(int M, int N, int K,
 
 // ─── ISA diagnostics ──────────────────────────────────────────────────────────
 bool avx_matmul_isa_is_avx512() noexcept {
-#if defined(__AVX512F__)
-    return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512dq");
-#else
-    return false;
-#endif
+    return simd_ml::kernels_for(simd_ml::Isa::avx512) != nullptr;
 }

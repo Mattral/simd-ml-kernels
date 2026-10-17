@@ -8,14 +8,17 @@
  */
 
 #include "../cache_alloc.hpp"
+#if !defined(__AVX2__) || !defined(__FMA__)
+#  error "relu_avx2.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
+#endif
+
 #include "activations.hpp"
-#include <cstddef>
 #include <immintrin.h>
+#include <cstddef>
 
 namespace activations {
 
 void relu_avx2(const float* input, float* output, int n) {
-#ifdef __AVX2__
     int i = 0;
     const int simd_width = 8;
     const __m256 zero = _mm256_setzero_ps();
@@ -30,11 +33,6 @@ void relu_avx2(const float* input, float* output, int n) {
     for (; i < n; ++i) {
         output[i] = input[i] > 0.0f ? input[i] : 0.0f;
     }
-#else
-    for (int i = 0; i < n; ++i) {
-        output[i] = input[i] > 0.0f ? input[i] : 0.0f;
-    }
-#endif
 }
 
 } // namespace activations

@@ -12,6 +12,10 @@
 #include <numeric>
 #include "../src/kernels/cache_alloc.hpp"
 #include "../src/kernels/activations/activations.hpp"
+#include "kernel_tables.hpp"
+
+// The table the test functions below call into (set by the runner).
+static const simd_ml::KernelTable* T = nullptr;
 
 static void fill_sweep(float* buf, int n, float lo, float hi) {
     for (int i = 0; i < n; ++i)
@@ -32,7 +36,7 @@ static bool test_relu(int n, float lo = -5.0f, float hi = 5.0f) {
     auto out = make_aligned_array<float>(n);
     fill_sweep(inp.get(), n, lo, hi);
 
-    activations::relu_avx2(inp.get(), out.get(), n);
+    T->relu(inp.get(), out.get(), n);
 
     double max_err = 0.0;
     for (int i = 0; i < n; ++i) {
@@ -55,7 +59,7 @@ static bool test_silu(int n, float lo = -5.0f, float hi = 5.0f, double tol = 1e-
     auto out = make_aligned_array<float>(n);
     fill_sweep(inp.get(), n, lo, hi);
 
-    activations::silu_avx2(inp.get(), out.get(), n);
+    T->silu(inp.get(), out.get(), n);
 
     double max_err = 0.0;
     for (int i = 0; i < n; ++i) {
@@ -74,7 +78,7 @@ static bool test_softmax(int n, unsigned seed = 1) {
     auto out = make_aligned_array<float>(n);
     fill_random(inp.get(), n, seed);
 
-    activations::softmax_row_avx2(inp.get(), out.get(), n);
+    T->softmax_row(inp.get(), out.get(), n);
 
     // Test 1: output sums to 1.0 (within FP32 tolerance)
     double total = 0.0;
@@ -110,7 +114,7 @@ static bool test_softmax_nan_rows() {
             for (int i = 0; i < n; ++i) in[i] = kind == 0 ? -INFINITY : 0.1f * i;
             if (kind == 1) in[n / 2] = NAN;
             if (kind == 2) in[n / 2] = INFINITY;
-            activations::softmax_row_avx2(in, out, n);
+            T->softmax_row(in, out, n);
             for (int i = 0; i < n; ++i) pass &= std::isnan(out[i]);
         }
     }
@@ -140,7 +144,7 @@ static bool test_layer_norm(int n, bool use_gamma, bool use_beta, unsigned seed 
     const float* g = use_gamma ? gamma.get() : nullptr;
     const float* b = use_beta  ? beta.get()  : nullptr;
 
-    activations::layer_norm_avx2(inp.get(), out.get(), n, g, b, 1e-5f);
+    T->layer_norm_row(inp.get(), out.get(), n, g, b, 1e-5f);
 
     double ref_mean = 0.0;
     for (int i = 0; i < n; ++i) ref_mean += inp[i];
@@ -170,28 +174,32 @@ static bool test_layer_norm(int n, bool use_gamma, bool use_beta, unsigned seed 
 // ─── Test runner ─────────────────────────────────────────────────────────────
 int run_activation_tests() {
     printf("\n── Activation Correctness Tests ──\n");
-    bool all_pass = true;
+    const bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
+        T = &t;
+        bool ok = true;
 
-    printf(" ReLU:\n");
-    for (int n : {1, 7, 8, 9, 64, 256, 1024, 65536})
-        all_pass &= test_relu(n);
+        printf(" ReLU:\n");
+        for (int n : {1, 7, 8, 9, 64, 256, 1024, 65536})
+            ok &= test_relu(n);
 
-    printf(" SiLU:\n");
-    for (int n : {1, 7, 8, 9, 64, 256, 1024, 65536})
-        all_pass &= test_silu(n);
+        printf(" SiLU:\n");
+        for (int n : {1, 7, 8, 9, 64, 256, 1024, 65536})
+            ok &= test_silu(n);
 
-    printf(" Softmax:\n");
-    for (int n : {1, 2, 8, 16, 64, 512, 4096})
-        all_pass &= test_softmax(n);
-    all_pass &= test_softmax_nan_rows();
+        printf(" Softmax:\n");
+        for (int n : {1, 2, 8, 16, 64, 512, 4096})
+            ok &= test_softmax(n);
+        ok &= test_softmax_nan_rows();
 
-    printf(" LayerNorm:\n");
-    // Sizes cover the scalar tail alone (1, 7), exact multiples of the 8-wide
-    // AVX2 body (8, 16, 64, 768) and body + tail (9, 15, 17, 1027).
-    for (int n : {1, 7, 8, 9, 15, 16, 17, 64, 768, 1027})
-        for (bool use_gamma : {false, true})
-            for (bool use_beta : {false, true})
-                all_pass &= test_layer_norm(n, use_gamma, use_beta);
+        printf(" LayerNorm:\n");
+        // Sizes cover the scalar tail alone (1, 7), exact multiples of the 8-wide
+        // AVX2 body (8, 16, 64, 768) and body + tail (9, 15, 17, 1027).
+        for (int n : {1, 7, 8, 9, 15, 16, 17, 64, 768, 1027})
+            for (bool use_gamma : {false, true})
+                for (bool use_beta : {false, true})
+                    ok &= test_layer_norm(n, use_gamma, use_beta);
+        return ok;
+    });
 
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;

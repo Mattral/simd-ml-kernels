@@ -17,29 +17,31 @@ which described the same code several times and had drifted from it (see the
 Python   simd_ml_kernels/__init__.py  (re-exports _core)   _cli.py (info | selftest | bench)
            │
 pybind11 src/bindings/pybind_entry.cpp: dtype/shape/layout checks, GIL release, output allocation
-           │  calls the kernels directly
-Kernels  src/kernels/gemm/avx2_gemm_packed.cpp   FP32 GEMM used by sgemm (8×8 AVX2, 8×16 AVX-512)
-         src/kernels/gemm/{f16,bf16}_gemm.cpp     FP16- / BF16-input GEMM (unpacked, see §4)
-         src/kernels/avx_matmul.cpp               second FP32 GEMM (6×16 / 6×32), C++ only
-         src/kernels/intrinsic_gelu.cpp           GeLU, exact (erf) and tanh
-         src/kernels/activations/*.cpp            ReLU, SiLU, softmax, LayerNorm
+           │  every call goes through kernels(), the table chosen for this CPU
+Dispatch src/dispatch/: CPUID + XGETBV, one KernelTable per ISA, selection (§6)
            │
-Shared   src/kernels/simd_math.hpp   fast_exp_avx2, tanh_avx2
-         src/kernels/cache_alloc.hpp 64-byte aligned allocation, prefetch helpers
-         src/dispatch/               CPUID/XGETBV feature detection, cache detection (leaf 4)
+Kernels  scalar unit   scalar_kernels.cpp                 every kernel, portable C++
+         AVX2 units    gemm/avx2_gemm_packed.cpp           FP32 GEMM: small-matrix path, 8×8 kernel
+                       gemm/{f16,bf16}_gemm.cpp            FP16- / BF16-input GEMM (unpacked, see §4)
+                       intrinsic_gelu.cpp, activations/    GeLU, ReLU, SiLU, softmax, LayerNorm
+                       avx_matmul.cpp                      second FP32 GEMM (6×16), C++ only
+         AVX-512 units gemm/avx512_gemm_packed.cpp         FP32 GEMM, 8×16 kernel
+                       avx_matmul_avx512.cpp               6×32 kernel of the second GEMM
+           │
+Shared   simd_math.hpp (fast_exp_avx2, tanh_avx2), cache_alloc.hpp (aligned allocation, prefetch)
 ```
 
 Every Python entry point validates its arguments (`DTypeError` for dtype,
 `ArgumentError` for shape, contiguity, writeability and values), allocates the
-output if none was given, releases the GIL and calls one kernel. Kernels never
-throw and never allocate Python objects.
+output if none was given, releases the GIL and calls one kernel through the
+active table. Kernels never throw and never allocate Python objects.
 
 ---
 
 ## 2. FP32 GEMM (`sgemm`)
 
 `sgemm(A, B, C, alpha, beta)` computes `C = alpha·A·B + beta·C`, row-major,
-through `simd_ml::gemm::sgemm_packed`.
+through the active kernel table (§6).
 
 ### 2.1 Small matrices: no packing
 
@@ -132,13 +134,13 @@ accumulators (6 rows × 2 vectors). It is not reachable from Python; the C++
 tests and the `bench` harness use it. It allocates its packing buffers inside
 the `jc` loop.
 
-### 2.5 ISA selection inside `sgemm_packed`
+### 2.5 Choosing the micro-kernel
 
-`sgemm_packed` uses the 8×16 kernel when the library was compiled with
-AVX-512F and `__builtin_cpu_supports("avx512f")` and `("avx512dq")` are true,
-unless the per-call `isa="avx2"` override is set (a `thread_local` restored by
-an RAII guard in the binding). `isa="avx512"` on a CPU without AVX-512F/DQ
-raises in the binding; `isa="scalar"` raises "not implemented".
+The AVX2 and AVX-512 tables (§6) each have their own `sgemm`
+(`sgemm_packed_avx2`, `sgemm_packed_avx512`); both use the AVX2 small-matrix
+path. `sgemm(..., isa="scalar" | "avx2" | "avx512")` runs a given table for
+one call and raises if this build or CPU cannot run it. The scalar table's
+GEMM is a row-by-row loop with no blocking.
 
 ---
 
@@ -222,36 +224,65 @@ followed by the FP32 micro-kernel (and
 
 ## 5. Compiler flags and floating point
 
-Today every kernel is compiled with `-O3 -march=native -mfma -ffast-math` and
-the test sources with `-O2 -march=native` (no fast-math). The tests link the
-same kernel objects that ship in the extension, so they test the shipped code.
-Consequences:
+Each instruction set has its own translation units, compiled with that ISA's
+flags and nothing more (`CMakeLists.txt`, "ISA units"):
 
-- A build is specific to the CPU it was built on (`-march=native`); a wheel
-  built on an AVX-512 machine fails with SIGILL on an AVX2-only CPU.
-- `-ffast-math` implies `-ffinite-math-only`: the compiler may assume no NaN or
-  Inf, which is why softmax tests special values on bit patterns. Importing the
-  module does not change the host process's FTZ/DAZ bits (GCC links
-  `crtfastmath.o` only into executables).
+| Unit | Flags (GCC/Clang) | Sources |
+|---|---|---|
+| scalar | `-O3` (baseline x86-64: SSE2; or the target's default) | `dispatch/dispatch.cpp`, `kernels/scalar_kernels.cpp` |
+| avx2 | `-mavx2 -mfma -mf16c -ffast-math` | AVX2 kernels, `kernels_avx2.cpp` |
+| avx512 | `-mavx2 -mfma -mf16c -mavx512f -mavx512dq -mavx512bw -mavx512vl -ffast-math` | AVX-512 kernels, `kernels_avx512.cpp` |
 
-W2 replaces this with per-ISA translation units and explicit flags, keeps
-`-march=native` as an opt-in for local benchmarking, scopes `-ffast-math` to
-the files whose tests show it is safe, and adds a test that FTZ/DAZ are
-unchanged after import (ROADMAP).
+The bindings and the C++ tests are compiled like the scalar unit, so the
+extension imports and runs on any x86-64 CPU. `-DSIMD_ML_NATIVE=ON` adds
+`-march=native` to every unit, for local benchmarking only; such a build runs
+only on CPUs like the one it was built on.
+
+Two checks keep the units honest:
+
+- `ctest -R isa_units` (`tests/check_isa_units.py`) disassembles the object
+  files: no VEX or EVEX instruction (first opcode byte `c4`/`c5`/`62`) and no
+  LZCNT/TZCNT/POPCNT in the scalar unit, no EVEX in the AVX2 units, and no
+  function emitted out of line (inline functions, template instantiations) by
+  two units. The linker keeps one copy of such a function, so a scalar caller
+  could otherwise end up in an AVX2 copy.
+- Under Intel SDE the C++ tests and `selftest` run with an emulated CPU:
+  `-nhm` (Nehalem, no AVX) uses only the scalar table, `-hsw` scalar and AVX2,
+  `-skx` / `-spr` all three. This is how the AVX-512 kernels are tested on
+  machines without AVX-512.
+
+`-ffast-math` implies `-ffinite-math-only`: the compiler may assume no NaN or
+Inf, which is why softmax tests special values on bit patterns. Importing the
+module does not change the host process's FTZ/DAZ bits (GCC and Clang link
+`crtfastmath.o` only into executables).
 
 ---
 
-## 6. Runtime CPU detection
+## 6. Runtime dispatch
 
-`CpuFeatures::detect()` (`gemm_dispatcher.cpp`) reads CPUID leaves 1 and 7 and
-XCR0 via XGETBV: AVX state needs XCR0 bits 1–2, AVX-512 additionally bits 5–7.
-F16C and AVX512_BF16 availability include these OS checks. `detect_caches()`
-reads CPUID leaf 4 (Intel) or 0x8000001D (AMD) for the core the calling thread
-runs on; on hybrid CPUs P- and E-cores report different caches.
+`src/dispatch/kernels.hpp` defines one `KernelTable` per ISA: function
+pointers for every kernel (FP32/FP16/BF16 GEMM, both GeLUs, ReLU, SiLU,
+softmax row, LayerNorm row), plus the table's name, flags and GEMM tile. A
+table may point at another table's functions: the AVX-512 table uses the AVX2
+elementwise kernels, because only GEMM has an AVX-512 path.
 
-`detected_isa()` reports `"avx512"` or `"avx2"` (from `sgemm_packed`'s own
-choice, §2.5), `"sse42"` or `"scalar"`. The bindings call the AVX2 kernels
-directly, so today the extension requires AVX2 + FMA at run time.
+`CpuFeatures::detect()` (`dispatch.cpp`) reads CPUID leaves 1 and 7 and XCR0
+via XGETBV: YMM state needs XCR0 bits 1–2, ZMM state also bits 5–7, and every
+feature flag that needs a register file includes that OS check. A table is
+usable if its units were compiled in and the CPU has everything those units
+were compiled for: AVX2 + FMA + F16C for avx2, plus AVX-512F/DQ/BW/VL for
+avx512 (the compiler may emit BW/VL instructions in those units even where the
+source does not use them).
+
+The active table is chosen once, on first use: the widest usable one, or at
+most the one named by the environment variable `SIMD_ML_ISA`
+(`scalar`/`avx2`/`avx512`), which is how a narrower path is benchmarked or
+tested on a wider CPU. `detected_isa()` and `build_info()["runtime_isa"]`
+report it; `build_info()` also lists `isa_compiled`, `isa_usable` and each
+usable table's flags. The private `_core._set_isa()` switches tables for the
+whole process; `selftest` and the Python tests use it to check every usable
+table. `detect_caches()` reads CPUID leaf 4 (Intel) or 0x8000001D (AMD) for
+the core the calling thread runs on.
 
 ---
 
@@ -289,9 +320,10 @@ is a rational polynomial (it is exp-based, §3.1); that the B panel KC × NC is
 8 KiB and L2-resident (it is 2 MiB; the 8 KiB block is the KC × NR micro-panel,
 §2.3); that the 8×8 kernel's peak is 16 flop/cycle and its FMA chain 12 cycles
 (32 flop/cycle and 4 cycles, §2.4); that the prefetch distance is 64 bytes (128,
-§2.4); that `sgemm` goes through the dispatch registry (the binding calls
-`sgemm_packed` directly, §6); and that the C++ precision tests run kernels built
-without `-ffast-math` (they link the fast-math objects, §5).
+§2.4); that `sgemm` went through a dispatch registry (until the per-ISA tables,
+§6, the binding called the AVX2 GEMM directly); and that the C++ precision
+tests ran kernels built without `-ffast-math` (they linked the fast-math
+objects).
 
 ---
 

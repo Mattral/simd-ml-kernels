@@ -32,6 +32,7 @@
 #include <algorithm>
 #include "../src/kernels/cache_alloc.hpp"
 #include "../src/kernels/avx_matmul.hpp"
+#include "../src/dispatch/kernels.hpp"
 
 static void fill_random(float* buf, int n, unsigned seed = 42) {
     // Linear congruential generator — reproducible, no stdlib dependency
@@ -185,6 +186,11 @@ static bool test_gemm_avx512_full_coverage() {
 }
 
 int run_gemm_tests() {
+    // simd_sgemm lives in an AVX2 unit (avx_matmul.cpp) and is called directly.
+    if (!simd_ml::kernels_for(simd_ml::Isa::avx2)) {
+        printf("\n── avx_matmul (simd_sgemm) tests: SKIP, CPU has no AVX2 ──\n");
+        return 0;
+    }
     printf("\n── GEMM Correctness Tests (avx_matmul.cpp) ──\n");
     bool all_pass = true;
 

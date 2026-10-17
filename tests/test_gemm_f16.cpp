@@ -16,9 +16,8 @@
  *      repeated FP16→FP32 conversions accumulate 1 ULP each; at K=128
  *      worst-case ≈ 128 × 2⁻¹⁰ × max_val² ≈ 1.25e-4 per element).
  *
- * All F16C intrinsics (used for test helpers and the function under test)
- * are guarded by #ifdef __F16C__. When F16C is absent the test suite skips
- * gracefully via f16c_available().
+ * Runs on every kernel table the CPU supports; the FP16 conversions used to
+ * build the inputs are done in software.
  */
 
 #include <cstdio>
@@ -26,39 +25,48 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 
 #include "../src/kernels/gemm/f16_gemm.hpp"
 #include "../src/kernels/gemm/naive_gemm.hpp"
 #include "../src/kernels/cache_alloc.hpp"
 
-#ifdef __F16C__
-#  include <immintrin.h>
-#endif
+#include "kernel_tables.hpp"
 
-// ─── FP16 ↔ FP32 helpers (F16C intrinsics) ──────────────────────────────────
+// The table the test functions below call into (set by the runner).
+static const simd_ml::KernelTable* T = nullptr;
 
-#ifdef __F16C__
+// ─── FP16 <-> FP32 in software ───────────────────────────────────────────────
+// No F16C here: the test binary is built for baseline x86-64 and must run on
+// CPUs without it (the scalar table is tested there).
 
-/** Convert FP32 to FP16 bit pattern (round-to-nearest-even). */
+static float bits_f32(uint32_t u) { float f; std::memcpy(&f, &u, 4); return f; }
+static uint32_t f32_bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+
+/** FP32 -> FP16 bit pattern, round to nearest even; finite inputs below 65504. */
 static uint16_t f32_to_f16(float f) noexcept {
-    __m128  v = _mm_set_ss(f);
-    __m128i h = _mm_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-    return static_cast<uint16_t>(_mm_extract_epi16(h, 0));
+    const uint32_t u = f32_bits(f);
+    const uint16_t sign = static_cast<uint16_t>((u >> 16) & 0x8000u);
+    const float a = std::fabs(f);
+    if (a < 6.103515625e-05f) {                   // FP16 subnormal (< 2^-14) or zero
+        // In units of the FP16 subnormal step 2^-24; nearbyint rounds half to even.
+        return static_cast<uint16_t>(sign | static_cast<uint16_t>(std::nearbyint(a * 16777216.0f)));
+    }
+    uint32_t man = u & 0x7fffffu, exp = ((u >> 23) & 0xffu) - 127 + 15;
+    uint32_t h = (exp << 10) | (man >> 13);
+    const uint32_t rest = man & 0x1fffu;          // 13 dropped bits
+    if (rest > 0x1000u || (rest == 0x1000u && (h & 1u))) ++h;   // carries into exp correctly
+    return static_cast<uint16_t>(sign | h);
 }
 
-/** Convert FP16 bit pattern to FP32. */
+/** FP16 bit pattern -> FP32 (normal and subnormal inputs). */
 static float f16_to_f32(uint16_t h) noexcept {
-    __m128i v = _mm_cvtsi32_si128(static_cast<int>(h));
-    __m128  f = _mm_cvtph_ps(v);
-    return _mm_cvtss_f32(f);
+    const float sign = (h & 0x8000u) ? -1.0f : 1.0f;
+    const int exp = (h >> 10) & 0x1f, man = h & 0x3ff;
+    if (exp == 0) return sign * std::ldexp(static_cast<float>(man), -24);
+    return sign * bits_f32(static_cast<uint32_t>(exp - 15 + 127) << 23 | static_cast<uint32_t>(man) << 13);
 }
-
-#else  // stubs when not compiled with F16C
-
-static uint16_t f32_to_f16(float)    noexcept { return 0; }
-static float    f16_to_f32(uint16_t) noexcept { return 0.0f; }
-
-#endif
 
 // ─── Random fill ─────────────────────────────────────────────────────────────
 
@@ -113,9 +121,9 @@ static bool test_f16(int M, int N, int K,
                 beta,  C_ref.get(), N);
 
     // Kernel under test
-    simd_ml::gemm::sgemm_f16_avx2(M, N, K,
-                                   alpha, A_f16.get(), K, B_f16.get(), N,
-                                   beta,  C_got.get(), N);
+    T->sgemm_f16(M, N, K,
+                 alpha, A_f16.get(), K, B_f16.get(), N,
+                 beta,  C_got.get(), N);
 
     // Error analysis
     // Tolerance 5e-4: FP16 epsilon ≈ 2⁻¹⁰ ≈ 9.8e-4; at K≤128 and
@@ -148,52 +156,50 @@ static bool test_f16(int M, int N, int K,
 // ─── Test suite entry point ───────────────────────────────────────────────────
 
 int run_f16_gemm_tests() {
-    printf("\n── FP16 GEMM Tests (sgemm_f16_avx2, F16C + AVX2) ──\n");
+    printf("\n── FP16 GEMM Tests (KernelTable::sgemm_f16) ──\n");
 
-    if (!simd_ml::gemm::f16c_available()) {
-        printf("  [SKIP] F16C not available on this CPU — skipping all FP16 GEMM tests.\n");
-        return 0;
-    }
-    printf("  F16C confirmed available at runtime.\n");
+    const bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
+        T = &t;
+        bool ok = true;
 
-    bool all_pass = true;
-
-    printf(" Square sizes (α=1, β=0):\n");
-    for (int s : {1, 7, 8, 9, 16, 32, 64, 128}) {
-        all_pass &= test_f16(s, s, s);
-    }
-
-    printf(" Non-square / tail cases:\n");
-    all_pass &= test_f16(1,  64, 128);   // single-row (batch=1 inference)
-    all_pass &= test_f16(4,  64, 256);   // small batch
-    all_pass &= test_f16(13, 31,  37);   // all tails
-    all_pass &= test_f16(32,  7,  17);   // wide M, narrow N
-
-    printf(" Alpha/beta scaling:\n");
-    all_pass &= test_f16(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/99);
-    all_pass &= test_f16(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/77);
-
-    printf(" beta=0 must overwrite (not multiply) existing C:\n");
-    {
-        // Fill C with NaN; after beta=0 call all elements must be finite.
-        auto A = make_aligned_array<uint16_t>(8 * 8);
-        auto B = make_aligned_array<uint16_t>(8 * 8);
-        auto C = make_aligned_array<float>(8 * 8);
-        for (int i = 0; i < 64; ++i) {
-            A[i] = f32_to_f16(0.1f);
-            B[i] = f32_to_f16(0.1f);
-            // Poison C with positive infinity
-            C[i] = std::numeric_limits<float>::infinity();
+        printf(" Square sizes (α=1, β=0):\n");
+        for (int s : {1, 7, 8, 9, 16, 32, 64, 128}) {
+            ok &= test_f16(s, s, s);
         }
-        simd_ml::gemm::sgemm_f16_avx2(8, 8, 8,
-                                       1.0f, A.get(), 8, B.get(), 8,
-                                       0.0f, C.get(), 8);
-        bool finite_ok = true;
-        for (int i = 0; i < 64; ++i)
-            if (!std::isfinite(C[i])) { finite_ok = false; break; }
-        printf("  f16 beta=0 overwrites inf:  %s\n", finite_ok ? "PASS" : "FAIL");
-        all_pass &= finite_ok;
-    }
+
+        printf(" Non-square / tail cases:\n");
+        ok &= test_f16(1,  64, 128);   // single-row (batch=1 inference)
+        ok &= test_f16(4,  64, 256);   // small batch
+        ok &= test_f16(13, 31,  37);   // all tails
+        ok &= test_f16(32,  7,  17);   // wide M, narrow N
+
+        printf(" Alpha/beta scaling:\n");
+        ok &= test_f16(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/99);
+        ok &= test_f16(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/77);
+
+        printf(" beta=0 must overwrite (not multiply) existing C:\n");
+        {
+            // Fill C with NaN; after beta=0 call all elements must be finite.
+            auto A = make_aligned_array<uint16_t>(8 * 8);
+            auto B = make_aligned_array<uint16_t>(8 * 8);
+            auto C = make_aligned_array<float>(8 * 8);
+            for (int i = 0; i < 64; ++i) {
+                A[i] = f32_to_f16(0.1f);
+                B[i] = f32_to_f16(0.1f);
+                // Poison C with positive infinity
+                C[i] = std::numeric_limits<float>::infinity();
+            }
+            T->sgemm_f16(8, 8, 8,
+                         1.0f, A.get(), 8, B.get(), 8,
+                         0.0f, C.get(), 8);
+            bool finite_ok = true;
+            for (int i = 0; i < 64; ++i)
+                if (!std::isfinite(C[i])) { finite_ok = false; break; }
+            printf("  f16 beta=0 overwrites inf:  %s\n", finite_ok ? "PASS" : "FAIL");
+            ok &= finite_ok;
+        }
+        return ok;
+    });
 
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;
