@@ -43,6 +43,18 @@ under **Changed** with a migration note.
 - Wheel builds compile only the extension (new CMake options
   `SIMD_ML_BUILD_TESTS`, `SIMD_ML_BUILD_BENCHMARKS`, default ON for CMake users).
 
+- **`softmax` of a row with no finite maximum returns NaN**, as
+  `torch.softmax` does: every element -inf, any NaN, or any +inf. An all -inf
+  row used to return the uniform distribution 1/N. Partial -inf masks are
+  unchanged.
+- `set_num_threads(n > 1)` in a build without OpenMP now emits a
+  `RuntimeWarning` instead of being silently ignored; `build_info()["openmp"]`
+  reports whether OpenMP is compiled in.
+
+### Removed
+- Stray `gitignore` (duplicate of `.gitignore`) and `poetry.lock` (the build
+  backend is scikit-build-core; nothing used it).
+
 ### Fixed
 - `gelu(-inf)` returned NaN; it now returns -0 (x < -10 returns -0). The last
   `n % 8` elements of `gelu` were computed with libm `tanhf` instead of the

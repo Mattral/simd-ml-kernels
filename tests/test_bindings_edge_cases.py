@@ -483,3 +483,23 @@ class TestSizeZero:
     @pytest.mark.parametrize("name", ["gelu", "relu", "silu"])
     def test_elementwise_empty(self, name):
         assert getattr(simd_ml_kernels, name)(np.ones((0, 4), np.float32)).shape == (0, 4)
+
+
+class TestThreadControl:
+    def test_build_info_reports_openmp(self):
+        assert isinstance(simd_ml_kernels.build_info()["openmp"], bool)
+
+    def test_set_num_threads_without_openmp_warns(self):
+        if simd_ml_kernels.build_info()["openmp"]:
+            pytest.skip("built with OpenMP")
+        with pytest.warns(RuntimeWarning, match="without OpenMP"):
+            simd_ml_kernels.set_num_threads(4)
+        assert simd_ml_kernels.get_num_threads() == 1
+        simd_ml_kernels.set_num_threads(1)  # n == 1 is valid and silent
+
+    def test_set_num_threads_with_openmp_takes_effect(self):
+        if not simd_ml_kernels.build_info()["openmp"]:
+            pytest.skip("built without OpenMP")
+        simd_ml_kernels.set_num_threads(2)
+        assert simd_ml_kernels.get_num_threads() == 2
+        simd_ml_kernels.set_num_threads(1)

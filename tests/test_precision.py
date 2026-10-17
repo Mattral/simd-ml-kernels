@@ -385,6 +385,43 @@ class TestSoftmax:
         assert np.all(np.isfinite(out)), "Softmax must be numerically stable for large inputs"
         assert np.allclose(out.sum(), 1.0, atol=1e-6)
 
+    # Rows whose result is NaN in torch.softmax (max subtraction): a NaN
+    # anywhere, any +inf (inf - inf), or every element -inf. n = 4 runs only the
+    # scalar tail, 8 / 16 only the vector body, 9 / 19 both.
+    @pytest.mark.parametrize("n", [1, 4, 8, 9, 16, 19])
+    @pytest.mark.parametrize("kind", ["all_neg_inf", "one_nan", "one_pos_inf"])
+    def test_softmax_nan_rows(self, n, kind):
+        x = RNG.standard_normal(n).astype(np.float32)
+        if kind == "all_neg_inf":
+            x[:] = -np.inf
+        else:
+            x[n // 2] = np.nan if kind == "one_nan" else np.inf
+        assert np.isnan(simd_ml_kernels.softmax(x)).all()
+
+    @pytest.mark.parametrize("n", [4, 9, 19])
+    def test_softmax_partial_neg_inf_mask(self, n):
+        x = RNG.standard_normal(n).astype(np.float32)
+        x[::2] = -np.inf
+        out = simd_ml_kernels.softmax(x)
+        np.testing.assert_allclose(out, softmax_numpy(x), atol=1e-6)
+        assert (out[::2] == 0.0).all()
+
+    def test_softmax_rows_are_independent(self):
+        x = RNG.standard_normal((3, 9)).astype(np.float32)
+        x[1, :] = -np.inf
+        out = simd_ml_kernels.softmax(x)
+        assert np.isnan(out[1]).all()
+        np.testing.assert_allclose(out[[0, 2]], softmax_numpy(x[[0, 2]]), atol=1e-6)
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
+    def test_softmax_special_rows_match_pytorch(self):
+        rows = np.array([[-np.inf] * 9,
+                         [0.0, np.nan] + [1.0] * 7,
+                         [np.inf, 0.0] + [1.0] * 7,
+                         [-np.inf, 0.0] + [1.0] * 7], dtype=np.float32)
+        ref = F.softmax(torch.from_numpy(rows), dim=-1).numpy()
+        np.testing.assert_allclose(simd_ml_kernels.softmax(rows), ref, atol=1e-6, equal_nan=True)
+
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
     def test_softmax_vs_pytorch_2d(self):
         x = RNG.standard_normal((8, 64)).astype(np.float32)

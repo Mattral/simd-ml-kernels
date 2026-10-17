@@ -37,6 +37,9 @@
 #include <cmath>
 #include <cstddef>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <immintrin.h>
 
 namespace activations {
@@ -58,27 +61,72 @@ static inline float hmax_avx2(__m256 v) {
 }
 #endif
 
+// ─── Non-finite rows ──────────────────────────────────────────────────────────
+// torch.softmax computes exp(x - max(x)) / sum. If the row contains a NaN, or
+// its maximum is +inf (some x = +inf: inf - inf = NaN) or -inf (every x = -inf:
+// -inf - -inf = NaN), every output is NaN. This kernel returns the same.
+// Partial -inf masks are finite rows and behave normally (exp(-inf) = 0).
+//
+// The checks use the IEEE-754 bit patterns as integers, not isnan()/isinf()
+// or float compares: this file is compiled with -ffast-math, which lets the
+// compiler assume NaN and Inf never occur and delete such tests.
+static constexpr std::uint32_t F32_POS_INF = 0x7f800000u;
+static constexpr std::uint32_t F32_NEG_INF = 0xff800000u;
+
+static inline std::uint32_t f32_bits(float x) {
+    std::uint32_t u;
+    std::memcpy(&u, &x, sizeof u);
+    return u;
+}
+
+// NaN (|bits| > +inf) or +inf.
+static inline bool nan_or_pos_inf(float x) {
+    const std::uint32_t u = f32_bits(x);
+    return (u & 0x7fffffffu) > F32_POS_INF || u == F32_POS_INF;
+}
+
+static void fill_nan(float* output, int n) {
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    for (int i = 0; i < n; ++i) output[i] = qnan;
+}
+
 void softmax_row_avx2(const float* input, float* output, int n) {
     if (n <= 0) return;
 
 #ifdef __AVX2__
-    // ── Pass 1: AVX2 max reduction ────────────────────────────────────────────
+    // ── Pass 1: AVX2 max reduction + NaN/+inf detection ───────────────────────
     float maxv;
+    bool  nonfinite = false;   // any NaN or +inf in the row
     {
         int i = 0;
         if (n >= 8) {
-            __m256 vmax = _mm256_loadu_ps(input);
-            for (i = 8; i + 8 <= n; i += 8) {
-                vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(input + i));
+            const __m256i abs_mask = _mm256_set1_epi32(0x7fffffff);
+            const __m256i pos_inf  = _mm256_set1_epi32(static_cast<int>(F32_POS_INF));
+            __m256  vmax = _mm256_loadu_ps(input);
+            __m256i bad  = _mm256_setzero_si256();
+            for (i = 0; i + 8 <= n; i += 8) {
+                const __m256  v = _mm256_loadu_ps(input + i);
+                const __m256i u = _mm256_castps_si256(v);
+                // NaN: |bits| > +inf (signed compare is fine, both < 2^31);
+                // +inf: bits == +inf.
+                bad  = _mm256_or_si256(bad, _mm256_cmpgt_epi32(_mm256_and_si256(u, abs_mask), pos_inf));
+                bad  = _mm256_or_si256(bad, _mm256_cmpeq_epi32(u, pos_inf));
+                vmax = _mm256_max_ps(vmax, v);
             }
+            nonfinite = !_mm256_testz_si256(bad, bad);
             maxv = hmax_avx2(vmax);
         } else {
             maxv = input[0];
         }
         // Scalar tail
         for (; i < n; ++i) {
+            nonfinite |= nan_or_pos_inf(input[i]);
             if (input[i] > maxv) maxv = input[i];
         }
+    }
+    if (nonfinite || f32_bits(maxv) == F32_NEG_INF) {
+        fill_nan(output, n);
+        return;
     }
 
     const __m256 vmaxv = _mm256_set1_ps(maxv);
@@ -124,12 +172,7 @@ void softmax_row_avx2(const float* input, float* output, int n) {
         }
     }
 
-    // Guard: all inputs -inf → sum ≈ 0
-    if (sum < 1e-300) {
-        float v = 1.0f / static_cast<float>(n);
-        for (int i = 0; i < n; ++i) output[i] = v;
-        return;
-    }
+    // sum >= 1 here: the maximum element contributes exp(0) = 1.
 
     // ── Pass 3: AVX2 normalize by inv_sum ────────────────────────────────────
     {
@@ -148,20 +191,21 @@ void softmax_row_avx2(const float* input, float* output, int n) {
 
 #else  // !__AVX2__ — scalar reference path
     float maxv = input[0];
-    for (int i = 1; i < n; ++i)
+    bool nonfinite = nan_or_pos_inf(input[0]);
+    for (int i = 1; i < n; ++i) {
+        nonfinite |= nan_or_pos_inf(input[i]);
         if (input[i] > maxv) maxv = input[i];
+    }
+    if (nonfinite || f32_bits(maxv) == F32_NEG_INF) {
+        fill_nan(output, n);
+        return;
+    }
 
     double sum = 0.0;
     for (int i = 0; i < n; ++i) {
         double e  = std::exp(static_cast<double>(input[i] - maxv));
         output[i] = static_cast<float>(e);
         sum      += e;
-    }
-
-    if (sum < 1e-300) {
-        float v = 1.0f / static_cast<float>(n);
-        for (int i = 0; i < n; ++i) output[i] = v;
-        return;
     }
 
     float inv_sum = static_cast<float>(1.0 / sum);
