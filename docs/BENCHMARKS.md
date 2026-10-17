@@ -47,7 +47,30 @@ tables means every sample of that case ran at P-core clocks.
 ## Results
 
 <!-- BEGIN GENERATED: results-detail -->
-_No committed benchmark results._
+#### lnl-226v-wsl
+
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `7a698867be89`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-17T04:53:44+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-17_7a698867be89.json`](../benchmarks/results/lnl-226v-wsl_2026-10-17_7a698867be89.json).
+
+**FP32 GEMM, square, single thread**
+
+| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | flop/cycle (ours / OpenBLAS) | IQR ms (ours) | IQR ms (OpenBLAS) | core GHz median (min–max) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 24.4 | 103.5 | 24% | 6.1 / 25.8 | 0.154–0.201 | 0.037–0.060 | 4.02 (3.80–4.34) |
+| 256 | 90.7 | 120.5 | 75% | 22.1 / 29.4 | 0.363–0.446 | 0.272–0.314 | 4.10 (3.72–4.42) |
+| 512 | 100.4 | 114.1 | 88% | 25.0 / 28.4 | 2.571–2.840 | 2.199–2.517 | 4.02 (3.66–4.37) |
+| 1024 | 98.9 | 116.8 | 85% | 23.0 / 27.2 | 21.331–22.779 | 18.061–18.623 | 4.30 (4.03–4.45) |
+| 2048 | 97.7 | 118.3 | 83% | 23.3 / 28.3 | 174.983–177.349 | 144.411–147.454 | 4.18 (3.84–4.42) |
+
+**Activations and normalization, out-of-place, single thread**
+
+| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | IQR µs (ours) | IQR µs (PyTorch) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `gelu_exact` | 1048576 | 2.414 | 0.563 | 1.571 | 1.54× | 391.4–549.9 | 644.4–768.7 | 4.28 (3.74–4.45) |
+| `gelu_tanh` | 1048576 | 1.443 | 0.341 | 0.523 | 2.76× | 660.4–802.4 | 1972.8–2194.2 | 4.23 (3.90–4.42) |
+| `silu` | 1048576 | 1.739 | 0.405 | 1.800 | 0.97× | 514.1–734.7 | 530.0–700.2 | 4.30 (3.96–4.41) |
+| `relu` | 1048576 | 4.485 | 1.063 | 4.194 | 1.07× | 211.2–268.9 | 221.1–307.9 | 4.22 (3.83–4.46) |
+| `softmax` | 1024×1024 | 1.729 | 0.393 | 1.347 | 1.28× | 539.4–777.0 | 714.4–886.2 | 4.40 (4.03–4.46) |
+| `layer_norm` | 1024×1024 | 3.184 | 0.740 | 3.905 | 0.82× | 313.0–428.4 | 250.5–322.3 | 4.30 (4.19–4.42) |
 <!-- END GENERATED: results-detail -->
 
 ## What is not measured yet
