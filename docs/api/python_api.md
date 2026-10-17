@@ -159,6 +159,10 @@ probs  = simd_ml_kernels.softmax(logits)       # shape [32, 1000], rows sum to 1
 
 Currently only the **last axis** (`axis=-1`) is supported. For other axes, transpose first.
 
+Non-finite inputs follow `torch.softmax`: `-inf` entries in an otherwise finite
+row (attention masks) get probability 0; a row whose maximum is not finite —
+every element `-inf`, any `NaN`, or any `+inf` — returns all `NaN`.
+
 ### `layer_norm(x, gamma=None, beta=None, eps=1e-5) → np.ndarray`
 
 Layer normalization over the last axis of `x`:

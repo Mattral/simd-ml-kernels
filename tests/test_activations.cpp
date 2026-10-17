@@ -100,6 +100,24 @@ static bool test_softmax(int n, unsigned seed = 1) {
     return pass;
 }
 
+// Rows that torch.softmax maps to all-NaN: every element -inf, any NaN, any
+// +inf. n = 4 is scalar-tail only, 8 vector body only, 11 both.
+static bool test_softmax_nan_rows() {
+    bool pass = true;
+    for (int n : {4, 8, 11}) {
+        for (int kind = 0; kind < 3; ++kind) {
+            float in[16], out[16];
+            for (int i = 0; i < n; ++i) in[i] = kind == 0 ? -INFINITY : 0.1f * i;
+            if (kind == 1) in[n / 2] = NAN;
+            if (kind == 2) in[n / 2] = INFINITY;
+            activations::softmax_row_avx2(in, out, n);
+            for (int i = 0; i < n; ++i) pass &= std::isnan(out[i]);
+        }
+    }
+    printf("  Softmax all -inf / NaN / +inf rows -> NaN   %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 // ─── LayerNorm tests ─────────────────────────────────────────────────────────
 // Each of the four affine combinations (none / gamma / beta / both) is checked
 // against a two-pass float64 reference with |out - ref| <= atol + rtol*|ref|,
@@ -165,6 +183,7 @@ int run_activation_tests() {
     printf(" Softmax:\n");
     for (int n : {1, 2, 8, 16, 64, 512, 4096})
         all_pass &= test_softmax(n);
+    all_pass &= test_softmax_nan_rows();
 
     printf(" LayerNorm:\n");
     // Sizes cover the scalar tail alone (1, 7), exact multiples of the 8-wide

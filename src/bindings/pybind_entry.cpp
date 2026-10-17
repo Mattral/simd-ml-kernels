@@ -385,8 +385,23 @@ static py::array_t<float> py_layer_norm(py::array x,
 }
 
 // ─── Binding: set_num_threads / get_num_threads ──────────────────────────────
+#ifdef SIMD_ML_OPENMP
+static constexpr bool kHasOpenMP = true;
+#else
+static constexpr bool kHasOpenMP = false;
+#endif
+
 static void py_set_num_threads(int n) {
     if (n <= 0) throw std::invalid_argument("num_threads must be positive");
+    // Without OpenMP the GEMM is single-threaded and this call cannot take
+    // effect; it used to be silently ignored (get_num_threads() stayed 1).
+    if (!kHasOpenMP && n > 1) {
+        if (PyErr_WarnEx(PyExc_RuntimeWarning,
+                         "set_num_threads(n > 1) has no effect: simd_ml_kernels was built "
+                         "without OpenMP (CMake option SIMD_ML_OPENMP=ON enables it). "
+                         "GEMM runs on 1 thread; see build_info()['openmp'].", 1) != 0)
+            throw py::error_already_set();  // warnings configured as errors
+    }
     simd_ml::gemm::set_num_threads(n);
 }
 
@@ -412,6 +427,7 @@ static py::dict build_info() {
     info["alignment"]       = "64-byte (C++17 aligned operator new)";
     info["build_timestamp"] = std::string(__DATE__) + " " + std::string(__TIME__);
     info["runtime_isa"]     = simd_ml::dispatch::detected_isa();
+    info["openmp"]          = kHasOpenMP;
     return info;
 }
 
@@ -785,7 +801,9 @@ np.ndarray[float32] same shape as x.
 
     m.def("set_num_threads", &py_set_num_threads,
           py::arg("n"),
-          "Set the number of OpenMP threads used by GEMM (requires -DSIMD_ML_OPENMP).");
+          "Set the number of OpenMP threads used by GEMM. In a build without OpenMP\n"
+          "(build_info()['openmp'] is False) GEMM is single-threaded and n > 1 emits\n"
+          "a RuntimeWarning instead of being silently ignored.");
 
     m.def("get_num_threads", &py_get_num_threads,
           "Return the current OpenMP thread count used by GEMM.");
