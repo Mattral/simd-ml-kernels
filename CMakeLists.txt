@@ -181,6 +181,25 @@ if(pybind11_FOUND)
         src/bindings/pybind_entry.cpp
     )
     set_target_properties(simd_ml_kernels_core PROPERTIES OUTPUT_NAME _core)
+
+    # Build metadata reported by build_info() and `python -m simd_ml_kernels
+    # info`, and recorded in benchmark JSON. The commit is taken when CMake
+    # configures, so a build directory reused across commits reports the
+    # commit it was configured at; "-dirty" marks uncommitted changes.
+    execute_process(
+        COMMAND git describe --always --dirty --abbrev=12
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _simd_ml_git OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _simd_ml_git_rc ERROR_QUIET)
+    if(NOT _simd_ml_git_rc EQUAL 0 OR NOT _simd_ml_git)
+        set(_simd_ml_git "unknown")
+    endif()
+    string(JOIN " " _simd_ml_flags ${PERF_FLAGS})
+    target_compile_definitions(simd_ml_kernels_core PRIVATE
+        SIMD_ML_VERSION="${PROJECT_VERSION}"
+        SIMD_ML_GIT_COMMIT="${_simd_ml_git}"
+        SIMD_ML_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+        SIMD_ML_KERNEL_FLAGS="${_simd_ml_flags}")
     target_link_libraries(simd_ml_kernels_core PRIVATE simd_ml_kernels_lib)
     target_compile_options(simd_ml_kernels_core PRIVATE ${PERF_FLAGS})
 

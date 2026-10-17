@@ -149,14 +149,14 @@ jobs:
           python3 -m pip show simd-ml-kernels
           python3 -c "import simd_ml_kernels; print('simd_ml_kernels location:', simd_ml_kernels.__file__)"
 
-      - name: Smoke test (verify import and basic ops)
-        run: python3 tests/smoke_test.py
+      - name: Self-test (every kernel vs float64; exits 1 on failure)
+        run: python3 -m simd_ml_kernels selftest
 
-      - name: Run precision and binding tests
-        run: |
-          python3 -m pytest tests/test_precision.py \
-                 tests/test_bindings_edge_cases.py \
-                 -v --tb=short
+      - name: Build info
+        run: python3 -m simd_ml_kernels info
+
+      - name: Run Python tests
+        run: python3 -m pytest tests -v --tb=short
 
       - name: Python benchmark smoke test
         run: python3 tests/test_bench.py --no-plot --quick

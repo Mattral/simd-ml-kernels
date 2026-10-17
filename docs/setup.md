@@ -57,7 +57,10 @@ ctest --test-dir build --output-on-failure
 # Build and install in editable mode (recommended for development)
 pip install -e . --no-build-isolation
 
-# Verify the extension loads
+# Verify the install: every kernel against a float64 reference, exit code 1 on failure
+python -m simd_ml_kernels selftest
+
+# Or, by hand:
 python -c "
 import simd_ml_kernels, numpy as np
 print(simd_ml_kernels.build_info())
