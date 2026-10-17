@@ -128,7 +128,8 @@ jobs:
             "pybind11[global]>=2.11" \
             "numpy>=1.24" \
             "scipy>=1.11" \
-            "pytest>=7.4"
+            "pytest>=7.4" \
+            ml_dtypes
           # Install CPU-only PyTorch to enable the 4 cross-validation tests
           # (test_gelu_vs_pytorch_tanh_approx, test_silu_vs_pytorch,
           #  test_softmax_vs_pytorch_2d, test_layer_norm_vs_pytorch)

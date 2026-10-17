@@ -18,52 +18,154 @@ except ImportError:
 
 
 class TestInputValidation:
-    """Verify that invalid inputs are caught at the Python layer with clear errors."""
+    """Invalid inputs raise DTypeError (TypeError) or ArgumentError (ValueError)
+    with an actionable message; both also subclass RuntimeError until 0.5.0."""
 
     def test_sgemm_wrong_dtype(self):
         A = np.random.randn(8, 8).astype(np.float64)   # wrong dtype
         B = np.random.randn(8, 8).astype(np.float32)
-        with pytest.raises(RuntimeError, match="float32"):
+        with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
             simd_ml_kernels.sgemm(A, B)
 
     def test_sgemm_wrong_ndim(self):
         A = np.random.randn(8).astype(np.float32)       # 1-D instead of 2-D
         B = np.random.randn(8, 8).astype(np.float32)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="2-D"):
             simd_ml_kernels.sgemm(A, B)
 
     def test_sgemm_k_mismatch(self):
         A = np.random.randn(8, 16).astype(np.float32)
         B = np.random.randn(32, 8).astype(np.float32)   # K mismatch
-        with pytest.raises(RuntimeError):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="Shape mismatch"):
             simd_ml_kernels.sgemm(A, B)
 
     def test_gelu_wrong_dtype(self):
         x = np.random.randn(64).astype(np.float64)
-        with pytest.raises(RuntimeError, match="float32"):
+        with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
             simd_ml_kernels.gelu(x)
 
     def test_gelu_inplace_read_only(self):
         x = np.zeros(64, dtype=np.float32)
         x.flags.writeable = False
-        with pytest.raises(RuntimeError, match="writeable"):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="writeable"):
             simd_ml_kernels.gelu_inplace(x)
 
     def test_layer_norm_gamma_wrong_size(self):
         x     = np.random.randn(64).astype(np.float32)
         gamma = np.ones(32, dtype=np.float32)            # wrong size
-        with pytest.raises(RuntimeError):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="gamma"):
             simd_ml_kernels.layer_norm(x, gamma=gamma)
 
     def test_softmax_wrong_dtype(self):
         x = np.random.randn(64).astype(np.float64)
-        with pytest.raises(RuntimeError, match="float32"):
+        with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
             simd_ml_kernels.softmax(x)
 
     def test_softmax_unsupported_axis(self):
         x = np.random.randn(8, 16, 32).astype(np.float32)
-        with pytest.raises(RuntimeError, match="last axis"):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="last axis"):
             simd_ml_kernels.softmax(x, axis=0)
+
+    def test_error_classes_have_builtin_and_legacy_bases(self):
+        assert issubclass(simd_ml_kernels.DTypeError, TypeError)
+        assert issubclass(simd_ml_kernels.ArgumentError, ValueError)
+        # Code written for <= 0.2 caught RuntimeError; that keeps working.
+        with pytest.raises(RuntimeError):
+            simd_ml_kernels.sgemm(np.ones((2, 2)), np.ones((2, 2), np.float32))
+        with pytest.raises(RuntimeError):
+            simd_ml_kernels.sgemm(np.ones((2, 3), np.float32), np.ones((2, 2), np.float32))
+
+
+def _bf16_bits(x):
+    """float32 -> BF16 bit patterns (truncation), as uint16."""
+    return (np.ascontiguousarray(x, dtype=np.float32).view(np.uint32) >> 16).astype(np.uint16)
+
+
+class TestOutputArgumentIsNeverCopied:
+    """C is written in place; anything that would require converting it is
+    rejected, and the caller's array is left untouched. Before this check, a
+    float64 or strided C was silently copied and the result was lost."""
+
+    @staticmethod
+    def _call(fn, C):
+        if fn == "sgemm":
+            A = np.ones((4, 3), np.float32)
+            B = np.ones((3, 5), np.float32)
+            return simd_ml_kernels.sgemm(A, B, C=C)
+        if fn == "sgemm_f16":
+            if not simd_ml_kernels.f16c_available():
+                pytest.skip("F16C not available")
+            A = np.ones((4, 3), np.float16)
+            B = np.ones((3, 5), np.float16)
+            return simd_ml_kernels.sgemm_f16(A, B, C=C)
+        A = _bf16_bits(np.ones((4, 3)))
+        B = _bf16_bits(np.ones((3, 5)))
+        return simd_ml_kernels.sgemm_bf16(A, B, C=C)
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_float64_C_rejected_and_untouched(self, fn):
+        C = np.zeros((4, 5), dtype=np.float64)
+        with pytest.raises(simd_ml_kernels.DTypeError, match="C must be float32"):
+            self._call(fn, C)
+        assert not C.any()
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_non_contiguous_C_rejected_and_untouched(self, fn):
+        C = np.zeros((4, 5), dtype=np.float32, order="F")
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
+            self._call(fn, C)
+        assert not C.any()
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_read_only_C_rejected(self, fn):
+        C = np.zeros((4, 5), dtype=np.float32)
+        C.flags.writeable = False
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="writeable"):
+            self._call(fn, C)
+
+    def test_non_array_C_rejected(self):
+        with pytest.raises(simd_ml_kernels.DTypeError, match="numpy.ndarray"):
+            self._call("sgemm", [[0.0] * 5] * 4)
+
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_valid_C_is_written_in_place(self, fn):
+        C = np.zeros((4, 5), dtype=np.float32)
+        out = self._call(fn, C)
+        assert out is C or np.shares_memory(out, C)
+        np.testing.assert_array_equal(C, np.full((4, 5), 3.0, np.float32))
+
+
+class TestSgemmBf16Inputs:
+    def test_uint16_bit_patterns_match_reference(self):
+        rng = np.random.default_rng(0)
+        A = rng.standard_normal((9, 33)).astype(np.float32)
+        B = rng.standard_normal((33, 17)).astype(np.float32)
+        Ab, Bb = _bf16_bits(A), _bf16_bits(B)
+        # Reference on the BF16-rounded values in float64. Products of two BF16
+        # values are exact in FP32, so the only error is FP32 accumulation.
+        Ar = (Ab.astype(np.uint32) << 16).view(np.float32).astype(np.float64)
+        Br = (Bb.astype(np.uint32) << 16).view(np.float32).astype(np.float64)
+        np.testing.assert_allclose(simd_ml_kernels.sgemm_bf16(Ab, Bb), Ar @ Br,
+                                   rtol=1e-5, atol=1e-5)
+
+    def test_float16_rejected(self):
+        A = np.ones((4, 4), np.float16)
+        with pytest.raises(simd_ml_kernels.DTypeError, match="sgemm_f16"):
+            simd_ml_kernels.sgemm_bf16(A, A)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.int16, np.uint8])
+    def test_other_dtypes_rejected(self, dtype):
+        A = np.ones((4, 4), dtype)
+        with pytest.raises(simd_ml_kernels.DTypeError, match="BF16"):
+            simd_ml_kernels.sgemm_bf16(A, A)
+
+    def test_ml_dtypes_bfloat16_accepted(self):
+        ml_dtypes = pytest.importorskip("ml_dtypes")
+        A = np.arange(12, dtype=np.float32).reshape(3, 4)
+        B = np.ones((4, 2), np.float32)
+        out = simd_ml_kernels.sgemm_bf16(A.astype(ml_dtypes.bfloat16),
+                                         B.astype(ml_dtypes.bfloat16))
+        np.testing.assert_allclose(out, A @ B, rtol=1e-2)
 
 
 class TestEmptyAndSingleElement:

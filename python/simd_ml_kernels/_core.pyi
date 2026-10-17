@@ -10,6 +10,17 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+# ─── Errors ───────────────────────────────────────────────────────────────────
+
+class DTypeError(TypeError, RuntimeError):
+    """An array argument has the wrong dtype. The RuntimeError base (the type
+    raised before 0.3) is kept until 0.5.0."""
+
+class ArgumentError(ValueError, RuntimeError):
+    """An argument has the wrong shape, layout (C-contiguity, writeability) or
+    value. The RuntimeError base (the type raised before 0.3) is kept until 0.5.0."""
+
+
 # ─── Linear Algebra ───────────────────────────────────────────────────────────
 
 def sgemm(
