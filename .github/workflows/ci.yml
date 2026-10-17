@@ -158,8 +158,15 @@ jobs:
       - name: Run Python tests
         run: python3 -m pytest tests -v --tb=short
 
-      - name: Python benchmark smoke test
-        run: python3 tests/test_bench.py --no-plot --quick
+      - name: Benchmark CLI smoke test (tiny sizes; numbers not used)
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+        run: python3 -m simd_ml_kernels bench --sizes 128 --elems 65536 --warmup 1 --reps 3 --json /tmp/bench.json
+
+      - name: Benchmark tables match committed JSON
+        run: python3 benchmarks/make_tables.py --check
 
   # ─── ASan / UBSan (Clang-15, Ubuntu 22.04) ───────────────────────────────────
   sanitizers:

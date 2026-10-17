@@ -22,48 +22,23 @@ jobs:
           # (which pins an older system version and can conflict)
           pip3 install "pybind11[global]>=2.11" numpy scikit-build-core
 
-      - name: Build (with OpenBLAS for baseline comparison)
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER=g++-12 \
-            -DBENCH_OPENBLAS=ON
-          cmake --build build --parallel
+      - name: Install the package
+        run: pip3 install . --no-build-isolation
 
-      - name: Run statistical benchmark
+      - name: Run benchmark (shared runner: for trend inspection only, never for claims)
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
         run: |
-          # Note: GH Actions runners are noisy (no freq lock, shared CPU).
-          # These numbers are for longitudinal regression detection only,
-          # not for absolute performance claims.
-          mkdir -p benchmarks/results
-          ./build/bench_stat \
-            --sizes 64,128,256,512 \
-            --reps 30 \
-            --output benchmarks/results/ci_gemm_results.json
+          python3 -m simd_ml_kernels selftest
+          taskset -c 0 python3 -m simd_ml_kernels bench \
+            --json ci-bench.json --label github-actions --core "CI runner vCPU 0" \
+            --note "shared GitHub Actions runner, no frequency control"
 
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
         with:
           name: bench-results-${{ github.sha }}
-          path: benchmarks/results/ci_gemm_results.json
+          path: ci-bench.json
           retention-days: 90
-
-      - name: Performance regression check
-        # Only run if a committed baseline exists
-        run: |
-          if [ -f benchmarks/results/gemm_results.json ]; then
-            python3 benchmarks/check_regression.py \
-              --baseline benchmarks/results/gemm_results.json \
-              --current  benchmarks/results/ci_gemm_results.json \
-              --max-regression-pct 20
-          else
-            echo "No committed baseline found; skipping regression check."
-            echo "To establish a baseline, run bench_stat on dedicated hardware"
-            echo "and commit the output to benchmarks/results/gemm_results.json"
-          fi
-
-      - name: Run Python benchmark smoke test
-        run: |
-          pip3 install scikit-build-core pybind11
-          pip3 install -e . --no-build-isolation -q
-          python3 tests/test_bench.py --quick --no-plot

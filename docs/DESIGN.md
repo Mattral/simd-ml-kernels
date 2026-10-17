@@ -13,7 +13,7 @@ engineering-complete** reference implementation of SIMD microkernels for ML.
 | Axis               | What we are                         | What we are not |
 |--------------------|-------------------------------------|-----------------|
 | Correctness        | Validated against NumPy/PyTorch     | A toy / untested sketch |
-| Performance        | 55–59% of OpenBLAS at N≥256 (measured; see BENCHMARKS.md) | A BLAS replacement |
+| Performance        | Measured against OpenBLAS / PyTorch on named hardware (docs/BENCHMARKS.md) | A BLAS replacement |
 | Readability        | Commented intrinsics with rationale | Opaque assembly |
 | Usability          | `pip install`-able Python library   | An isolated demo |
 
@@ -125,7 +125,7 @@ Division is replaced by `_mm256_rcp_ps` (≈ 12 bits) + one Newton–Raphson
 refinement step, reaching full FP32 accuracy (~23 bits) at 1.0 cycle
 throughput vs 5–9 cycles for true division.
 
-**Max absolute error vs exact tanh:** < 5×10⁻⁶ over [−5, 5].
+**Measured:** GeLU(tanh) is within 1.5e-6 of the tanh formula in float64 on [−10, 10] (bound 2e-6, asserted in tests).
 
 ---
 
@@ -230,7 +230,7 @@ Four GitHub Actions workflows:
 
 The bench workflow uses `bench_stat` (not `bench`) for statistical rigour:
 30 measurement repetitions, 95% confidence intervals, JSON output, and
-automated regression detection via `benchmarks/check_regression.py`.
+committed, metadata-complete results (`python -m simd_ml_kernels bench --json`).
 
 ---
 

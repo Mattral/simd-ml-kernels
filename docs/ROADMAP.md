@@ -12,7 +12,7 @@
 - [✅] TSC frequency calibration in `main_bench.cpp`
 - [✅] CPUID/LFENCE-serialized RDTSC (Intel SDM §4.3)
 - [✅] CPU affinity pinning (`sched_setaffinity` on Linux)
-- [✅] Real GFLOPS output with hardware utilisation %
+- [✅] Real GFLOPS output (utilisation % removed until peak FMA throughput is measured)
 
 ---
 
@@ -53,7 +53,7 @@
 
 ## v0.6 — Statistical Benchmarking ✅
 - [✅] `bench_stat.cpp`: wall-clock timing, 95% CI, JSON output, CPU pinning
-- [✅] `benchmarks/check_regression.py`: CI regression gate (configurable threshold)
+- [✅] Benchmark protocol: `python -m simd_ml_kernels bench --json`, committed results, generated tables (docs/BENCHMARKS.md). The earlier `check_regression.py` gate on shared CI runners was removed.
 - [✅] `bench.yml` weekly cron + automated regression check
 - [✅] `docs/BENCHMARKS.md` with roofline analysis and reproducibility instructions
 - [✅] OpenBLAS baseline comparison with real measured data (`-DBENCH_OPENBLAS=ON`,
@@ -101,24 +101,10 @@ output columns untouched after a `beta=0` memset (i.e., silently zeroed).
 That bug is why AVX-512 dispatch was disabled for an entire release cycle —
 `inner_NR` was fixed at 16 (AVX2-only) regardless of detected hardware.
 
-**Measured performance impact (primary Python-facing kernel, this environment):**
-
-| N   | AVX2-only (previous) | AVX-512 (now) | Speedup |
-|-----|----------------------|----------------|---------|
-| 64  | 5.4 GFLOPS  | 6.4–6.6 GFLOPS  | ~1.15–1.2× |
-| 128 | 26.9 GFLOPS | 30–35 GFLOPS    | ~1.1–1.3× |
-| 256 | 54.9 GFLOPS | 64–66 GFLOPS    | ~1.15–1.2× |
-| 512 | 58.4 GFLOPS | 73–74 GFLOPS    | ~1.25–1.3× |
-
-These numbers were captured on a shared, unpinned CI sandbox with visible
-run-to-run scheduler noise (see raw trial data in commit history); repeated
-trials cluster consistently in the ranges shown above. **Why not closer to
-2×** despite doubling SIMD width: panel packing and memory-movement overhead
-are ISA-independent — only the inner FMA loop benefits from the wider
-register, so overall speedup is bounded well below 2× by Amdahl's law. Run
-`./bench_stat --sizes 64,128,256,512 --reps 50` with `sudo cpupower
-frequency-set -g performance` and `taskset -c 0` on dedicated hardware for
-tighter, more reproducible numbers.
+Performance numbers that used to be listed here came from an unpinned,
+shared sandbox with no committed metadata and have been removed. Neither
+machine available now has AVX-512, so the AVX-512 kernels cannot be
+re-measured; see docs/BENCHMARKS.md for what is measured.
 
 **Remaining scope (not yet done):**
 - [❌] Tile-size re-tuning for Sapphire Rapids / Zen 4 (larger L2, different
@@ -150,7 +136,7 @@ hardware where auto-detect and a forced choice happen to coincide.
       strides, no buffer allocation. Dispatched automatically from `sgemm_packed`
       when `max(M,N,K) ≤ SMALL_GEMM_THRESHOLD=128`. At N=64, the fixed KC×NC
       packing buffer (≈2 MB regardless of actual N) was costing more than the
-      arithmetic itself, giving ~0.7× naive scalar. The direct path fixes this.
+      arithmetic itself. The direct path fixes this.
       Tested in `test_gemm_packed.cpp::test_small_gemm_direct_path()` across 8
       representative shapes including the key N=64 regression case.
 - [✅] BF16 GEMM kernel (AVX2 zero-extend path; vdpbf16ps packing path → v1.0).
@@ -185,20 +171,9 @@ hardware where auto-detect and a forced choice happen to coincide.
 
 ## GeLU Benchmark Platform Dependency
 
-On Ubuntu 22.04+ with glibc ≥ 2.22, the compiler auto-vectorises loops
-containing `erff()` via the `_ZGVdN8v_erff` SVML symbol. This means the scalar
-`gelu_forward_scalar` (erff path) and `gelu_forward_avx2` (Cody–Waite tanh)
-run at approximately the same throughput on this platform.
-
-**This is not a bug.** On platforms without SVML (Alpine Linux, older glibc,
-macOS, embedded targets), `erff` runs scalar and the AVX2 tanh path achieves
-6–10× speedup. The AVX2 tanh path also avoids the `erff` function-call overhead
-entirely, producing more predictable latency in inference pipelines.
-
-**What this means for benchmarks:** The GeLU column in BENCHMARKS.md shows ~1×
-speedup on CI (Ubuntu 22.04 runner). This is accurate for that environment.
-On production servers running older glibc or containers based on Alpine, the
-speedup will be in the 6–10× range.
+(An earlier note here estimated GeLU speedups over a scalar `erff` loop on
+various platforms; none of it was measured, and it is removed. GeLU
+throughput against PyTorch is in docs/BENCHMARKS.md.)
 
 ---
 
@@ -211,7 +186,7 @@ between simd-ml-kernels and production BLAS libraries.
 |---|---|---|
 | No hand-written assembly micro-kernel | 5–15% overhead vs hand-tuned assembly | Optional / long-term |
 | Fixed tile sizes (MC/KC/NC) | Derived for Skylake-class caches; not re-tuned for Sapphire Rapids / Zen 4 | v0.9 auto-tune |
-| Panel packing not skipped for small N | `sgemm_packed` is *slower* than a plain scalar loop at N=64 (~0.7×) — packing overhead dominates before it's amortised | v0.9 |
+| Panel packing not skipped for small N | `sgemm_packed` was slower than a plain scalar loop at N=64: packing overhead dominates before it's amortised | v0.9 |
 | Single-threaded default | Linear throughput scaling with cores uncaptured | OpenMP flag exists |
 | No BF16/FP16 kernels | Modern LLM inference prefers lower precision | v0.9 |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

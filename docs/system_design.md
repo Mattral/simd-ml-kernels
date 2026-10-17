@@ -146,4 +146,4 @@ Two complementary tools:
 - 5 warmup + 30 measurement reps by default
 - Reports: min, mean, median, std-dev, 95% CI (t-distribution approximation)
 - JSON output for longitudinal regression tracking
-- `benchmarks/check_regression.py` gates CI on performance regressions
+- CI checks that the benchmark tables match the committed JSON (`benchmarks/make_tables.py --check`)

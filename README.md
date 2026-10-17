@@ -31,7 +31,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | **GEMM** (SGEMM) | `avx_matmul.cpp`, `gemm/avx2_gemm_packed.cpp` | Goto/BLIS 5-loop, panel packing, MR×NR register blocking, AVX2/AVX-512 dispatch |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
-| **SiLU** | `activations/silu_avx2.cpp` | `x * sigmoid(x)` via fast tanh, 8 floats/cycle |
+| **SiLU** | `activations/silu_avx2.cpp` | `x * sigmoid(x)` via the exp-based tanh; max abs error ≤ 2e-6 |
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
 | **LayerNorm** | `activations/layer_norm_avx2.cpp` | 3-pass, double accumulation, optional γ/β |
 
@@ -79,8 +79,8 @@ print(sk.detected_isa())  # 'avx2', 'avx512', 'scalar'
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 
-./build/bench             # RDTSC cycle-accurate microbenchmark
-./build/bench_stat        # Statistical benchmark with CI (30 reps, JSON output)
+./build/bench_stat        # C++ wall-clock harness for kernel development
+./build/bench             # C++ RDTSC harness
 ctest --test-dir build --output-on-failure
 ```
 
@@ -88,43 +88,51 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 docker build -t simd-ml-kernels .
-docker run --rm simd-ml-kernels ./bench
+docker run --rm simd-ml-kernels ./build/bench_stat
 ```
 
 ---
 
 ## Performance
 
-Typical single-core numbers on an x86-64 CPU with AVX2/AVX-512 at ~2.1 GHz
-(this environment; run your own benchmarks — see below). "Speedup vs Scalar"
-compares `sgemm_packed` (the kernel Python's `sk.sgemm()` actually calls)
-against a plain triple-loop reference, both compiled with `-O3 -ffast-math`:
+Generated from committed JSON (`benchmarks/results/`) by
+`benchmarks/make_tables.py`; protocol, machine details and per-case
+interquartile ranges in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Single
+thread; the baseline runs in the same process on the same inputs, interleaved
+call by call.
 
-| Kernel | Size | Speedup vs Scalar | vs OpenBLAS (1T) |
-|--------|------|-------------------|------------------|
-| GEMM   | 64×64 | ~0.7× (see note) | ~4% |
-| GEMM   | 128×128 | ~10× | ~29% |
-| GEMM   | 256×256 | ~26× | ~55% |
-| GEMM   | 512×512 | N/A (scalar too slow to measure) | ~59% |
-| GeLU   | 1M elements | ~6–10× | N/A |
+<!-- BEGIN GENERATED: results-summary -->
+#### lnl-226v-wsl
 
-**Honest note on N=64:** the packed kernel is measurably *slower* than a
-plain scalar triple-loop at this size — GCC's `-O3 -ffast-math` auto-vectorizes
-the simple reference loop well enough that panel-packing overhead (which the
-packed kernel pays regardless of size) makes it a net loss until N≥128. This
-is the same small-matrix packing-overhead finding documented in
-[`docs/BENCHMARKS.md § Positioning vs OpenBLAS`](docs/BENCHMARKS.md#positioning-vs-openblas-captured-2026-07-ci-environment) — not a bug, but a
-concrete argument for the "skip packing below a size threshold" item tracked
-in [`docs/ROADMAP.md §v0.9`](docs/ROADMAP.md).
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `7a698867be89`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-17T04:53:44+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-17_7a698867be89.json`](benchmarks/results/lnl-226v-wsl_2026-10-17_7a698867be89.json).
 
-The GEMM kernel auto-dispatches to an AVX-512 8×16 micro-kernel on AVX-512-capable
-hardware (falling back to AVX2 8×8 otherwise) — see [`docs/ROADMAP.md §v0.8`](docs/ROADMAP.md).
-The gap to OpenBLAS is well-understood and intentional — see [`docs/DESIGN.md §7`](docs/DESIGN.md#7-explicitly-acknowledged-gaps-vs-production-blas). Run `./bench_stat --sizes 64,128,256,512,1024 --reps 30` with `-DBENCH_OPENBLAS=ON` on your hardware for reproducible numbers.
+**FP32 GEMM, square, single thread**
 
-For rigorous comparison with CPU frequency locked:
+| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS |
+|---:|---:|---:|---:|
+| 128 | 24.4 | 103.5 | 24% |
+| 256 | 90.7 | 120.5 | 75% |
+| 512 | 100.4 | 114.1 | 88% |
+| 1024 | 98.9 | 116.8 | 85% |
+| 2048 | 97.7 | 118.3 | 83% |
+
+**Activations and normalization, out-of-place, single thread**
+
+| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch |
+|---|---|---:|---:|---:|---:|
+| `gelu_exact` | 1048576 | 2.414 | 0.563 | 1.571 | 1.54× |
+| `gelu_tanh` | 1048576 | 1.443 | 0.341 | 0.523 | 2.76× |
+| `silu` | 1048576 | 1.739 | 0.405 | 1.800 | 0.97× |
+| `relu` | 1048576 | 4.485 | 1.063 | 4.194 | 1.07× |
+| `softmax` | 1024×1024 | 1.729 | 0.393 | 1.347 | 1.28× |
+| `layer_norm` | 1024×1024 | 3.184 | 0.740 | 3.905 | 0.82× |
+<!-- END GENERATED: results-summary -->
+
+Run it on your hardware:
+
 ```bash
-sudo cpupower frequency-set -g performance
-taskset -c 0 ./build/bench_stat --reps 50 --output results.json
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+taskset -c 2 python -m simd_ml_kernels bench
 ```
 
 ---
@@ -178,16 +186,13 @@ simd-ml-kernels/
 │   ├── test_gelu.cpp                   # C++ GeLU correctness
 │   ├── test_activations.cpp            # C++ ReLU/SiLU/Softmax/LayerNorm
 │   ├── test_alignment.cpp              # Allocator alignment verification
-│   └── test_bench.py                   # Python benchmark + plots
+│   └── test_cli.py                     # selftest / info CLI
 ├── benchmarks/
-│   ├── check_regression.py             # CI regression gating
-│   ├── results/
-│   │   ├── bench_results.json          # Committed baseline
-│   │   └── README.md
-│   └── run_bench.sh
+│   ├── make_tables.py                  # README + BENCHMARKS tables from results/*.json
+│   └── results/                        # committed benchmark JSON (schema in README.md)
 ├── docs/
 │   ├── DESIGN.md                       # Architecture + design decisions
-│   ├── BENCHMARKS.md                   # Captured results + methodology
+│   ├── BENCHMARKS.md                   # Protocol + generated results
 │   ├── ROADMAP.md
 │   └── architecture.md
 ├── .github/workflows/
@@ -211,23 +216,11 @@ simd-ml-kernels/
 # C++ unit tests
 ctest --test-dir build --output-on-failure
 
-# Python precision tests (validates against NumPy/PyTorch)
-pytest tests/test_precision.py -v
+# Python tests (float64 references; PyTorch cross-checks run when torch is installed)
+pytest tests -v
 
-# Edge case / error handling tests
-pytest tests/test_bindings_edge_cases.py -v
-
-# Quick smoke test
-python -c "
-import numpy as np, simd_ml_kernels as sk
-A = np.random.randn(32, 32).astype(np.float32)
-C = sk.sgemm(A, A.T)
-x = np.random.randn(1024).astype(np.float32)
-y = sk.gelu(x)
-print(sk.build_info())
-print('All smoke tests passed.')
-"
-```
+# Every kernel vs float64 (exit 1 on failure)
+python -m simd_ml_kernels selftest```
 
 ---
 
@@ -237,7 +230,7 @@ print('All smoke tests passed.')
 |----------|---------|--------------|
 | `ci.yml` | Every push / PR | Build (GCC-12, GCC-13, Clang-15) + C++ tests + Python precision tests |
 | `build-and-test.yml` | Push to main | Focused build validation |
-| `bench.yml` | Weekly (Sunday 4 AM UTC) | `bench_stat` → JSON → regression check (−20% threshold) |
+| `bench.yml` | Weekly (Sunday 4 AM UTC) | `python -m simd_ml_kernels bench --json` on a CI runner, uploaded as an artifact (shared runners: not used for claims) |
 | `guardrail.yml` | Every push / PR | Static analysis + security scan |
 
 ---

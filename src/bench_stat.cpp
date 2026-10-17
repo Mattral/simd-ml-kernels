@@ -17,7 +17,7 @@
  * Example (with freq lock for reproducible results):
  *   sudo cpupower frequency-set -g performance
  *   taskset -c 0 ./bench_stat --sizes 64,128,256,512,1024 --reps 50 \
- *     --output benchmarks/results/gemm_results.json
+ *     --output gemm.json
  */
 
 #include <cstdint>

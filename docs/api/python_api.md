@@ -141,7 +141,7 @@ y = simd_ml_kernels.relu(x)
 
 SiLU/Swish activation: `output[i] = x[i] * sigmoid(x[i])`.  
 Implemented as `x · 0.5·(1 + tanh(x/2))` using the Cody–Waite fast tanh.  
-Max absolute error: < 2×10⁻⁷ vs float32 reference.
+Max absolute error vs float64: ≤ 2e-6 (asserted by `selftest`; measured 1.2e-6 on [−10, 10]). Relative error is larger for |output| ≪ 1.
 
 ```python
 y = simd_ml_kernels.silu(x)

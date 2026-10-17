@@ -38,6 +38,7 @@
  */
 
 #include <cstdint>
+#include <vector>
 
 namespace simd_ml {
 namespace dispatch {
@@ -58,6 +59,24 @@ struct CpuFeatures {
      */
     static CpuFeatures detect() noexcept;
 };
+
+/**
+ * CacheLevel — one data/instruction/unified cache as reported by the CPU for
+ * the core the calling thread runs on (CPUID leaf 4 on Intel, 0x8000001D on
+ * AMD). On hybrid CPUs (e.g. Lunar Lake) P- and E-cores report different
+ * caches, so pin the thread first if the answer matters.
+ */
+struct CacheLevel {
+    int      level;             ///< 1, 2, 3 ...
+    char     type;              ///< 'D' data, 'I' instruction, 'U' unified
+    unsigned size_kib;
+    unsigned ways;
+    unsigned line_bytes;
+    unsigned max_sharing_cpus;  ///< upper bound on logical CPUs sharing it (CPUID field)
+};
+
+/** detect_caches — empty on non-x86 or CPUs without these leaves. */
+std::vector<CacheLevel> detect_caches();
 
 }  // namespace dispatch
 }  // namespace simd_ml
