@@ -33,6 +33,11 @@ under **Changed** with a migration note.
   benchmarking.
 - `SIMD_ML_ISA=scalar|avx2|avx512` (environment) caps the kernel table.
 - `build_info()` gains `isa_usable`, `isa_flags` and `sgemm_tile`.
+- The AVX2/AVX-512 units use `-ffast-math -fno-finite-math-only` (NaN/Inf keep
+  IEEE semantics; measured as fast or faster than `-ffast-math`); a test checks
+  that importing and running the kernels leaves FTZ/DAZ unchanged.
+- CI: every kernel table under Intel SDE (`-nhm`, `-hsw`, `-skx`, `-spr`), and
+  a check that the default table matches the runner's CPU flags.
 - `selftest` and the Python tests check every kernel table the CPU can run;
   ctest `isa_units` checks the object files contain only their own ISA.
 

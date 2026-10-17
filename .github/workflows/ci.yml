@@ -156,6 +156,15 @@ jobs:
       - name: Build info
         run: python3 -m simd_ml_kernels info
 
+      # Fails if this runner's CPU has AVX-512F/DQ/BW/VL (or AVX2) and the
+      # dispatcher did not pick that table. GitHub runners vary (AMD EPYC Zen 3
+      # without AVX-512, Zen 5 and Intel Xeon with it), so over time this runs
+      # on real AVX-512 hardware too.
+      - name: Default kernel table matches this runner's CPU flags
+        run: |
+          grep -m1 '^flags' /proc/cpuinfo | grep -o -w -E 'avx2|fma|f16c|avx512(f|dq|bw|vl)' | sort -u | xargs echo "CPU flags:"
+          python3 -m pytest tests/test_bindings_edge_cases.py -k default_table_matches_cpuinfo -v
+
       - name: Run Python tests
         run: python3 -m pytest tests -v --tb=short
 
@@ -219,10 +228,67 @@ jobs:
           UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
           ctest --test-dir build_asan --output-on-failure --parallel 1
 
+  # ─── Every kernel table under Intel SDE (emulated CPUs) ─────────────────────
+  # One build, run with an emulated CPU: -nhm has no AVX, so it executes only
+  # the scalar table and fails if any AVX instruction runs outside the AVX2 /
+  # AVX-512 units; -hsw adds AVX2; -skx and -spr run the AVX-512 kernels, which
+  # a runner without AVX-512 never executes otherwise. Each step also checks
+  # which table the dispatcher chose.
+  sde:
+    name: Intel SDE -${{ matrix.cpu }} (expects ${{ matrix.expect }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cpu: nhm, expect: scalar }
+          - { cpu: hsw, expect: avx2 }
+          - { cpu: skx, expect: avx512 }
+          - { cpu: spr, expect: avx512 }
+    defaults:
+      run:
+        shell: bash   # -eo pipefail
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+          python -m pip install "scikit-build-core>=0.6" "pybind11[global]>=2.11" numpy
+
+      - name: Build the C++ tests and install the extension
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSIMD_ML_BUILD_BENCHMARKS=OFF
+          cmake --build build --parallel
+          python -m pip install . --no-build-isolation
+
+      - name: Install Intel SDE
+        uses: petarpetrovt/setup-sde@v2.4
+        with:
+          environmentVariableName: SDE_PATH
+          sdeVersion: 9.33.0
+
+      - name: C++ tests under SDE -${{ matrix.cpu }}
+        run: |
+          "$SDE_PATH/sde64" -${{ matrix.cpu }} -- ./build/tests/simd_tests | tee sde-cpp.log | tail -3
+          grep -q "active table: ${{ matrix.expect }} " sde-cpp.log
+
+      - name: selftest under SDE -${{ matrix.cpu }} (every usable table)
+        working-directory: /tmp
+        run: |
+          "$SDE_PATH/sde64" -${{ matrix.cpu }} -- python -m simd_ml_kernels selftest
+          test "$("$SDE_PATH/sde64" -${{ matrix.cpu }} -- python -c 'import simd_ml_kernels as s; print(s.detected_isa())')" = "${{ matrix.expect }}"
+
   # ─── Final summary gate ───────────────────────────────────────────────────────
   all-pass:
     name: All checks passed
-    needs: [cpp, python, sanitizers]
+    needs: [cpp, python, sanitizers, sde]
     runs-on: ubuntu-latest
     # Run even if earlier jobs fail so we always get a status update.
     # 'skipped' is treated as success (e.g. matrix jobs skipped due to
@@ -234,12 +300,14 @@ jobs:
           cpp_result="${{ needs.cpp.result }}"
           python_result="${{ needs.python.result }}"
           san_result="${{ needs.sanitizers.result }}"
+          sde_result="${{ needs.sde.result }}"
           echo "cpp:        $cpp_result"
           echo "python:     $python_result"
           echo "sanitizers: $san_result"
+          echo "sde:        $sde_result"
 
           failed=0
-          for r in "$cpp_result" "$python_result" "$san_result"; do
+          for r in "$cpp_result" "$python_result" "$san_result" "$sde_result"; do
             # Accept 'success' or 'skipped'; reject 'failure' or 'cancelled'.
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then
               failed=1
