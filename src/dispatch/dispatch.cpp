@@ -258,21 +258,82 @@ bool f16c_available() noexcept { return cpu_features().has_f16c; }
 
 bool bf16_avx512bf16_available() noexcept { return cpu_features().has_avx512bf16; }
 
-static std::atomic_int g_num_threads{1};
+
+// 0: not set, follow OpenMP's own default (OMP_NUM_THREADS, else one per
+// logical CPU). Only the GEMM's num_threads clause reads it: set_num_threads
+// does not call omp_set_num_threads, so the host program's own OpenMP
+// regions keep their thread count.
+static std::atomic_int g_num_threads{0};
 
 void set_num_threads(int n) noexcept {
-    if (n <= 0) n = 1;
-    g_num_threads.store(n, std::memory_order_relaxed);
-#ifdef SIMD_ML_OPENMP
-    omp_set_num_threads(n);
-#endif
+    g_num_threads.store(n <= 0 ? 1 : n, std::memory_order_relaxed);
 }
 
 int get_num_threads() noexcept {
 #ifdef SIMD_ML_OPENMP
     const int t = g_num_threads.load(std::memory_order_relaxed);
-    return t <= 0 ? omp_get_max_threads() : t;
+    return t > 0 ? t : std::max(1, omp_get_max_threads());
 #else
+    return 1;
+#endif
+}
+
+namespace {
+
+// A packed GEMM gives each thread at least this much work. Below it, the
+// team start-up (waking idle threads: µs) and the two barriers per KC panel
+// cost more than another thread saves. Lunar Lake laptop under WSL2 (dev
+// runs, not a benchmark; vCPUs float over P- and E-cores), same size called
+// repeatedly: with 2 MFLOP 128³-192³ ran 1.2-2.1x faster on 2-4 threads than
+// on one and nothing ran slower; with 1 MFLOP, 4 threads at 128-160³ ran at
+// 0.4-0.8x of one thread when calls alternated with other thread counts.
+[[maybe_unused]] constexpr double kGemmMinFlopsPerThread = 2.0e6;  // used only with OpenMP
+
+// Chunks per thread in one column block. Chunks are handed out dynamically,
+// so on a hybrid CPU a P-core takes more of them than an E-core instead of
+// waiting for it; with c chunks per thread the last one to finish is at most
+// about 1/c of a thread's share late. Same laptop, 8 threads (P- and
+// E-cores): 1024³ 374 / 384 / 501 / 466 GFLOP/s with 1 / 2 / 4 / 8 chunks
+// per thread, 2048³ 429 / 421 / 506 / 532, 4096×64×1024 310 / 311 / 405 / 369;
+// at 4 threads the four were within noise.
+constexpr int kGemmChunksPerThread = 4;
+
+// Narrowest column chunk: a chunk packs its mc×kc block of A once and runs
+// mc·nc·kc FMAs on it, so with 128 columns the copy is 1 float per 256 flops
+// (about 8 cycles of FMAs per float copied on a 2×256-bit-FMA core).
+constexpr int kGemmMinChunkCols = 128;
+
+int ceil_div(int a, int b) noexcept { return (a + b - 1) / b; }
+
+}  // namespace
+
+GemmChunks gemm_chunks(int threads, int M, int N, int mr, int nr, int mc_max) noexcept {
+    const int target = std::max(1, threads) * kGemmChunksPerThread;
+    const int mc_cap = std::max(mr, mc_max / mr * mr);
+    const int mc = std::clamp(ceil_div(ceil_div(M, target), mr) * mr, mr, mc_cap);
+    const int m_chunks = ceil_div(M, mc);
+    const int panels = ceil_div(N, nr);
+    int n_split = 1;
+    // Fewer than 2 row chunks per thread (small M): cut the columns too.
+    // (With M large, mc rounded up to MR rows can leave m_chunks a little
+    // under target; that is not worth packing A rows twice.)
+    if (m_chunks < 2 * std::max(1, threads))
+        n_split = std::clamp(ceil_div(target, m_chunks), 1,
+                             std::max(1, panels / std::max(1, kGemmMinChunkCols / nr)));
+    const int nc = ceil_div(panels, n_split) * nr;
+    return GemmChunks{mc, nc, m_chunks, ceil_div(N, nc)};
+}
+
+int gemm_threads(int M, int N, int K, int mr, int nr) noexcept {
+#ifdef SIMD_ML_OPENMP
+    if (M <= 0 || N <= 0 || K <= 0 || omp_in_parallel()) return 1;  // never nest teams
+    const double by_work = 2.0 * M * N * K / kGemmMinFlopsPerThread;
+    const long long tiles = static_cast<long long>(ceil_div(M, mr)) * ceil_div(N, nr);
+    long long t = get_num_threads();
+    t = std::min(t, std::max(1LL, static_cast<long long>(std::min(by_work, 1e9))));
+    return static_cast<int>(std::min(t, tiles));
+#else
+    (void)M; (void)N; (void)K; (void)mr; (void)nr;
     return 1;
 #endif
 }

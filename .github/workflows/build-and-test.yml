@@ -74,7 +74,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y cmake ninja-build g++-12 \
             python3-dev python3-pip
-          pip3 install "pybind11[global]>=2.11" numpy pytest
+          pip3 install "pybind11[global]>=2.11" numpy pytest scipy
 
       - name: Clean stale build directory
         run: rm -rf build_omp
@@ -93,21 +93,19 @@ jobs:
       - name: C++ tests (with OpenMP)
         run: ctest --test-dir build_omp --output-on-failure
 
-      - name: Verify multi-threaded GEMM correctness
+      # ctest ran the C++ GEMM suite at 1, 2 and 4 threads and the bitwise
+      # 1-vs-2/3/4/8-thread checks. The Python tests then run on an OpenMP
+      # install: TestGEMMThreads (1, 2, 4 threads) and the OMP_NUM_THREADS default.
+      - name: Install the package with OpenMP
         run: |
-          python3 - << 'PYEOF_INNER'
-          import subprocess, sys
-          # Run the thread test to confirm multi-threaded GEMM produces correct results
-          result = subprocess.run(
-              ["./build_omp/tests/simd_tests"],
-              capture_output=True, text=True
-          )
-          print(result.stdout)
-          if "FAIL" in result.stdout or result.returncode != 0:
-              print("FAILED:", result.stderr)
-              sys.exit(1)
-          print("OpenMP GEMM correctness: PASS")
-          PYEOF_INNER
+          pip3 install scikit-build-core
+          pip3 install . --no-build-isolation -q -C cmake.define.SIMD_ML_OPENMP=ON
+          python3 -c "import simd_ml_kernels as s; i = s.build_info(); assert i['openmp'], i; print('threads', s.get_num_threads())"
+
+      - name: Self-test and Python tests (OpenMP build)
+        run: |
+          python3 -m simd_ml_kernels selftest
+          pytest tests -v --tb=short
 
   # ─── Secondary: Clang-15 with ASan/UBSan ───────────────────────────────────
   build-linux-asan:

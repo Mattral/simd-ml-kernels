@@ -78,12 +78,42 @@ void sgemm_blocking_avx512(int* kc, int* mc, int* nc) noexcept;
 // ─── OpenMP thread control ────────────────────────────────────────────────────
 
 /**
- * set_num_threads / get_num_threads — the OpenMP thread count used by the
- * jc-parallel loop of the packed GEMMs (dispatch.cpp). Without
+ * set_num_threads / get_num_threads — the most OpenMP threads one packed
+ * GEMM call uses (dispatch.cpp). Until set_num_threads is called this is
+ * OpenMP's default (OMP_NUM_THREADS, else one per logical CPU). Without
  * -DSIMD_ML_OPENMP, get_num_threads() is always 1.
  */
 void set_num_threads(int n) noexcept;
 int  get_num_threads()      noexcept;
+
+/**
+ * Threaded packed GEMM (the loops are in each ISA unit). All threads of one
+ * call work on the same NC-wide column block: they pack its KC×NC B panel
+ * together (one shared copy in the last-level cache), then take chunks of the
+ * block (dynamic schedule), packing each chunk's rows of A into their own
+ * buffer. Every C element is computed by one thread in the same order as
+ * with one thread, so the result is bitwise the same for any thread count.
+ *
+ * GemmChunks — an M×N column block cut into m_chunks × n_chunks chunks of
+ * mc rows (a multiple of MR, <= MC) by nc columns (a multiple of NR); chunk
+ * c covers rows (c / n_chunks)·mc and columns (c % n_chunks)·nc onwards.
+ */
+struct GemmChunks { int mc, nc, m_chunks, n_chunks; };
+
+/**
+ * gemm_chunks — about kGemmChunksPerThread chunks per thread, cut along M
+ * first (no A row is packed twice); along N too when M has too few MR-row
+ * micro-panels, never narrower than kGemmMinChunkCols (dispatch.cpp).
+ */
+GemmChunks gemm_chunks(int threads, int M, int N, int mr, int nr, int mc_max) noexcept;
+
+/**
+ * gemm_threads — how many threads a packed GEMM of this shape uses:
+ * get_num_threads(), fewer for small products (each thread gets at least
+ * kGemmMinFlopsPerThread), and 1 inside an enclosing OpenMP parallel region.
+ * Always 1 without -DSIMD_ML_OPENMP.
+ */
+int gemm_threads(int M, int N, int K, int mr, int nr) noexcept;
 
 // Reference: Goto, K. & van de Geijn, R. (2008). Anatomy of High-Performance
 // Matrix Multiplication. ACM TOMS 34(3). Low, T. M. et al. (2016). Analytical

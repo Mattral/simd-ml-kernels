@@ -57,6 +57,9 @@
 #  error "avx2_gemm_packed.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
 #endif
 #include <immintrin.h>
+#ifdef SIMD_ML_OPENMP
+#  include <omp.h>
+#endif
 
 namespace simd_ml {
 namespace gemm {
@@ -309,7 +312,8 @@ const Blocking& blocking() noexcept {
 /**
  * Per-thread packing buffers, grown on demand and kept for the thread's
  * lifetime (at most (MC+6)·KC + KC·(NC+16) floats: 4.8 MiB with the Lunar
- * Lake blocking). Allocating them per call cost 34 µs (2.1 MiB, WSL2/glibc).
+ * Lake blocking; a threaded call's A buffer holds one MC×KC block per thread).
+ * Allocating them per call cost 34 µs (2.1 MiB, WSL2/glibc).
  */
 struct PackBuffers {
     AlignedUniquePtr<float> a, b;
@@ -365,6 +369,71 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
         }
     }
 }
+
+#ifdef SIMD_ML_OPENMP
+/**
+ * Loops 2-5 for the column block op(B)[:, jc:jc+nc), run by every thread of
+ * an OpenMP team (gemm_packed_team). Per KC panel: the team packs Bp together
+ * (each thread a contiguous run of 16-column micro-panels) and waits; then
+ * the chunks of the block (gemm_chunks: loop 3 cut into mc-row pieces, loop 4
+ * into nc-column pieces) go to whichever thread is free, each packing the
+ * chunk's rows of A into its own Ap. The barrier at the end of the omp for
+ * keeps Bp until every chunk is done.
+ */
+void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands& op,
+                            float* C, std::ptrdiff_t ldc, const Blocking& bl, float* Bp,
+                            float* Ap) noexcept {
+    const int team = omp_get_num_threads(), t = omp_get_thread_num();
+    const GemmChunks ch = gemm_chunks(team, M, nc, MR, NR, bl.mc);
+    const int chunks = ch.m_chunks * ch.n_chunks;
+    const int panels = (nc + NR - 1) / NR;
+    const int b0 = static_cast<int>(static_cast<long long>(t) * panels / team) * NR;
+    const int b1 = std::min(nc, static_cast<int>(static_cast<long long>(t + 1) * panels / team) * NR);
+    for (int pc = 0; pc < K; pc += bl.kc) {                       // loop 2
+        const int kc = std::min(K - pc, bl.kc);
+        if (b1 > b0) pack_b(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
+        int packed_ic = -1;                                       // rows now in this thread's Ap
+#pragma omp barrier
+#pragma omp for schedule(dynamic, 1)
+        for (int c = 0; c < chunks; ++c) {                        // loops 3 and 4, in chunks
+            const int ic = c / ch.n_chunks * ch.mc, j0 = c % ch.n_chunks * ch.nc;
+            const int mc = std::min(M - ic, ch.mc), j1 = std::min(nc, j0 + ch.nc);
+            if (ic != packed_ic) { pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
+            for (int jr = j0; jr < j1; jr += NR) {
+                const int n = std::min(NR, nc - jr);
+                const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
+                for (int ir = 0; ir < mc; ir += MR)               // loop 5
+                    run_tile_packed(std::min(MR, mc - ir), n, kc,
+                                    Ap + static_cast<std::ptrdiff_t>(ir) * kc, Bm,
+                                    C + (ic + ir) * ldc + jc + jr, ldc, alpha);
+            }
+        }
+    }
+}
+
+/**
+ * Loops 1-5 on `threads` OpenMP threads. Buffers come from the calling
+ * thread's PackBuffers, allocated before the parallel region (an exception
+ * cannot leave one): one shared B panel, one A block per thread, each
+ * rounded up to 64 bytes so two threads never write the same cache line.
+ */
+void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands& op,
+                      float* C, std::ptrdiff_t ldc, const Blocking& bl) {
+    PackBuffers& buf = thread_buffers();
+    const int kc_max = std::min(K, bl.kc);
+    const std::size_t nc_max = static_cast<std::size_t>(std::min(N, bl.nc) + NR - 1) / NR * NR;
+    const std::size_t mc_max = static_cast<std::size_t>(std::min(M, bl.mc) + MR - 1) / MR * MR;
+    const std::size_t a_slice = (kc_max * mc_max + 15) / 16 * 16;
+    float* Bp = buf.get_b(kc_max * nc_max);
+    float* Ap = buf.get_a(a_slice * threads);
+#pragma omp parallel num_threads(threads)
+    {
+        float* Ap_t = Ap + a_slice * omp_get_thread_num();
+        for (int jc = 0; jc < N; jc += bl.nc)                     // loop 1
+            gemm_column_block_team(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl, Bp, Ap_t);
+    }
+}
+#endif
 
 /** Direct path on op(A) in place (any trans_a) and B in place (no trans_b). */
 void direct(bool ta, int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
@@ -462,13 +531,13 @@ void sgemm_packed_avx2(bool trans_a, bool trans_b, int M, int N, int K,
     if (K == 0) return;
     const Blocking& bl = blocking();
     const Operands op{A, lda, trans_a, B, ldb, trans_b};
-
-    // Loop 1 (jc): NC-wide column blocks, one per OpenMP thread.
 #ifdef SIMD_ML_OPENMP
-#pragma omp parallel for schedule(dynamic, 1) \
-    num_threads(get_num_threads()) if (get_num_threads() > 1)
+    if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
+        gemm_packed_team(threads, M, N, K, alpha, op, C, ldc, bl);
+        return;
+    }
 #endif
-    for (int jc = 0; jc < N; jc += bl.nc)
+    for (int jc = 0; jc < N; jc += bl.nc)                         // loop 1
         gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
 }
 

@@ -211,12 +211,15 @@ def layer_norm(
 # ─── Threading ────────────────────────────────────────────────────────────────
 
 def set_num_threads(n: int) -> None:
-    """Set the number of OpenMP threads used by GEMM (requires SIMD_ML_OPENMP build)."""
+    """Set the most OpenMP threads one sgemm call uses (default: OMP_NUM_THREADS,
+    else one per logical CPU). Small products and calls from inside an OpenMP
+    parallel region use fewer; results are bitwise the same for any count.
+    Without OpenMP (build_info()['openmp'] False), n > 1 warns (RuntimeWarning)."""
     ...
 
 
 def get_num_threads() -> int:
-    """Return the current OpenMP thread count used by GEMM."""
+    """Return the most OpenMP threads one sgemm call uses (1 without OpenMP)."""
     ...
 
 

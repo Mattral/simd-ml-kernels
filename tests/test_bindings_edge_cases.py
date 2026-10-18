@@ -528,3 +528,15 @@ class TestThreadControl:
         simd_ml_kernels.set_num_threads(2)
         assert simd_ml_kernels.get_num_threads() == 2
         simd_ml_kernels.set_num_threads(1)
+
+    @pytest.mark.parametrize("omp_num_threads", ["1", "3"])
+    def test_default_thread_count_follows_omp_num_threads(self, omp_num_threads):
+        """Until set_num_threads is called, GEMM uses OpenMP's default count."""
+        import subprocess
+        import sys
+        env = dict(os.environ, OMP_NUM_THREADS=omp_num_threads)
+        out = subprocess.run([sys.executable, "-c",
+                              "import simd_ml_kernels as s; print(s.get_num_threads())"],
+                             env=env, capture_output=True, text=True, check=True).stdout
+        expected = omp_num_threads if simd_ml_kernels.build_info()["openmp"] else "1"
+        assert out.strip() == expected
