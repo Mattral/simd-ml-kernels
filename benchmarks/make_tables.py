@@ -133,6 +133,39 @@ def lowp_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows) + _excluded_note(doc, excluded)
 
 
+def int8_table(doc: dict, detail: bool) -> str:
+    """INT8 GEMM (sgemm_u8s8): ours on the active path, ours on the FP32
+    conversion path, our FP32 GEMM and PyTorch's quantized linear, in one
+    interleaved case per shape. Rates in GOP/s (2·M·N·K multiply-adds)."""
+    rows = ["| M×N×K | simd-ml-kernels GOP/s | × our FP32 | FP32-conversion path GOP/s | × our FP32 | PyTorch GOP/s | ours / PyTorch |"
+            + (" IQR ms (ours) | IQR ms (PyTorch) |" if detail else "") + " core GHz median (min–max) |",
+            "|---|---:|---:|---:|---:|---:|---:|" + ("---:|---:|" if detail else "") + "---:|"]
+    by_shape: dict[tuple, dict] = {}
+    for r in doc["results"]:
+        if r["kernel"] == "sgemm_u8s8":
+            by_shape.setdefault(tuple(r["shape"]), {})[r["impl"]] = r
+    excluded = []
+    for shape in sorted(by_shape, key=lambda s: (s[0] != s[1], s)):
+        impls = by_shape[shape]
+        o, f, cv = impls.get(OURS), impls.get(OURS + " fp32"), impls.get(OURS + " fp32_convert")
+        t = next((v for k, v in impls.items() if k.startswith("torch")), None)
+        if o is None or f is None or cv is None:
+            continue
+        shp = "×".join(str(s) for s in shape)
+        if _throttled(o, f, cv, t):
+            excluded.append((shp, o))
+            continue
+        tg = f"{t['gflops']:.1f}" if t else "not measured"
+        ratio = f"{o['gflops'] / t['gflops']:.2f}×" if t else "—"
+        line = (f"| {shp} | {o['gflops']:.1f} | {o['gflops'] / f['gflops']:.2f}× | {cv['gflops']:.1f} |"
+                f" {cv['gflops'] / f['gflops']:.2f}× | {tg} | {ratio} |")
+        if detail:
+            ti = f"{t['p25_s'] * 1e3:.3f}–{t['p75_s'] * 1e3:.3f}" if t else "—"
+            line += f" {o['p25_s'] * 1e3:.3f}–{o['p75_s'] * 1e3:.3f} | {ti} |"
+        rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded)
+
+
 ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm"]
 
 
@@ -181,6 +214,12 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
                        "(PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns "
                        "float16 / bfloat16)\n")
             out.append(lowp_table(d, detail) + "\n")
+        if any(r["kernel"] == "sgemm_u8s8" for r in d["results"]):
+            path = d["build"].get("u8s8_path", "not recorded")
+            out.append(f"**INT8 GEMM (uint8 × per-channel int8, FP32 output), x·Wᵀ, single thread**, "
+                       f"path `{path}` (PyTorch: `torch.ops.quantized.linear`, prepacked weights, "
+                       "which returns requantized uint8)\n")
+            out.append(int8_table(d, detail) + "\n")
         out.append("**Activations and normalization, out-of-place, single thread**\n")
         out.append(act_table(d, detail) + "\n")
     return "\n".join(out).rstrip() + "\n"

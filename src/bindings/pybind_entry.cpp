@@ -38,6 +38,7 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -53,6 +54,7 @@
 #include "../kernels/gemm/avx2_gemm_packed.hpp"
 #include "../kernels/gemm/f16_gemm.hpp"
 #include "../kernels/gemm/bf16_gemm.hpp"
+#include "../kernels/gemm/int8_gemm.hpp"
 #include "../kernels/intrinsic_gelu.hpp"
 #include "../kernels/cache_alloc.hpp"
 #include "../dispatch/kernels.hpp"
@@ -430,6 +432,7 @@ static py::dict build_info() {
     info["git_commit"]      = SIMD_ML_GIT_COMMIT;
     info["compiler"]        = SIMD_ML_COMPILER;
     info["kernel_flags"]    = active.flags;      // flags of that table's units
+    info["u8s8_path"]       = simd_ml::gemm::u8s8_path();  // sgemm_u8s8: avx512_vnni | avx_vnni | fp32_convert | scalar
     return info;
 }
 
@@ -633,6 +636,77 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
         simd_ml::kernels().sgemm_bf16(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
     }
     return C_out;
+}
+
+// ─── Binding: sgemm_u8s8 ─────────────────────────────────────────────────────
+/**
+ * sgemm_u8s8(A, B, a_scale, a_zero_point, b_scales, C=None, *, trans_b=False)
+ *   -> np.ndarray[float32]
+ *
+ * C[i, j] = a_scale · b_scales[j] · Σ_k (A[i, k] − a_zero_point) · op(B)[k, j]
+ * with A uint8 [M, K], B int8 [K, N] (or [N, K] with trans_b), b_scales
+ * float32 [N]. `fn` is the implementation (the table entry, or a path called
+ * directly by the private _sgemm_u8s8_convert).
+ */
+static py::array_t<float> u8s8_call(simd_ml::GemmU8S8Fn fn, py::array A, py::array B, float a_scale,
+                                    int a_zero_point, py::array b_scales, py::object C, bool trans_b) {
+    const auto dta = A.dtype(), dtb = B.dtype();
+    if (dta.kind() != 'u' || dta.itemsize() != 1)
+        throw DTypeError("A must be uint8 (quantized activations; dtype=np.uint8)");
+    if (dtb.kind() != 'i' || dtb.itemsize() != 1)
+        throw DTypeError("B must be int8 (quantized weights; dtype=np.int8)");
+    check_float32(b_scales, "b_scales");
+    if (A.ndim() != 2) throw ArgumentError("A must be 2-D");
+    if (B.ndim() != 2) throw ArgumentError("B must be 2-D");
+    if (b_scales.ndim() != 1) throw ArgumentError("b_scales must be 1-D (one scale per output column)");
+    check_contiguous(A, "A");
+    check_contiguous(B, "B");
+    check_contiguous(b_scales, "b_scales");
+    if (a_zero_point < 0 || a_zero_point > 255)
+        throw ArgumentError("a_zero_point must be in [0, 255] (got " + std::to_string(a_zero_point) + ")");
+    if (!std::isfinite(a_scale)) throw ArgumentError("a_scale must be finite");
+
+    const int M = static_cast<int>(A.shape(0)), K = static_cast<int>(A.shape(1));
+    const int N = static_cast<int>(B.shape(trans_b ? 0 : 1));
+    const int K_b = static_cast<int>(B.shape(trans_b ? 1 : 0));
+    const int ldb = static_cast<int>(B.shape(1));
+    if (K_b != K)
+        throw ArgumentError("Shape mismatch: A is [" + std::to_string(M) + "×" + std::to_string(K) + "] but " +
+                            (trans_b ? "B.T" : "B") + " is [" + std::to_string(K_b) + "×" +
+                            std::to_string(N) + "]");
+    if (b_scales.shape(0) != static_cast<py::ssize_t>(N))
+        throw ArgumentError("b_scales must have N = " + std::to_string(N) + " elements (got " +
+                            std::to_string(b_scales.shape(0)) + ")");
+
+    py::array_t<float> C_out = C.is_none() ? py::array_t<float>({M, N}) : output_matrix(C, M, N);
+    const auto* A_ptr = static_cast<const std::uint8_t*>(A.data());
+    const auto* B_ptr = static_cast<const std::int8_t*>(B.data());
+    const auto* s_ptr = static_cast<const float*>(b_scales.data());
+    float* C_ptr = C_out.mutable_data();
+    {
+        py::gil_scoped_release release;
+        fn(trans_b, M, N, K, A_ptr, K, a_zero_point, B_ptr, ldb, a_scale, s_ptr, C_ptr, N);
+    }
+    return C_out;
+}
+
+static py::array_t<float> py_sgemm_u8s8(py::array A, py::array B, float a_scale, int a_zero_point,
+                                        py::array b_scales, py::object C = py::none(),
+                                        bool trans_b = false) {
+    return u8s8_call(simd_ml::kernels().sgemm_u8s8, A, B, a_scale, a_zero_point, b_scales, C, trans_b);
+}
+
+// Private: the FP32 conversion path on its own (bench: its cost on a VNNI CPU).
+// Defined in every build so the stubs match; without the AVX2 unit it raises.
+static py::array_t<float> py_sgemm_u8s8_convert(py::array A, py::array B, float a_scale, int a_zero_point,
+                                                py::array b_scales, py::object C = py::none(),
+                                                bool trans_b = false) {
+#if SIMD_ML_X86_AVAILABLE
+    if (simd_ml::kernels_for(simd_ml::Isa::avx2))
+        return u8s8_call(&simd_ml::gemm::sgemm_u8s8_convert_avx2, A, B, a_scale, a_zero_point, b_scales, C,
+                         trans_b);
+#endif
+    throw std::runtime_error("_sgemm_u8s8_convert needs the AVX2 kernels (this CPU or build has none)");
 }
 
 static bool py_bf16_avx512bf16_available() {
@@ -979,6 +1053,58 @@ Example
 >>> C = sk.sgemm_f16(A, B)   # float32 output
 )doc");
 
+    m.def("sgemm_u8s8", &py_sgemm_u8s8,
+          py::arg("A"), py::arg("B"), py::arg("a_scale"), py::arg("a_zero_point"), py::arg("b_scales"),
+          py::arg("C") = py::none(), py::kw_only(), py::arg("trans_b") = false,
+          R"doc(
+INT8 GEMM with per-channel scales: C[i, j] = a_scale * b_scales[j] * sum_k (A[i, k] - a_zero_point) * B[k, j]
+
+A holds quantized activations (uint8, one scale and zero point for the whole
+tensor), B quantized weights (int8, symmetric, one scale per output column),
+as in PyTorch's quantized linear (quint8 input, per-channel qint8 weight).
+The result is float32 (not requantized); C is overwritten.
+
+Paths, chosen once from CPUID (build_info()['u8s8_path']):
+  avx_vnni / avx512_vnni: vpdpbusd, exact int32 sums within each K block of
+      up to 4096 values, blocks accumulated in float32;
+  fp32_convert (AVX2 without VNNI): inputs converted to float32 while
+      packing, then the FP32 GEMM kernel: about the FP32 GEMM's speed with a
+      quarter of its operand memory;
+  scalar: exact int64 sums.
+Error bound, every path: |C - C_exact| <= 2*(K+2)*2^-24 * |a_scale*b_scales[j]|
+* sum_k |A[i,k] - a_zero_point| * |B[k,j]|. Single-threaded.
+
+Parameters
+----------
+A            : ndarray[uint8], shape [M, K], C-contiguous
+B            : ndarray[int8], shape [K, N] (or [N, K] with trans_b=True,
+               the layout of a torch.nn.Linear weight), C-contiguous
+a_scale      : float, scale of A
+a_zero_point : int in [0, 255], zero point of A
+b_scales     : ndarray[float32], shape [N], one scale per output column
+C            : ndarray[float32], shape [M, N], optional (allocated if None)
+trans_b      : bool, keyword-only: B is stored [N, K]
+
+Returns
+-------
+ndarray[float32], shape [M, N]
+
+Example
+-------
+>>> import numpy as np, simd_ml_kernels as sk
+>>> x = np.random.randn(8, 256).astype(np.float32)
+>>> W = np.random.randn(64, 256).astype(np.float32)          # [out, in]
+>>> xs, zp = (x.max() - x.min()) / 255, 128
+>>> xq = np.clip(np.round(x / xs) + zp, 0, 255).astype(np.uint8)
+>>> ws = (np.abs(W).max(axis=1) / 127).astype(np.float32)    # per output channel
+>>> Wq = np.round(W / ws[:, None]).astype(np.int8)
+>>> y = sk.sgemm_u8s8(xq, Wq, xs, zp, ws, trans_b=True)      # ≈ x @ W.T, float32 [8, 64]
+)doc");
+    m.def("_sgemm_u8s8_convert", &py_sgemm_u8s8_convert,
+          py::arg("A"), py::arg("B"), py::arg("a_scale"), py::arg("a_zero_point"), py::arg("b_scales"),
+          py::arg("C") = py::none(), py::kw_only(), py::arg("trans_b") = false,
+          "sgemm_u8s8 through the FP32 conversion path regardless of VNNI. Private: used by tests and "
+          "`python -m simd_ml_kernels bench` to measure that path on VNNI CPUs.");
     m.def("_measure_core_ghz", &py_measure_core_ghz, py::arg("seconds") = 0.05,
           "Core clock of the calling thread in GHz (dependent integer-add chain). "
           "Private: used by `python -m simd_ml_kernels bench`.");

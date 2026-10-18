@@ -183,6 +183,40 @@ class TestGEMM:
         assert C.dtype == np.float32 and C.shape == (M, N)
         assert (err <= bound).all(), f"{fmt} [{M}x{N}x{K}]: max err/bound {np.max(err / bound):.3g}"
 
+    @pytest.mark.parametrize("path", ["table", "fp32_convert"])
+    @pytest.mark.parametrize("trans_b", [False, True])
+    @pytest.mark.parametrize("M,N,K,zp", [
+        (1, 1, 1, 0), (7, 9, 8, 128), (1, 4096, 128, 255), (5, 15, 3, 3), (13, 33, 385, 128),
+        (97, 113, 1537, 77), (431, 40, 50, 128), (64, 64, 3077, 200),
+    ])
+    def test_u8s8_vs_float64(self, path, trans_b, M, N, K, zp):
+        """sgemm_u8s8: exact reference in float64; documented bound
+        |C - C64| <= 2(K+2)u * |a_scale*b_scales[j]| * (|A - zp| @ |B|)."""
+        if path == "fp32_convert" and "avx2" not in simd_ml_kernels.build_info()["isa_usable"].split():
+            pytest.skip("no AVX2 kernels on this CPU / build")
+        rng = np.random.default_rng(M * 7 + N + K)
+        A = rng.integers(0, 256, (M, K), dtype=np.uint8)
+        B = rng.integers(-128, 128, (K, N), dtype=np.int8)
+        scales = rng.uniform(-0.1, 0.1, N).astype(np.float32)
+        a_scale = 0.0173
+        fn = simd_ml_kernels.sgemm_u8s8 if path == "table" else simd_ml_kernels._core._sgemm_u8s8_convert
+        C = fn(A, np.ascontiguousarray(B.T) if trans_b else B, a_scale, zp, scales, trans_b=trans_b)
+        a64, b64 = A.astype(np.float64) - zp, B.astype(np.float64)
+        sc = np.float64(np.float32(a_scale)) * scales.astype(np.float64)
+        ref = (a64 @ b64) * sc
+        bound = 2 * (K + 2) * 2.0 ** -24 * (np.abs(a64) @ np.abs(b64)) * np.abs(sc) + 1e-30
+        assert C.dtype == np.float32 and C.shape == (M, N)
+        err = np.abs(C.astype(np.float64) - ref)
+        assert (err <= bound).all(), f"[{M}x{N}x{K}] max err/bound {np.max(err / bound):.3g}"
+
+    def test_u8s8_extreme_values_do_not_overflow(self):
+        """A = 255, B = -128, zp = 0: the largest int32 block sums (K = 4096)."""
+        M, N, K = 3, 33, 4096
+        A = np.full((M, K), 255, np.uint8)
+        B = np.full((K, N), -128, np.int8)
+        C = simd_ml_kernels.sgemm_u8s8(A, B, 1.0, 0, np.ones(N, np.float32))
+        np.testing.assert_array_equal(C, np.full((M, N), -255.0 * 128 * K, np.float32))
+
     @pytest.mark.parametrize("trans_a,trans_b", [(False, True), (True, False), (True, True)])
     @pytest.mark.parametrize("M,N,K", [
         (1, 300, 257),    # trans_b: dot-product path (M <= 4)

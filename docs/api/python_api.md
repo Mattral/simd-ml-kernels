@@ -50,6 +50,44 @@ against PyTorch.
 
 **Implementation**: a 6×16 AVX2 register tile (12 accumulators) run on A and B in place for small products and inside the Goto/BLIS 5 loops with packed panels otherwise, block sizes from the CPU caches (`build_info()["sgemm_blocking"]`); 12×32 (24 accumulators) on AVX-512; a plain loop in the scalar table. See `docs/DESIGN.md` §2.
 
+### `sgemm_u8s8(A, B, a_scale, a_zero_point, b_scales, C=None, *, trans_b=False) → np.ndarray`
+
+INT8 GEMM with per-channel scales, float32 output:
+`C[i, j] = a_scale · b_scales[j] · Σ_k (A[i, k] − a_zero_point) · B[k, j]`.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `A` | `ndarray[uint8]`, shape `[M, K]` | Quantized activations (one scale and zero point for the tensor) |
+| `B` | `ndarray[int8]`, shape `[K, N]`, or `[N, K]` with `trans_b=True` | Quantized weights, symmetric (zero point 0) |
+| `a_scale` | `float` | Scale of `A` (finite) |
+| `a_zero_point` | `int` in `[0, 255]` | Zero point of `A` |
+| `b_scales` | `ndarray[float32]`, shape `[N]` | One scale per output column |
+| `C` | `ndarray[float32]`, shape `[M, N]`, optional | Output, overwritten (allocated if `None`) |
+| `trans_b` | `bool`, keyword-only | `B` stored `[N, K]`, as `torch.nn.Linear` stores its weight |
+
+This is the arithmetic of PyTorch's quantized linear (quint8 input, per-channel
+qint8 weight), except that the result stays float32 instead of being
+requantized. Error bound on every path:
+`|C − C_exact| ≤ 2·(K+2)·2⁻²⁴·|a_scale·b_scales[j]|·Σ_k |A[i,k] − a_zero_point|·|B[k,j]|`.
+
+```python
+x = np.random.randn(8, 256).astype(np.float32)
+W = np.random.randn(64, 256).astype(np.float32)               # [out, in]
+xs, zp = (x.max() - x.min()) / 255, 128
+xq = np.clip(np.round(x / xs) + zp, 0, 255).astype(np.uint8)
+ws = (np.abs(W).max(axis=1) / 127).astype(np.float32)         # per output channel
+Wq = np.round(W / ws[:, None]).astype(np.int8)
+y = simd_ml_kernels.sgemm_u8s8(xq, Wq, xs, zp, ws, trans_b=True)   # ≈ x @ W.T
+```
+
+**Implementation** (`build_info()["u8s8_path"]`): `avx_vnni` / `avx512_vnni`:
+`vpdpbusd` on 6×16 / 12×32 int32 tiles, exact int32 sums within each K
+block (up to 4096 values), the zero point subtracted through column sums of
+B taken while packing; `fp32_convert` (AVX2 CPUs without VNNI): the inputs
+converted to float32 while packing and the FP32 kernel, about the FP32
+GEMM's speed with a quarter of its operand memory; `scalar`: exact int64
+sums. Single-threaded. See `docs/DESIGN.md` §4.2.
+
 ### `GEMMConfig` — callable GEMM configuration object
 
 ```python

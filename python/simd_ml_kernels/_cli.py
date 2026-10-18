@@ -56,7 +56,7 @@ def info_dict() -> dict:
         "package": {"version": sk.__version__, "path": os.path.dirname(sk.__file__)},
         "build": {k: b[k] for k in ("version", "git_commit", "compiler", "kernel_flags",
                                      "isa_compiled", "openmp", "sgemm_tile",
-                                     "sgemm_blocking")},
+                                     "sgemm_blocking", "u8s8_path")},
         "cpu": {
             "model": cpu_model(),
             "logical_cpus": os.cpu_count(),
@@ -107,6 +107,31 @@ def _gemm_check(run: Callable, to_input: Callable) -> Callable[[], tuple]:
             if ratio > worst:
                 worst, detail = float(ratio), f"{m}x{k}x{n}"
         return worst, 1.0, f"max err / (2*K*u*|A||B|), worst at {detail}"
+    return check
+
+
+def _u8s8_check(run: Callable) -> Callable[[], tuple]:
+    """sgemm_u8s8 against the exact (float64) value, with the documented bound
+    |C - C64| <= 2*(K+2)*u*|a_scale*b_scales[j]|*(|A - zp||B|)."""
+    def check():
+        rng = np.random.default_rng(2)
+        worst, detail = 0.0, ""
+        # 1x1x1, tile tails, trans_b, zero points 0..255, and K past one INT8
+        # block (KC = 1536 on a 48 KiB-L1D core).
+        for m, k, n, tb, zp in [(1, 1, 1, False, 0), (7, 9, 5, False, 128), (3, 70, 33, True, 255),
+                                (33, 17, 65, False, 7), (130, 1601, 131, True, 128)]:
+            a = rng.integers(0, 256, (m, k), dtype=np.uint8)
+            b = rng.integers(-128, 128, (k, n), dtype=np.int8)
+            scales = rng.uniform(1e-3, 1e-1, n).astype(np.float32)
+            a_scale = 0.02
+            c = run(a, np.ascontiguousarray(b.T) if tb else b, a_scale, zp, scales, tb).astype(np.float64)
+            a64, b64 = a.astype(np.float64) - zp, b.astype(np.float64)
+            sc = np.float64(np.float32(a_scale)) * scales.astype(np.float64)
+            mag = (np.abs(a64) @ np.abs(b64)) * np.abs(sc)
+            ratio = np.max(np.abs(c - (a64 @ b64) * sc) / (2 * (k + 2) * U32 * mag + 1e-300))
+            if ratio > worst:
+                worst, detail = float(ratio), f"{m}x{k}x{n}{' trans_b' if tb else ''}"
+        return worst, 1.0, f"max err / (2*(K+2)*u*|s||A-zp||B|), worst at {detail}"
     return check
 
 
@@ -187,6 +212,7 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
         ("sgemm trans_a", _gemm_check(
             lambda a, b: sk.sgemm(np.ascontiguousarray(a.T), b, trans_a=True), _as_f32)),
         ("sgemm_bf16", _gemm_check(lambda a, b: sk.sgemm_bf16(a, b), _as_bf16)),
+        ("sgemm_u8s8", _u8s8_check(lambda a, b, s, zp, bs, tb: sk.sgemm_u8s8(a, b, s, zp, bs, trans_b=tb))),
         ("gelu (exact)", _elementwise_check(sk.gelu, _gelu_erf, atol=2e-6)),
         ("gelu (tanh)", _elementwise_check(lambda x: sk.gelu(x, approximate="tanh"),
                                            _gelu_tanh, atol=2e-6)),
@@ -411,6 +437,37 @@ def cmd_bench(args: argparse.Namespace) -> int:
             stats, clock = _time([f for _, f in impls], args.warmup, args.reps, args.min_ghz)
             for (impl, _), t in zip(impls, stats):
                 show(_record(results, kernel, impl, (m, n, k), t, 2.0 * m * n * k, "flop", clock))
+
+    # INT8 (uint8 activations x per-channel int8 weights, float32 out) as a
+    # linear layer, x [M, K] @ W[N, K].T: ours through the active path
+    # (build.u8s8_path), ours through the FP32 conversion path (what CPUs
+    # without VNNI run), our FP32 GEMM on the same layout, and PyTorch's
+    # static quantized linear (weights prepacked once, quint8 output with its
+    # requantization; ours returns float32).
+    for m, n, k in [(s, s, s) for s in args.sizes] + [(1, 4096, 4096)]:
+        xq = rng.integers(0, 256, (m, k), dtype=np.uint8)
+        wq = rng.integers(-127, 128, (n, k), dtype=np.int8)
+        ws = rng.uniform(1e-3, 1e-2, n).astype(np.float32)
+        xs, zp = 0.02, 128
+        xf = rng.standard_normal((m, k)).astype(np.float32)
+        wf = rng.standard_normal((n, k)).astype(np.float32)
+        c = np.empty((m, n), np.float32)
+        impls = [("simd_ml_kernels", functools.partial(sk.sgemm_u8s8, xq, wq, xs, zp, ws, c, trans_b=True)),
+                 ("simd_ml_kernels fp32_convert",
+                  functools.partial(sk._core._sgemm_u8s8_convert, xq, wq, xs, zp, ws, c, trans_b=True)),
+                 ("simd_ml_kernels fp32", functools.partial(sk.sgemm, xf, wf, C=c, trans_b=True))]
+        if torch is not None:
+            xt = torch.quantize_per_tensor(torch.from_numpy((xq.astype(np.float32) - zp) * xs), xs, zp,
+                                           torch.quint8)
+            wt = torch.quantize_per_channel(torch.from_numpy(wq.astype(np.float32) * ws[:, None]),
+                                            torch.from_numpy(ws.astype(np.float64)),
+                                            torch.zeros(n, dtype=torch.int64), 0, torch.qint8)
+            packed = torch.ops.quantized.linear_prepack(wt, None)
+            impls.append((f"torch {torch.__version__} quantized.linear ({torch.backends.quantized.engine})",
+                          functools.partial(torch.ops.quantized.linear, xt, packed, 1.0, 128)))
+        stats, clock = _time([f for _, f in impls], args.warmup, args.reps, args.min_ghz)
+        for (impl, _), t in zip(impls, stats):
+            show(_record(results, "sgemm_u8s8", impl, (m, n, k), t, 2.0 * m * n * k, "flop", clock))
 
     x = rng.standard_normal(args.elems).astype(np.float32)
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)

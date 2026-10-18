@@ -116,6 +116,30 @@ void sgemm_f16_scalar(int M, int N, int K, float alpha, const std::uint16_t* A, 
     gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, half_to_float);
 }
 
+// INT8 GEMM (gemm/int8_gemm.hpp): exact int64 sums, one rounding at the end.
+void sgemm_u8s8_scalar(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
+                       int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
+                       const float* b_scales, float* C, int ldc) {
+    if (M <= 0 || N <= 0 || K < 0) return;
+    std::vector<long long> acc(static_cast<std::size_t>(N));
+    for (int i = 0; i < M; ++i) {
+        std::fill(acc.begin(), acc.end(), 0LL);
+        const std::uint8_t* a = A + static_cast<std::size_t>(i) * lda;
+        for (int p = 0; p < K; ++p) {
+            const long long av = static_cast<long long>(a[p]) - a_zero_point;
+            if (trans_b) {
+                for (int j = 0; j < N; ++j) acc[j] += av * B[static_cast<std::size_t>(j) * ldb + p];
+            } else {
+                const std::int8_t* b = B + static_cast<std::size_t>(p) * ldb;
+                for (int j = 0; j < N; ++j) acc[j] += av * b[j];
+            }
+        }
+        float* c = C + static_cast<std::size_t>(i) * ldc;
+        for (int j = 0; j < N; ++j)
+            c[j] = static_cast<float>(static_cast<double>(a_scale) * b_scales[j] * static_cast<double>(acc[j]));
+    }
+}
+
 void sgemm_bf16_scalar(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                        const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
     gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc,
@@ -203,7 +227,7 @@ static void sgemm_blocking_scalar(int* kc, int* mc, int* nc) { *kc = *mc = *nc =
 const KernelTable& kernel_table_scalar() noexcept {
     static const KernelTable t = {
         Isa::scalar, "scalar", SIMD_ML_UNIT_FLAGS, "row x 1 (no blocking)", &sgemm_blocking_scalar,
-        &sgemm_scalar, &sgemm_f16_scalar, &sgemm_bf16_scalar,
+        &sgemm_scalar, &sgemm_f16_scalar, &sgemm_bf16_scalar, &sgemm_u8s8_scalar,
         &gelu_forward_scalar, &gelu_tanh_scalar,
         &relu_scalar, &silu_scalar, &softmax_row_scalar, &layer_norm_scalar,
     };

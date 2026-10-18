@@ -14,6 +14,7 @@
 #include "gemm/avx2_gemm_packed.hpp"
 #include "gemm/bf16_gemm.hpp"
 #include "gemm/f16_gemm.hpp"
+#include "gemm/int8_gemm.hpp"
 #include "intrinsic_gelu.hpp"
 
 #ifndef SIMD_ML_UNIT_FLAGS
@@ -26,7 +27,7 @@ const KernelTable& kernel_table_avx512() noexcept {
     static const KernelTable t = {
         Isa::avx512, "avx512", SIMD_ML_UNIT_FLAGS, "12x32 (24 ZMM accumulators)",
         &gemm::sgemm_blocking_avx512,
-        &gemm::sgemm_packed_avx512, &gemm::sgemm_f16_avx512, &gemm::sgemm_bf16_avx512,
+        &gemm::sgemm_packed_avx512, &gemm::sgemm_f16_avx512, &gemm::sgemm_bf16_avx512, &gemm::sgemm_u8s8_avx512,
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,
         &activations::softmax_row_avx2, &activations::layer_norm_avx2,

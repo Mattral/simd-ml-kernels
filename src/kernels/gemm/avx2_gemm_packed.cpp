@@ -48,6 +48,7 @@
 #include "avx2_gemm_packed.hpp"
 #include "bf16_gemm.hpp"
 #include "f16_gemm.hpp"
+#include "int8_gemm.hpp"
 #include "cache_alloc.hpp"
 #include "../../dispatch/cpuid.hpp"
 
@@ -108,6 +109,26 @@ struct BF16 {
     static SIMD_ML_ALWAYS_INLINE __m256 eight(const T* p) noexcept {
         const __m128i h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
         return _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16));
+    }
+};
+
+/** uint8 minus a zero point (INT8 conversion path); exact in FP32, |a − zp| <= 255. */
+struct U8 {
+    using T = std::uint8_t;
+    float zp = 0.0f;
+    SIMD_ML_ALWAYS_INLINE float one(const T* p) const noexcept { return static_cast<float>(*p) - zp; }
+    SIMD_ML_ALWAYS_INLINE __m256 eight(const T* p) const noexcept {
+        const __m128i v = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(p));
+        return _mm256_sub_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v)), _mm256_set1_ps(zp));
+    }
+};
+/** int8 (INT8 conversion path); exact in FP32. */
+struct S8 {
+    using T = std::int8_t;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept { return static_cast<float>(*p); }
+    static SIMD_ML_ALWAYS_INLINE __m256 eight(const T* p) noexcept {
+        const __m128i v = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(p));
+        return _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(v));
     }
 };
 
@@ -215,22 +236,22 @@ SIMD_ML_ALWAYS_INLINE void run_tile_packed(int rows, int n, int k, const float* 
  * E converts FP16/BF16 to FP32 here, once per element of the MC×KC block.
  */
 template <class E>
-void pack_a(const typename E::T* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
+void pack_a(const E& e, const typename E::T* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
     for (int i = 0; i < mc; i += MR) {
         const int rows = std::min(MR, mc - i);
         float* dst = Ap + static_cast<std::ptrdiff_t>(i) * kc;
         if (trans) {
             const typename E::T* src = A + i;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? E::one(src + p * lda + r) : 0.0f;
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? e.one(src + p * lda + r) : 0.0f;
         } else if (rows == MR) {
             const typename E::T* src = A + i * lda;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = E::one(src + r * lda + p);
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = e.one(src + r * lda + p);
         } else {
             const typename E::T* src = A + i * lda;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? E::one(src + r * lda + p) : 0.0f;
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? e.one(src + r * lda + p) : 0.0f;
         }
     }
 }
@@ -263,7 +284,7 @@ inline void transpose8x8(__m256 r[8]) noexcept {
  * zero-extend + shift for BF16), once per element of the KC×NC panel.
  */
 template <class E>
-void pack_b(const typename E::T* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
+void pack_b(const E& e, const typename E::T* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
     for (int j = 0; j < nc; j += NR) {
         const int cols = std::min(NR, nc - j);
         float* dst = Bp + static_cast<std::ptrdiff_t>(j) * kc;
@@ -273,25 +294,25 @@ void pack_b(const typename E::T* B, std::ptrdiff_t ldb, bool trans, int kc, int 
                 for (; p0 + 8 <= kc; p0 += 8)
                     for (int h = 0; h < NR; h += 8) {
                         __m256 r[8];
-                        for (int q = 0; q < 8; ++q) r[q] = E::eight(B + (j + h + q) * ldb + p0);
+                        for (int q = 0; q < 8; ++q) r[q] = e.eight(B + (j + h + q) * ldb + p0);
                         transpose8x8(r);
                         for (int q = 0; q < 8; ++q) _mm256_storeu_ps(dst + (p0 + q) * NR + h, r[q]);
                     }
             }
             for (int c = 0; c < NR; ++c) {   // K tail, and partial panels
                 const typename E::T* src = B + (j + c) * ldb;
-                for (int p = p0; p < kc; ++p) dst[p * NR + c] = c < cols ? E::one(src + p) : 0.0f;
+                for (int p = p0; p < kc; ++p) dst[p * NR + c] = c < cols ? e.one(src + p) : 0.0f;
             }
         } else if (cols == NR) {
             const typename E::T* src = B + j;
             for (int p = 0; p < kc; ++p) {
-                _mm256_storeu_ps(dst + p * NR, E::eight(src + p * ldb));
-                _mm256_storeu_ps(dst + p * NR + 8, E::eight(src + p * ldb + 8));
+                _mm256_storeu_ps(dst + p * NR, e.eight(src + p * ldb));
+                _mm256_storeu_ps(dst + p * NR + 8, e.eight(src + p * ldb + 8));
             }
         } else {
             const typename E::T* src = B + j;
             for (int p = 0; p < kc; ++p)
-                for (int c = 0; c < NR; ++c) dst[p * NR + c] = c < cols ? E::one(src + p * ldb + c) : 0.0f;
+                for (int c = 0; c < NR; ++c) dst[p * NR + c] = c < cols ? e.one(src + p * ldb + c) : 0.0f;
         }
     }
 }
@@ -388,20 +409,25 @@ PackBuffers& thread_buffers() {
     return buf;
 }
 
-/** Operands as the loops see them: op(A) is M×K, op(B) is K×N, elements E::T. */
-template <class E>
+/**
+ * Operands as the loops see them: op(A) is M×K with elements EA::T, op(B) is
+ * K×N with elements EB::T; ea / eb convert them to FP32 while packing (the
+ * INT8 conversion path carries A's zero point in ea).
+ */
+template <class EA, class EB = EA>
 struct Operands {
-    using T = typename E::T;
-    const T* A; std::ptrdiff_t lda; bool ta;
-    const T* B; std::ptrdiff_t ldb; bool tb;
+    const typename EA::T* A; std::ptrdiff_t lda; bool ta;
+    const typename EB::T* B; std::ptrdiff_t ldb; bool tb;
+    EA ea{};
+    EB eb{};
     /** &op(A)(i, p) and &op(B)(p, j) */
-    const T* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
-    const T* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
+    const typename EA::T* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
+    const typename EB::T* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
 };
 
 /** Loops 2-5 for the column block op(B)[:, jc:jc+nc) (loop 1 is the caller). */
-template <class E>
-void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands<E>& op,
+template <class EA, class EB>
+void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands<EA, EB>& op,
                        float* C, std::ptrdiff_t ldc, const Blocking& bl) {
     PackBuffers& buf = thread_buffers();
     const int kc_max = std::min(K, bl.kc);
@@ -411,10 +437,10 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
 
     for (int pc = 0; pc < K; pc += bl.kc) {                       // loop 2
         const int kc = std::min(K - pc, bl.kc);
-        pack_b<E>(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
+        pack_b<EB>(op.eb, op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
         for (int ic = 0; ic < M; ic += bl.mc) {                   // loop 3
             const int mc = std::min(M - ic, bl.mc);
-            pack_a<E>(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
+            pack_a<EA>(op.ea, op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
             for (int jr = 0; jr < nc; jr += NR) {                 // loop 4
                 const int n = std::min(NR, nc - jr);
                 const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
@@ -438,8 +464,8 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
  * chunk's rows of A into its own Ap. The barrier at the end of the omp for
  * keeps Bp until every chunk is done.
  */
-template <class E>
-void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands<E>& op,
+template <class EA, class EB>
+void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands<EA, EB>& op,
                             float* C, std::ptrdiff_t ldc, const Blocking& bl, float* Bp,
                             float* Ap) noexcept {
     const int team = omp_get_num_threads(), t = omp_get_thread_num();
@@ -450,14 +476,14 @@ void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Ope
     const int b1 = std::min(nc, static_cast<int>(static_cast<long long>(t + 1) * panels / team) * NR);
     for (int pc = 0; pc < K; pc += bl.kc) {                       // loop 2
         const int kc = std::min(K - pc, bl.kc);
-        if (b1 > b0) pack_b<E>(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
+        if (b1 > b0) pack_b<EB>(op.eb, op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
         int packed_ic = -1;                                       // rows now in this thread's Ap
 #pragma omp barrier
 #pragma omp for schedule(dynamic, 1)
         for (int c = 0; c < chunks; ++c) {                        // loops 3 and 4, in chunks
             const int ic = c / ch.n_chunks * ch.mc, j0 = c % ch.n_chunks * ch.nc;
             const int mc = std::min(M - ic, ch.mc), j1 = std::min(nc, j0 + ch.nc);
-            if (ic != packed_ic) { pack_a<E>(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
+            if (ic != packed_ic) { pack_a<EA>(op.ea, op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
             for (int jr = j0; jr < j1; jr += NR) {
                 const int n = std::min(NR, nc - jr);
                 const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
@@ -476,8 +502,8 @@ void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Ope
  * cannot leave one): one shared B panel, one A block per thread, each
  * rounded up to 64 bytes so two threads never write the same cache line.
  */
-template <class E>
-void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands<E>& op,
+template <class EA, class EB>
+void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands<EA, EB>& op,
                       float* C, std::ptrdiff_t ldc, const Blocking& bl) {
     PackBuffers& buf = thread_buffers();
     const int kc_max = std::min(K, bl.kc);
@@ -564,8 +590,8 @@ void direct_lowp(int M, int N, int K, float alpha, const typename E::T* A, std::
 }
 
 /** Loops 1-5 (C already scaled by beta, K > 0). */
-template <class E>
-void packed(int M, int N, int K, float alpha, const Operands<E>& op, float* C, std::ptrdiff_t ldc) {
+template <class EA, class EB>
+void packed(int M, int N, int K, float alpha, const Operands<EA, EB>& op, float* C, std::ptrdiff_t ldc) {
     const Blocking& bl = blocking();
 #ifdef SIMD_ML_OPENMP
     if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
@@ -593,7 +619,7 @@ void sgemm_lowp(int M, int N, int K, float alpha, const typename E::T* A, int ld
     if (sgemm_avx2_prefers_direct(M, N, K))
         direct_lowp<E>(M, N, K, alpha, A, lda, B, ldb, C, ldc);
     else
-        packed<E>(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, false}, C, ldc);
+        packed(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, false}, C, ldc);
 }
 
 enum class Path { direct, dot, packed };
@@ -670,7 +696,7 @@ void sgemm_packed_avx2(bool trans_a, bool trans_b, int M, int N, int K,
     }
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
-    packed<F32>(M, N, K, alpha, Operands<F32>{A, lda, trans_a, B, ldb, trans_b}, C, ldc);
+    packed(M, N, K, alpha, Operands<F32>{A, lda, trans_a, B, ldb, trans_b}, C, ldc);
 }
 
 void sgemm_f16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
@@ -681,6 +707,44 @@ void sgemm_f16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, in
 void sgemm_bf16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                      const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
     sgemm_lowp<BF16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+/**
+ * INT8 without VNNI: A − zero point and B are converted to FP32 while packing
+ * (exact: |values| <= 255), the FP32 loops and 6×16 kernel compute the sums,
+ * then each column is scaled by a_scale·b_scales[j]. The same work as the FP32
+ * GEMM plus the conversion, so this is a memory saving (1-byte operands), not
+ * a speed-up; the VNNI paths are the fast ones.
+ */
+void sgemm_u8s8_convert_avx2(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
+                             int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
+                             const float* b_scales, float* C, int ldc) {
+    if (M <= 0 || N <= 0 || K < 0) return;
+    scale_matrix_c(C, M, N, ldc, 0.0f);
+    if (K > 0)
+        packed(M, N, K, 1.0f,
+               Operands<U8, S8>{A, lda, false, B, ldb, trans_b, U8{static_cast<float>(a_zero_point)}, S8{}},
+               C, ldc);
+    const __m256 as = _mm256_set1_ps(a_scale);
+    for (int i = 0; i < M; ++i) {
+        float* c = C + static_cast<std::ptrdiff_t>(i) * ldc;
+        int j = 0;
+        for (; j + 8 <= N; j += 8)
+            _mm256_storeu_ps(c + j, _mm256_mul_ps(_mm256_loadu_ps(c + j), _mm256_mul_ps(as, _mm256_loadu_ps(b_scales + j))));
+        for (; j < N; ++j) c[j] *= a_scale * b_scales[j];
+    }
+}
+
+void sgemm_u8s8_avx2(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
+                     int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
+                     const float* b_scales, float* C, int ldc) {
+#ifdef SIMD_ML_HAVE_AVXVNNI
+    if (avx_vnni_available()) {
+        sgemm_u8s8_avxvnni(trans_b, M, N, K, A, lda, a_zero_point, B, ldb, a_scale, b_scales, C, ldc);
+        return;
+    }
+#endif
+    sgemm_u8s8_convert_avx2(trans_b, M, N, K, A, lda, a_zero_point, B, ldb, a_scale, b_scales, C, ldc);
 }
 
 }  // namespace gemm
