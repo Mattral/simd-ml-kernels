@@ -50,25 +50,68 @@ static bool test_relu(int n, float lo = -5.0f, float hi = 5.0f) {
 }
 
 // ─── SiLU tests ──────────────────────────────────────────────────────────────
-static float ref_silu(float x) {
-    return x / (1.0f + std::exp(-x));
+// Bound from silu_avx2.cpp: |err| <= 1e-35 + 1e-6*|ref| over every finite
+// float (measured 2.9e-7 relative). Returns the worst err / bound (pass: <= 1).
+static double silu_worst(const float* inp, const float* out, int n) {
+    double worst = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double x = inp[i], ref = x / (1.0 + std::exp(-x));
+        worst = std::max(worst, std::abs((double)out[i] - ref) / (1e-35 + 1e-6 * std::abs(ref)));
+    }
+    return worst;
 }
 
-static bool test_silu(int n, float lo = -5.0f, float hi = 5.0f, double tol = 1e-4) {
+static bool test_silu(int n, float lo, float hi) {
     auto inp = make_aligned_array<float>(n);
     auto out = make_aligned_array<float>(n);
     fill_sweep(inp.get(), n, lo, hi);
 
     T->silu(inp.get(), out.get(), n);
 
-    double max_err = 0.0;
-    for (int i = 0; i < n; ++i) {
-        double ref = ref_silu(inp[i]);
-        double err = std::abs((double)out[i] - ref) / (std::abs(ref) + 1e-7);
-        max_err = std::max(max_err, err);
+    const double worst = silu_worst(inp.get(), out.get(), n);
+    bool pass = worst <= 1.0;
+    printf("  SiLU n=%-7d [%g, %g]  max err/bound=%.2f  %s\n", n, lo, hi, worst,
+           pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// ±m·2^e for every binade e in [-126, 127]: the old AVX2 kernel was wrong
+// only for x < -16 (error 1e-4 at -1000, 5e31 at -FLT_MAX).
+static bool test_silu_magnitudes() {
+    const int n = 2 * 254 * 3 + 5;  // + 5: the last 5 go through the masked tail
+    auto inp = make_aligned_array<float>(n);
+    auto out = make_aligned_array<float>(n);
+    int k = 0;
+    for (int e = -126; e <= 127; ++e)
+        for (float m : {1.0f, 1.3f, 1.9999999f})
+            for (float s : {1.0f, -1.0f}) inp[k++] = s * std::ldexp(m, e);
+    for (float x : {-88.5f, -88.0f, -87.5f, 88.5f, -103.0f}) inp[k++] = x;
+    T->silu(inp.get(), out.get(), n);
+    const double worst = silu_worst(inp.get(), out.get(), n);
+    bool pass = worst <= 1.0;
+    printf("  SiLU every binade 2^-126..2^127  max err/bound=%.2f  %s\n", worst,
+           pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// SiLU(+inf) = +inf; SiLU(-inf) = NaN (-inf / inf, as the scalar kernel and
+// PyTorch); NaN stays NaN; signed zeros pass through. Offsets 0 and 9 put the
+// values in the 8-wide body and in the masked tail.
+static bool test_silu_special() {
+    bool pass = true;
+    for (int offset : {0, 9}) {
+        const float special[] = {INFINITY, -INFINITY, NAN, 0.0f, -0.0f};
+        const int n = offset + 5;
+        auto inp = make_aligned_array<float>(n);
+        auto out = make_aligned_array<float>(n);
+        for (int i = 0; i < offset; ++i) inp[i] = 1.0f;
+        for (int i = 0; i < 5; ++i) inp[offset + i] = special[i];
+        T->silu(inp.get(), out.get(), n);
+        const float* o = out.get() + offset;
+        pass &= o[0] == INFINITY && std::isnan(o[1]) && std::isnan(o[2]) &&
+                o[3] == 0.0f && !std::signbit(o[3]) && o[4] == 0.0f;
     }
-    bool pass = (max_err < tol);
-    printf("  SiLU n=%-7d  max_rel_err=%.2e  %s\n", n, max_err, pass ? "PASS" : "FAIL");
+    printf("  SiLU +-inf, NaN, +-0 (body and tail)  %s\n", pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -222,8 +265,13 @@ int run_activation_tests() {
             ok &= test_relu(n);
 
         printf(" SiLU:\n");
-        for (int n : {1, 7, 8, 9, 64, 256, 1024, 65536})
-            ok &= test_silu(n);
+        for (int n : {1, 7, 8, 9, 64, 256, 1024, 65536}) {
+            ok &= test_silu(n, -10.0f, 10.0f);
+            ok &= test_silu(n, -200.0f, 200.0f);   // crosses the -88 cut-off
+        }
+        ok &= test_silu(65537, -1.7e38f, 1.7e38f);  // hi - lo must not overflow
+        ok &= test_silu_magnitudes();
+        ok &= test_silu_special();
 
         printf(" Softmax:\n");
         for (int n : {1, 2, 8, 16, 64, 512, 4096})

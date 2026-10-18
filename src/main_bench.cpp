@@ -22,7 +22,7 @@
  *
  * ─── Compilation ─────────────────────────────────────────────────────────────
  *   g++ -O3 -march=native -mfma -o bench src/main_bench.cpp \
- *       src/kernels/avx_matmul.cpp src/kernels/intrinsic_gelu.cpp
+ *       src/kernels/gemm/avx2_gemm_packed.cpp src/kernels/intrinsic_gelu.cpp
  */
 
 #include <cstdint>
@@ -41,7 +41,8 @@
 #endif
 
 #include "kernels/cache_alloc.hpp"
-#include "kernels/avx_matmul.hpp"
+#include "kernels/gemm/avx2_gemm_packed.hpp"
+#include "kernels/gemm/naive_gemm.hpp"
 #include "kernels/intrinsic_gelu.hpp"
 
 // ─── Serialised TSC read primitives ──────────────────────────────────────────
@@ -276,10 +277,10 @@ static void bench_gemm(std::vector<BenchmarkRecord>& records,
             scalar_record.K = K;
             measure(label_scalar,
                     [&]() {
-                        scalar_sgemm(M, N, K,
-                                     A.get(), K,
-                                     B.get(), N,
-                                     C_scalar.get(), N);
+                        naive_sgemm(M, N, K, 1.0f,
+                                    A.get(), K,
+                                    B.get(), N,
+                                    0.0f, C_scalar.get(), N);
                     },
                     flops, warmup, reps, &scalar_record);
             records.push_back(std::move(scalar_record));
@@ -295,7 +296,7 @@ static void bench_gemm(std::vector<BenchmarkRecord>& records,
         simd_record.K = K;
         auto r_simd = measure(label_simd,
                               [&]() {
-                                  simd_sgemm(M, N, K,
+                                  simd_ml::gemm::sgemm_packed(M, N, K,
                                              1.0f,
                                              A.get(), K,
                                              B.get(), N,
@@ -409,7 +410,7 @@ static void bench_alignment(std::vector<BenchmarkRecord>& records,
     aligned_record.K = K;
     measure("Aligned   GEMM 256x256",
             [&]() {
-                simd_sgemm(M, N, K, 1.0f,
+                simd_ml::gemm::sgemm_packed(M, N, K, 1.0f,
                            A_aligned.get(), K, B_aligned.get(), N,
                            0.0f, C_aligned.get(), N);
             },
@@ -424,7 +425,7 @@ static void bench_alignment(std::vector<BenchmarkRecord>& records,
     misaligned_record.K = K;
     measure("Misaligned GEMM 256x256",
             [&]() {
-                simd_sgemm(M, N, K, 1.0f,
+                simd_ml::gemm::sgemm_packed(M, N, K, 1.0f,
                            A_mis, K, B_mis, N,
                            0.0f, C_mis, N);
             },

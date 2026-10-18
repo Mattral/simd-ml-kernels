@@ -30,14 +30,18 @@ def sgemm(
     alpha: float = 1.0,
     beta: float = 0.0,
     isa: str = "",
+    *,
+    trans_a: bool = False,
+    trans_b: bool = False,
 ) -> NDArray[np.float32]:
     """
-    SIMD GEMM: C = alpha * A @ B + beta * C  (float32, in-place or allocates).
+    SIMD GEMM: C = alpha * op(A) @ op(B) + beta * C  (float32, in-place or
+    allocates); op(X) is X, or X.T with trans_a / trans_b (BLAS transa/transb).
 
     Parameters
     ----------
-    A     : ndarray[float32], shape [M, K]
-    B     : ndarray[float32], shape [K, N]
+    A     : ndarray[float32], shape [M, K] (or [K, M] with trans_a)
+    B     : ndarray[float32], shape [K, N] (or [N, K] with trans_b)
     C     : ndarray[float32], shape [M, N], optional (allocated if None)
     alpha : float scalar, default 1.0
     beta  : float scalar, default 0.0 (0 = overwrite C)
@@ -45,6 +49,9 @@ def sgemm(
             "avx2" or "avx512" run that kernel table for this call only;
             one this build or CPU cannot run raises RuntimeError
             (build_info()["isa_usable"] lists the ones that work).
+    trans_a, trans_b : bool, keyword-only, default False — use A.T / B.T as
+            stored, without a copy; x @ W.T with W [out, in] is
+            sgemm(x, W, trans_b=True).
 
     Returns
     -------
@@ -163,7 +170,12 @@ def relu(x: NDArray[np.float32]) -> NDArray[np.float32]:
 
 
 def silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Return SiLU(x) = x * sigmoid(x)."""
+    """Return SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x)).
+
+    Error vs float64: |err| <= 1e-35 + 1e-6*|SiLU(x)| for every finite x
+    (tested; measured 2.9e-7 relative on the AVX2 kernel). silu(+inf) = +inf,
+    silu(-inf) = NaN as in PyTorch, and x < -88 gives -0 (|SiLU(x)| < 1.5e-36).
+    """
     ...
 
 
@@ -213,8 +225,9 @@ def get_num_threads() -> int:
 def build_info() -> dict[str, Any]:
     """Build details: version, git_commit, compiler, isa_compiled and isa_usable
     (space-separated table names), isa_flags (table -> compiler flags),
-    runtime_isa (the active table), kernel_flags and sgemm_tile (of that
-    table), openmp, alignment, build_timestamp."""
+    runtime_isa (the active table), kernel_flags, sgemm_tile and sgemm_blocking
+    ({kc, mc, nc}, derived from the CPU caches; 0 = not blocked) of that table,
+    openmp, alignment, build_timestamp."""
     ...
 
 

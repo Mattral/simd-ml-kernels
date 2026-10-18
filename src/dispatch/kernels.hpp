@@ -35,7 +35,8 @@ namespace simd_ml {
 enum class Isa : int { scalar = 0, avx2 = 1, avx512 = 2 };
 constexpr int kNumIsa = 3;
 
-using SgemmFn  = void (*)(int M, int N, int K, float alpha,
+/** C = alpha·op(A)·op(B) + beta·C; trans_a: A stored K×M, trans_b: B stored N×K. */
+using SgemmFn  = void (*)(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
                           const float* A, int lda, const float* B, int ldb,
                           float beta, float* C, int ldc);
 using Sgemm16Fn = void (*)(int M, int N, int K, float alpha,
@@ -45,13 +46,15 @@ using UnaryFn  = void (*)(const float* in, float* out, std::size_t n);
 using RowFn    = void (*)(const float* in, float* out, int n);
 using LayerNormFn = void (*)(const float* in, float* out, int n,
                              const float* gamma, const float* beta, float eps);
+using BlockingFn = void (*)(int* kc, int* mc, int* nc);
 
 struct KernelTable {
     Isa         isa;
     const char* name;        ///< "scalar", "avx2", "avx512"
     const char* flags;       ///< compiler flags of this ISA's units
     const char* sgemm_tile;  ///< micro-kernel shape, for build_info()
-    SgemmFn     sgemm;       ///< C = alpha*A*B + beta*C, row-major FP32
+    BlockingFn  sgemm_blocking;  ///< KC/MC/NC in use (0 = not blocked), for build_info()
+    SgemmFn     sgemm;       ///< C = alpha*op(A)*op(B) + beta*C, row-major FP32
     Sgemm16Fn   sgemm_f16;   ///< IEEE binary16 inputs, FP32 accumulate and output
     Sgemm16Fn   sgemm_bf16;  ///< BF16 bit patterns, FP32 accumulate and output
     UnaryFn     gelu_erf;    ///< exact GeLU; in == out allowed

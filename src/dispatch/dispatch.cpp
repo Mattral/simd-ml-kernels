@@ -16,6 +16,7 @@
 #include "../kernels/gemm/f16_gemm.hpp"
 #include "../kernels/gemm/bf16_gemm.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -78,8 +79,10 @@ CpuFeatures CpuFeatures::detect() noexcept {
     return f;
 }
 
-std::vector<CacheLevel> detect_caches() {
-    std::vector<CacheLevel> out;
+// Fills out[0..max) and returns the count; allocation-free so that
+// gemm_blocking (noexcept) can use it.
+static int detect_caches_into(CacheLevel* out, int max) noexcept {
+    int count = 0;
 #ifdef SIMD_ML_X86_ASM
     unsigned a, b, c, d;
     cpuid_ex(0, 0, a, b, c, d);
@@ -93,10 +96,10 @@ std::vector<CacheLevel> detect_caches() {
         cpuid_ex(0x80000000u, 0, a, b, c, d);
         if (a >= 0x8000001Du) leaf = 0x8000001Du;
     }
-    if (leaf == 0) return out;
+    if (leaf == 0) return 0;
     // Same register layout in both leaves (Intel SDM vol. 2A, CPUID leaf 04H;
     // AMD APM vol. 3, CPUID Fn8000_001D).
-    for (unsigned i = 0; i < 16; ++i) {
+    for (unsigned i = 0; i < 16 && count < max; ++i) {
         cpuid_ex(leaf, i, a, b, c, d);
         const unsigned type = a & 0x1f;   // 0 = no more caches
         if (type == 0) break;
@@ -109,10 +112,43 @@ std::vector<CacheLevel> detect_caches() {
         const unsigned sets = c + 1;
         cl.size_kib         = cl.ways * partitions * cl.line_bytes * sets / 1024;
         cl.max_sharing_cpus = ((a >> 14) & 0xfff) + 1;
-        out.push_back(cl);
+        out[count++] = cl;
     }
+#else
+    (void)out; (void)max;
 #endif
-    return out;
+    return count;
+}
+
+std::vector<CacheLevel> detect_caches() {
+    CacheLevel buf[16];
+    const int n = detect_caches_into(buf, 16);
+    return std::vector<CacheLevel>(buf, buf + n);
+}
+
+GemmBlocking gemm_blocking(int mr, int nr) noexcept {
+    unsigned l1d = 0, l2 = 0, llc = 0;
+    CacheLevel caches[16];
+    const int count = detect_caches_into(caches, 16);
+    for (int k = 0; k < count; ++k) {
+        const CacheLevel& c = caches[k];
+        if (c.type == 'I') continue;
+        if (c.level == 1) l1d = c.size_kib;
+        else if (c.level == 2) l2 = c.size_kib;
+        if (c.level >= 2) llc = std::max(llc, c.size_kib);  // no L3: the L2 is the LLC
+    }
+    GemmBlocking b{};
+    b.l1d_kib = l1d; b.l2_kib = l2; b.llc_kib = llc;
+    const long long L1 = (l1d ? l1d : 32) * 1024LL, L2 = (l2 ? l2 : 256) * 1024LL,
+                    LLC = (llc ? llc : 8192) * 1024LL;
+    auto round_down = [](long long v, int m) { return v / m * m; };
+    const long long kc = std::clamp(round_down(L1 / 2 / (nr * 4LL), 8), 64LL, 1024LL);
+    const long long mc = std::clamp(round_down(L2 / 4 / (kc * 4), mr), (long long)mr, 2048LL / mr * mr);
+    const long long nc = std::clamp(round_down(LLC / 2 / (kc * 4), nr), (long long)nr, 8192LL / nr * nr);
+    b.kc = static_cast<int>(kc);
+    b.mc = static_cast<int>(mc);
+    b.nc = static_cast<int>(nc);
+    return b;
 }
 
 }  // namespace dispatch
@@ -215,7 +251,7 @@ namespace gemm {
 void sgemm_packed(int M, int N, int K, float alpha,
                   const float* A, int lda, const float* B, int ldb,
                   float beta, float* C, int ldc) {
-    kernels().sgemm(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    kernels().sgemm(false, false, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 bool f16c_available() noexcept { return cpu_features().has_f16c; }

@@ -7,6 +7,12 @@ under **Changed** with a migration note.
 ## Unreleased
 
 ### Added
+- `sgemm(..., trans_a=False, trans_b=False)` (keyword-only): C = alpha·op(A)·op(B)
+  + beta·C with op(X) = X or Xᵀ, as BLAS transa/transb. A stored `[K, M]` /
+  B stored `[N, K]` are read in place: the transpose happens while packing
+  (8×8 register transposes for B), or for `trans_b` with M ≤ 16 in a
+  dot-product path, so `x @ W.T` with `W` as `torch.nn.Linear` stores it
+  needs no copy. `examples/linear_trans_b.py`.
 - `python -m simd_ml_kernels selftest`: checks every kernel against a NumPy
   float64 reference with the bounds the test suite asserts (GEMMs: elementwise
   `|C − AB| ≤ 2·K·u·(|A||B|)`, u = 2⁻²⁴), prints one line per kernel and exits 1
@@ -45,6 +51,23 @@ under **Changed** with a migration note.
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- **FP32 GEMM, AVX-512:** a 12×32 micro-kernel with 24 ZMM accumulators
+  replaces the 8×16 kernel (8 accumulators), with the AVX2 path's five loops,
+  CPUID-leaf-4 blocking and per-thread buffers. Verified under Intel SDE
+  (`-skx`, `-spr`) and on AVX-512 CI runners; its speed is measured only on
+  AVX-512 hardware (not yet).
+- C++: the `KernelTable::sgemm` entry and `sgemm_packed_avx2/avx512` take
+  `trans_a, trans_b` first; `sgemm_packed()` keeps the untransposed signature.
+- **FP32 GEMM, AVX2:** one 6×16 micro-kernel (12 YMM accumulators) replaces
+  the 8×8 kernel and the one-accumulator small-matrix loop. Small products
+  (up to 80³, N ≤ 16 or M = 1) run it on A and B in place; the rest go through
+  the packed five loops. KC/MC/NC are derived at run time from CPUID leaf 4
+  (`build_info()["sgemm_blocking"]`, also recorded in benchmark JSON) instead
+  of fixed constants. Packing buffers are per thread and kept, instead of
+  2.1 MiB allocated and freed on every call. docs/DESIGN.md §2 has the
+  reasons and the measurements behind each choice.
+- `build_info()` gains `sgemm_blocking` (`{kc, mc, nc}`); `info` and the
+  benchmark JSON `build` block gain `sgemm_tile` and `sgemm_blocking`.
 - `layer_norm` (AVX2 and AVX-512 tables): two-pass statistics with four
   float accumulators per pass, flushed to double every 1024 elements, and the
   mean pass shifted by the row's first element, instead of one dependent
@@ -110,10 +133,21 @@ under **Changed** with a migration note.
   removed. `gemm::sgemm_packed` still exists and dispatches.
 
 ### Removed
+- `avx_matmul.cpp` / `avx_matmul_avx512.cpp` (`simd_sgemm`), the second FP32
+  GEMM, which only the C++ tests and the `bench` harness could call. Its 6×16
+  shape is now the AVX2 kernel of `sgemm`; `bench` measures `sgemm_packed`.
 - Stray `gitignore` (duplicate of `.gitignore`) and `poetry.lock` (the build
   backend is scikit-build-core; nothing used it).
 
 ### Fixed
+- `silu` (AVX2 and AVX-512 tables) computed `x·0.5·(1 + tanh(x/2))` with
+  tanh clamped at ±7.99, so its error grew without bound below x ≈ −16
+  (2e-6 at −20, 1e-4 at −1000, 5e31 at −FLT_MAX). It now computes
+  `x / (1 + exp(−x))`: `|err| ≤ 1e-35 + 1e-6·|ref|` for every finite x,
+  and 1.5× faster on the Lunar Lake P-core (L1-resident). `silu(-inf)` is
+  now NaN on every table (was −inf on AVX2), as in PyTorch and the scalar
+  kernel. The last `n % 8` elements use the vector kernel (masked), so a
+  value's result no longer depends on its position.
 - CMake detected x86-64 from `CMAKE_SYSTEM_PROCESSOR`, which is empty when
   `PROCESSOR_ARCHITECTURE` is not set (seen in an MSYS2 shell); the build then
   silently became scalar-only and the extension failed to link. The compiler's

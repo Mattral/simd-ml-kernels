@@ -84,9 +84,31 @@ float half_to_float(std::uint16_t h) {
     return bits_to_float(sign | ((exp + 112) << 23) | (man << 13));
 }
 
-void sgemm_scalar(int M, int N, int K, float alpha, const float* A, int lda,
-                  const float* B, int ldb, float beta, float* C, int ldc) {
-    gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, [](float v) { return v; });
+void sgemm_scalar(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
+                  const float* A, int lda, const float* B, int ldb, float beta,
+                  float* C, int ldc) {
+    if (!trans_a && !trans_b) {
+        gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, [](float v) { return v; });
+        return;
+    }
+    // op(A)(i, p), op(B)(p, j) with BLAS transposes; same summation order as gemm_rows.
+    const auto a_at = [&](int i, int p) {
+        return trans_a ? A[static_cast<std::size_t>(p) * lda + i] : A[static_cast<std::size_t>(i) * lda + p];
+    };
+    const auto b_at = [&](int p, int j) {
+        return trans_b ? B[static_cast<std::size_t>(j) * ldb + p] : B[static_cast<std::size_t>(p) * ldb + j];
+    };
+    std::vector<float> acc(static_cast<std::size_t>(N));
+    for (int i = 0; i < M; ++i) {
+        float* c = C + static_cast<std::size_t>(i) * ldc;
+        for (int j = 0; j < N; ++j) c[j] = beta == 0.0f ? 0.0f : beta * c[j];
+        std::fill(acc.begin(), acc.end(), 0.0f);
+        for (int p = 0; p < K; ++p) {
+            const float a = a_at(i, p);
+            for (int j = 0; j < N; ++j) acc[j] += a * b_at(p, j);
+        }
+        for (int j = 0; j < N; ++j) c[j] += alpha * acc[j];
+    }
 }
 
 void sgemm_f16_scalar(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
@@ -176,9 +198,11 @@ void gelu_forward_scalar(const float* input, float* output, std::size_t n) {
 
 namespace simd_ml {
 
+static void sgemm_blocking_scalar(int* kc, int* mc, int* nc) { *kc = *mc = *nc = 0; }
+
 const KernelTable& kernel_table_scalar() noexcept {
     static const KernelTable t = {
-        Isa::scalar, "scalar", SIMD_ML_UNIT_FLAGS, "row x 1 (no blocking)",
+        Isa::scalar, "scalar", SIMD_ML_UNIT_FLAGS, "row x 1 (no blocking)", &sgemm_blocking_scalar,
         &sgemm_scalar, &sgemm_f16_scalar, &sgemm_bf16_scalar,
         &gelu_forward_scalar, &gelu_tanh_scalar,
         &relu_scalar, &silu_scalar, &softmax_row_scalar, &layer_norm_scalar,

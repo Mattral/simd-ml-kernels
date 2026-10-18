@@ -95,12 +95,20 @@ def act_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows)
 
 
-def section(docs: list[dict], detail: bool, link_prefix: str) -> str:
+def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool) -> str:
+    """One block per result file, newest first; latest_only keeps the newest
+    file per machine label (README), otherwise every run is listed (BENCHMARKS)."""
     if not docs:
         return "_No committed benchmark results._\n"
+    docs = sorted(docs, key=lambda d: d["timestamp_utc"], reverse=True)
+    if latest_only:
+        seen: set[str] = set()
+        docs = [d for d in docs
+                if not (d["machine"]["label"] in seen or seen.add(d["machine"]["label"]))]
     out = []
     for d in docs:
-        out.append(f"#### {d['machine']['label']}\n")
+        out.append(f"#### {d['machine']['label']}, {d['timestamp_utc'][:10]}, "
+                   f"commit `{d['build']['git_commit']}`\n")
         out.append("Source: " + _source(d, link_prefix) + ".\n")
         out.append("**FP32 GEMM, square, single thread**\n")
         out.append(gemm_table(d, detail) + "\n")
@@ -122,8 +130,10 @@ def main() -> int:
     args = ap.parse_args()
     docs = load()
     targets = {
-        "README.md": ("results-summary", section(docs, detail=False, link_prefix="")),
-        "docs/BENCHMARKS.md": ("results-detail", section(docs, detail=True, link_prefix="../")),
+        "README.md": ("results-summary",
+                      section(docs, detail=False, link_prefix="", latest_only=True)),
+        "docs/BENCHMARKS.md": ("results-detail",
+                               section(docs, detail=True, link_prefix="../", latest_only=False)),
     }
     stale = []
     for rel, (name, body) in targets.items():

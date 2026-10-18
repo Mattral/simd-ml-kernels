@@ -39,14 +39,14 @@ Pitfalls:
 ## Repository map
 
 ```
-src/dispatch/kernels.hpp, dispatch.cpp       KernelTable per ISA, CPUID + XGETBV, table selection, SIMD_ML_ISA
+src/dispatch/kernels.hpp, dispatch.cpp       KernelTable per ISA, CPUID + XGETBV, table selection, SIMD_ML_ISA,
+                                             GEMM block sizes from CPUID leaf 4 (gemm_blocking)
 src/kernels/scalar_kernels.cpp               scalar unit: every kernel in portable C++, the scalar table
 src/kernels/kernels_{avx2,avx512}.cpp        the AVX2 / AVX-512 tables
-src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32 GEMM, AVX2: small-matrix path, 5-loop packed GEMM, 8x8 kernel
-src/kernels/gemm/avx512_gemm_packed.cpp      FP32 GEMM, AVX-512: 8x16 kernel
+src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32 GEMM, AVX2: 6x16 kernel, direct (small) and 5-loop packed paths
+src/kernels/gemm/avx512_gemm_packed.cpp      FP32 GEMM, AVX-512: 12x32 kernel, same loops
 src/kernels/gemm/{f16,bf16}_gemm.*           FP16 / BF16-input GEMM, FP32 accumulate (AVX2)
 src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM (tests)
-src/kernels/avx_matmul*.cpp                  second FP32 GEMM (6x16 AVX2 / 6x32 AVX-512), C++ only: tests and bench
 src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh (AVX2)
 src/kernels/activations/                     relu, silu, softmax, layer_norm (AVX2; + activations.hpp)
 src/kernels/simd_math.hpp                    fast_exp_avx2, tanh_avx2
@@ -137,7 +137,8 @@ Code and repository
 ```
 schema, command, python, timestamp_utc
 machine   label, cpu_model, core, pinned_cpus, caches[] (CPUID leaf 4), logical_cpus, os, note
-build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp
+build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp,
+          sgemm_tile, sgemm_blocking {kc, mc, nc}
 baselines numpy, blas {name, version}, torch
 env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS
 protocol  warmup, reps, statistic, interleaved, clock, min_ghz

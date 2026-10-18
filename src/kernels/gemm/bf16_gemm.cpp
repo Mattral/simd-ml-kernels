@@ -24,7 +24,7 @@
  */
 
 #include "bf16_gemm.hpp"
-#include "avx2_gemm_packed.hpp"  // for NR = 8 constant
+#include "avx2_gemm_packed.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -36,6 +36,8 @@
 
 namespace simd_ml {
 namespace gemm {
+
+static constexpr int kCols = 8;  // one YMM of output columns per step
 
 // ─── BF16→FP32 conversion helpers (AVX2 integer, no F16C) ───────────────────
 
@@ -99,7 +101,7 @@ void sgemm_bf16_avx2(int M, int N, int K,
 
     // ── Main loop: row i of A × all columns of B → row i of C ───────────────
     //
-    // Inner kernel (vectorised, NR=8 columns per iteration):
+    // Inner kernel (vectorised, kCols=8 columns per iteration):
     //   acc[0..7] = Σ_p  fp32(A[i][p]) * fp32(B[p][j..j+7])
     //
     // BF16→FP32 conversions:
@@ -115,9 +117,9 @@ void sgemm_bf16_avx2(int M, int N, int K,
         const uint16_t* a_row = A + static_cast<std::size_t>(i) * lda;
         float*          c_row = C + static_cast<std::size_t>(i) * ldc;
 
-        // ── Vectorised NR=8 columns per iteration ─────────────────────────────
+        // ── Vectorised kCols=8 columns per iteration ─────────────────────────────
         int j = 0;
-        for (; j + NR <= N; j += NR) {
+        for (; j + kCols <= N; j += kCols) {
             __m256 acc = _mm256_setzero_ps();
             for (int p = 0; p < K; ++p) {
                 // Convert BF16 A[i][p] → FP32 scalar, broadcast to all 8 lanes.
@@ -139,7 +141,7 @@ void sgemm_bf16_avx2(int M, int N, int K,
             _mm256_storeu_ps(c_row + j, _mm256_add_ps(cv, acc));
         }
 
-        // ── Scalar tail for remaining N % NR columns ──────────────────────────
+        // ── Scalar tail for remaining N % kCols columns ──────────────────────────
         for (; j < N; ++j) {
             float sum = 0.0f;
             for (int p = 0; p < K; ++p) {

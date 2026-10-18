@@ -140,6 +140,10 @@ class TestGEMM:
         (33,  17,  5),    # non-power-of-2
         (1,   4096, 128), # skinny M (typical attention projection)
         (7,   7,   7),    # odd sizes
+        (5,   15,  3),    # one partial 6x16 tile (direct path)
+        (13,  33,  385),  # row/column tails past a 6x16 multiple, K > KC = 384 (packed)
+        (97,  113, 769),  # K = 2*384 + 1: three KC panels on a 48 KiB-L1 core
+        (431, 40,  50),   # M > MC = 426 on a 2.5 MiB-L2 core
     ])
     def test_sgemm_vs_numpy(self, M, N, K):
         A = rand_matrix(M, K)
@@ -151,6 +155,35 @@ class TestGEMM:
 
         assert_close(C, C_ref, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL,
                     label=f"GEMM [{M}×{N}×{K}]")
+
+    @pytest.mark.parametrize("trans_a,trans_b", [(False, True), (True, False), (True, True)])
+    @pytest.mark.parametrize("M,N,K", [
+        (1, 300, 257),    # trans_b: dot-product path (M <= 4)
+        (4, 33, 1027),    # dot path, K tail
+        (5, 17, 9),       # trans_b packed, tiny
+        (64, 64, 64),
+        (97, 113, 769),   # three KC panels on a 48 KiB-L1 core
+        (200, 190, 180),
+    ])
+    def test_sgemm_transposed(self, M, N, K, trans_a, trans_b):
+        A = rand_matrix(K, M) if trans_a else rand_matrix(M, K)
+        B = rand_matrix(N, K) if trans_b else rand_matrix(K, N)
+        opA = (A.T if trans_a else A).astype(np.float64)
+        opB = (B.T if trans_b else B).astype(np.float64)
+        C = simd_ml_kernels.sgemm(A, B, trans_a=trans_a, trans_b=trans_b)
+        assert C.shape == (M, N)
+        assert_close(C, opA @ opB, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL,
+                     label=f"GEMM trans_a={trans_a} trans_b={trans_b} [{M}x{N}x{K}]")
+
+    def test_sgemm_trans_b_linear_layer_alpha_beta(self):
+        """y = 2 * x @ W.T + 0.5 * y with W stored [out, in], into a given C."""
+        x, W = rand_matrix(8, 768), rand_matrix(3072, 768)
+        y0 = rand_matrix(8, 3072)
+        y = y0.copy()
+        out = simd_ml_kernels.sgemm(x, W, y, alpha=2.0, beta=0.5, trans_b=True)
+        assert out is y or np.shares_memory(out, y)
+        ref = 2.0 * (x.astype(np.float64) @ W.T.astype(np.float64)) + 0.5 * y0
+        assert_close(y, ref, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL, label="x @ W.T")
 
     def test_sgemm_allocates_output_when_C_not_provided(self):
         A = rand_matrix(32, 64)
@@ -327,16 +360,46 @@ class TestReLU:
 # ─── SiLU Tests ──────────────────────────────────────────────────────────────
 
 class TestSiLU:
-    SILU_TOL = 1e-4
-    SILU_ATOL = 1e-6  # SiLU also crosses zero at x=0 — see assert_close docstring
+    # Documented bound (silu_avx2.cpp, docstring): 1e-35 + 1e-6*|ref| over every
+    # finite float; measured 2.9e-7 relative on the AVX2 table.
+    SILU_TOL = 1e-6
+    SILU_ATOL = 1e-35
 
     @pytest.mark.parametrize("n", [1, 7, 8, 9, 64, 1024, 65536])
-    def test_silu_vs_numpy(self, n):
-        x = RNG.uniform(-4.0, 4.0, size=n).astype(np.float32)
+    @pytest.mark.parametrize("bound", [4.0, 200.0])  # 200: past the x < -88 cut-off
+    def test_silu_vs_numpy(self, n, bound):
+        x = RNG.uniform(-bound, bound, size=n).astype(np.float32)
         ref = silu_numpy(x)
         out = simd_ml_kernels.silu(x)
         assert_close(out, ref, rtol=self.SILU_TOL, atol=self.SILU_ATOL,
-                    label=f"SiLU n={n}")
+                    label=f"SiLU n={n} on [-{bound}, {bound}]")
+
+    def test_silu_every_binade(self):
+        """±m·2^e for e in [-126, 127]. The AVX2 kernel used to clamp tanh(x/2),
+        so its error grew without bound below x = -16 (5e31 at -FLT_MAX)."""
+        e = np.arange(-126, 128)
+        mags = np.concatenate([np.ldexp(m, e) for m in (1.0, 1.3, 1.9999999)])
+        x = np.concatenate([mags, -mags, [-88.5, -88.0, -87.5, -103.0, 88.5]]).astype(np.float32)
+        with np.errstate(over="ignore"):
+            ref = silu_numpy(x)
+        assert_close(simd_ml_kernels.silu(x), ref, rtol=self.SILU_TOL,
+                     atol=self.SILU_ATOL, label="SiLU every binade")
+
+    @pytest.mark.parametrize("offset", [0, 9])   # vector body / masked tail
+    def test_silu_special_values(self, offset):
+        special = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0], dtype=np.float32)
+        x = np.ones(offset + special.size, np.float32)
+        x[offset:] = special
+        out = simd_ml_kernels.silu(x)[offset:]
+        assert out[0] == np.inf
+        assert np.isnan(out[1])  # -inf / (1 + inf), as PyTorch and the scalar kernel
+        assert np.isnan(out[2])
+        assert out[3] == 0.0 and not np.signbit(out[3]) and out[4] == 0.0
+
+    def test_silu_tail_matches_vector_body_bitwise(self):
+        x = RNG.uniform(-30.0, 30.0, 16).astype(np.float32)
+        np.testing.assert_array_equal(simd_ml_kernels.silu(x[:13].copy()),
+                                      simd_ml_kernels.silu(x)[:13])
 
     def test_silu_zero_input(self):
         x = np.zeros(64, dtype=np.float32)

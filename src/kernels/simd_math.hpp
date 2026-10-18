@@ -50,6 +50,7 @@
 
 #ifdef __AVX2__
 #include <immintrin.h>
+#include <cstddef>
 
 /**
  * fast_exp_avx2 — Vectorized float32 exp() via Cody–Waite range reduction.
@@ -155,6 +156,28 @@ static inline __m256 tanh_avx2(__m256 y) {
             _mm256_fnmadd_ps(den, rcp, _mm256_set1_ps(2.0f)));
 
     return _mm256_mul_ps(num, rcp);
+}
+
+/**
+ * apply_elementwise_avx2 — run an 8-wide kernel over n floats. The last n % 8
+ * elements go through the same kernel via masked load/store (masked-off lanes
+ * read as 0 and are not written), so every element gets bit-identical math
+ * regardless of its position in the array, and nothing past `n` is touched.
+ * `input` and `output` may be the same buffer (in-place GeLU). Used by GeLU
+ * and SiLU.
+ */
+template <typename Kernel>
+static inline void apply_elementwise_avx2(const float* input, float* output,
+                                          std::size_t n, Kernel kernel) {
+    std::size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm256_storeu_ps(output + i, kernel(_mm256_loadu_ps(input + i)));
+    if (i < n) {
+        const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        const __m256i mask = _mm256_cmpgt_epi32(
+            _mm256_set1_epi32(static_cast<int>(n - i)), lane);
+        _mm256_maskstore_ps(output + i, mask, kernel(_mm256_maskload_ps(input + i, mask)));
+    }
 }
 
 #endif  // __AVX2__

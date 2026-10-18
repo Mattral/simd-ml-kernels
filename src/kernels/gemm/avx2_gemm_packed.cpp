@@ -1,36 +1,57 @@
 /**
- * avx2_gemm_packed.cpp — Packed AVX2 GEMM (Goto/BLIS 5-loop structure)
+ * avx2_gemm_packed.cpp — FP32 GEMM, AVX2 + FMA: one 6×16 micro-kernel, used
+ * directly on A and B for small products and inside the Goto/BLIS five loops
+ * with packed panels otherwise. docs/DESIGN.md §2 has the full story; the
+ * numbers that decided each choice are in the comments below.
  *
- * This file implements the primary GEMM used by the Python dispatch layer.
- * It uses an 8×8 register-blocked micro-kernel with explicit FMA intrinsics,
- * Goto/BLIS-style 5-loop tiling, and panel packing for cache efficiency.
+ * ─── Why 6×16 (12 YMM accumulators) ──────────────────────────────────────────
+ * Ports and latency: Haswell to Lion Cove issue 2 FMAs per cycle with a
+ * latency of 4 cycles (Lion Cove, Golden Cove, Skylake; 5 on Haswell), so at
+ * least 2 × 4 = 8 independent accumulators must be in flight to keep both FMA
+ * pipes busy. The old 8×8 kernel had exactly 8 (no slack for a late load);
+ * 6×16 has 12.
+ * Registers: 16 YMM. 12 accumulators + 2 B vectors + 1 broadcast A = 15.
+ * (7×16 or 8×16 would need 16+ accumulators alone.)
+ * Loads per FMA: per k-step 2 B loads + 6 A broadcasts feed 12 FMAs, 0.67
+ * loads per FMA, against 9 loads per 8 FMAs (1.13) for 8×8 and 7 per 12
+ * (0.58) for 4×24. Two or three load ports sustain 6×16 at full FMA rate.
+ * Measured (Lunar Lake P-core, one generic packed driver, persistent buffers,
+ * square N, OpenBLAS 0.3.34 = 100%): 8×8 84-91%, 6×16 98-105%, 4×24 95-103%
+ * for N = 256..2048; 6×16 was best or tied at every size from 128 up.
  *
- * ─── Design overview ──────────────────────────────────────────────────────────
- * See docs/DESIGN.md §2 for the cache-blocking rationale and the 8×8
- * register-tile choice.  Tile sizes:
+ * ─── Block sizes, from CPUID leaf 4 (dispatch::gemm_blocking) ───────────────
+ * KC: one KC×16 B micro-panel stays in L1 while it is reused for every 6-row
+ *     A micro-panel of the MC block, so it gets half of L1D (the other half
+ *     holds the streaming A micro-panel and the C tile): KC = L1D/2/(16·4).
+ *     48 KiB (Lion Cove) -> 384; 32 KiB (Skylake, Coffee Lake) -> 256.
+ * MC: the packed MC×KC A block stays in L2 across the jr loop. A quarter of
+ *     L2 for it: on Lunar Lake (2.5 MiB L2) MC = 426; a sweep at N = 2048 put
+ *     MC = 852 (half of L2) 5-10% below MC <= 576 at every KC, and anything
+ *     from 72 to 576 within noise (the B panel is re-read from L3 only once
+ *     per MC rows, 2/MC bytes per flop).
+ * NC: the packed KC×NC B panel lives in the last-level cache: half of it,
+ *     LNL 8 MiB L3 -> NC = 2720.
+ * On hybrid CPUs leaf 4 describes the core the first GEMM ran on.
  *
- *   MR=8, NR=8   — micro-kernel register block (8 YMM accumulators)
- *   KC=256        — K-panel depth: Ac+Bc fit together in L2
- *   MC=128        — M-panel height: Ac fits in L2 while B remains L3-resident
- *   NC=2048       — N-panel width: large to amortise B packing cost over M-tiles
- *
- * ─── Memory allocation strategy ──────────────────────────────────────────────
- * A_packed and B_packed are allocated ONCE per sgemm_packed call (outside all
- * loops) and reused across all k-panel and M-tile iterations.  Earlier versions
- * allocated inside the k-loop, causing O(K/KC × N/NC) heap calls per GEMM.
- *
- * ─── Thread safety (OpenMP path) ─────────────────────────────────────────────
- * When SIMD_ML_OPENMP is defined, each thread owns its own packing buffers via
- * thread_local storage, avoiding false sharing across the outer jc-parallel loop.
+ * ─── Small products: the direct path ─────────────────────────────────────────
+ * Packing copies all of A and B once per call; for small products that is a
+ * large share of the work, so sgemm_avx2_prefers_direct sends them to the
+ * same kernel reading A (6 row streams) and B (rows of 16 floats) in place.
+ * Before this change, max(M,N,K) <= 128 used a one-accumulator loop, bound by
+ * FMA latency (one FMA per 4 cycles: 24% of OpenBLAS at N = 128), and every
+ * packed call allocated and freed 2.1 MiB of buffers (34 µs per call measured,
+ * plus first-touch page faults): 43% at N = 128 forced through the packed path,
+ * 82% with the buffers kept. Buffers are now per thread, grown on demand and
+ * kept, so a call allocates nothing in the steady state.
  */
 
 #include "avx2_gemm_packed.hpp"
 #include "cache_alloc.hpp"
+#include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
-#include <cassert>
+#include <cstddef>
 #include <cstdint>
-#include <cstring>
 
 #if !defined(__AVX2__) || !defined(__FMA__)
 #  error "avx2_gemm_packed.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
@@ -40,444 +61,415 @@
 namespace simd_ml {
 namespace gemm {
 
-// ─── Beta scaling ─────────────────────────────────────────────────────────────
+namespace {
+
+constexpr int MR = MR_AVX2;  // 6
+constexpr int NR = NR_AVX2;  // 16
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define SIMD_ML_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#  define SIMD_ML_ALWAYS_INLINE inline
+#endif
+
+// ─── Micro-kernel ────────────────────────────────────────────────────────────
+/**
+ * kernel_6x16<R, Tail, Packed> — C[0..R)[0..n) += alpha · Σ_p A(r, p) · B(p, 0..n)
+ *
+ * A(r, p) = A[r*a_rs + p*a_cs]: packed micro-panel (a_rs = 1, a_cs = 6) or A in
+ * place (a_rs = lda, a_cs = 1). B row p = B + p*b_rs: packed (b_rs = 16) or in
+ * place (b_rs = ldb). Packed = true fixes those strides at compile time: with
+ * them as run-time values the packed path measured 77-85% of OpenBLAS instead
+ * of 98% (extra address arithmetic in the k-loop). R < 6 handles the last rows
+ * of M; Tail (n < 16) masks the B loads and the C accesses so nothing past
+ * column n is touched.
+ */
+template <int R, bool Tail, bool Packed>
+SIMD_ML_ALWAYS_INLINE void kernel_6x16(int k, const float* __restrict__ A, std::ptrdiff_t a_rs_,
+                                       std::ptrdiff_t a_cs_, const float* __restrict__ B,
+                                       std::ptrdiff_t b_rs_, float* __restrict__ C,
+                                       std::ptrdiff_t ldc, int n, float alpha) noexcept {
+    const std::ptrdiff_t a_rs = Packed ? 1 : a_rs_;
+    const std::ptrdiff_t a_cs = Packed ? MR : a_cs_;
+    const std::ptrdiff_t b_rs = Packed ? NR : b_rs_;
+    __m256 acc[R][2];
+    for (int r = 0; r < R; ++r) acc[r][0] = acc[r][1] = _mm256_setzero_ps();
+    __m256i m0 = _mm256_setzero_si256(), m1 = _mm256_setzero_si256();
+    if (Tail) {
+        const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        m0 = _mm256_cmpgt_epi32(_mm256_set1_epi32(n), lane);
+        m1 = _mm256_cmpgt_epi32(_mm256_set1_epi32(n - 8), lane);
+    }
+#pragma GCC unroll 4
+    for (int p = 0; p < k; ++p) {
+        const float* b = B + p * b_rs;
+        const __m256 b0 = Tail ? _mm256_maskload_ps(b, m0) : _mm256_loadu_ps(b);
+        const __m256 b1 = Tail ? _mm256_maskload_ps(b + 8, m1) : _mm256_loadu_ps(b + 8);
+        const float* a = A + p * a_cs;
+        for (int r = 0; r < R; ++r) {
+            const __m256 av = _mm256_broadcast_ss(a + r * a_rs);
+            acc[r][0] = _mm256_fmadd_ps(av, b0, acc[r][0]);
+            acc[r][1] = _mm256_fmadd_ps(av, b1, acc[r][1]);
+        }
+    }
+    const __m256 alpha_v = _mm256_set1_ps(alpha);
+    for (int r = 0; r < R; ++r) {
+        float* c = C + r * ldc;
+        if (Tail) {
+            _mm256_maskstore_ps(c, m0, _mm256_fmadd_ps(acc[r][0], alpha_v, _mm256_maskload_ps(c, m0)));
+            _mm256_maskstore_ps(c + 8, m1, _mm256_fmadd_ps(acc[r][1], alpha_v, _mm256_maskload_ps(c + 8, m1)));
+        } else {
+            _mm256_storeu_ps(c, _mm256_fmadd_ps(acc[r][0], alpha_v, _mm256_loadu_ps(c)));
+            _mm256_storeu_ps(c + 8, _mm256_fmadd_ps(acc[r][1], alpha_v, _mm256_loadu_ps(c + 8)));
+        }
+    }
+}
+
+template <bool Tail, bool Packed>
+void run_tile_rows(int rows, int k, const float* A, std::ptrdiff_t a_rs, std::ptrdiff_t a_cs,
+                   const float* B, std::ptrdiff_t b_rs, float* C, std::ptrdiff_t ldc, int n,
+                   float alpha) noexcept {
+    switch (rows) {
+        case 6: kernel_6x16<6, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 5: kernel_6x16<5, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 4: kernel_6x16<4, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 3: kernel_6x16<3, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 2: kernel_6x16<2, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 1: kernel_6x16<1, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        default: break;
+    }
+}
+
+/** One micro-tile of packed micro-panels. */
+SIMD_ML_ALWAYS_INLINE void run_tile_packed(int rows, int n, int k, const float* Ap,
+                                           const float* Bp, float* C, std::ptrdiff_t ldc,
+                                           float alpha) noexcept {
+    if (rows == MR && n == NR)
+        kernel_6x16<MR, false, true>(k, Ap, 1, MR, Bp, NR, C, ldc, n, alpha);
+    else if (n == NR)
+        run_tile_rows<false, true>(rows, k, Ap, 1, MR, Bp, NR, C, ldc, n, alpha);
+    else
+        run_tile_rows<true, true>(rows, k, Ap, 1, MR, Bp, NR, C, ldc, n, alpha);
+}
+
+// ─── Packing ─────────────────────────────────────────────────────────────────
+/**
+ * pack_a — op(A)[0..mc)[0..kc) into 6-row micro-panels, k-major:
+ * Ap[(i/6)*6*kc + p*6 + r] = op(A)(i + r, p). Rows past mc are zero, so the
+ * kernel's broadcasts read 6 consecutive floats per k-step.
+ * op(A)(i, p) = A[i*lda + p], or A[p*lda + i] when trans (A stored K×M): then
+ * the 6 values of one k-step are adjacent in memory and the copy is cheaper.
+ */
+void pack_a(const float* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
+    for (int i = 0; i < mc; i += MR) {
+        const int rows = std::min(MR, mc - i);
+        float* dst = Ap + static_cast<std::ptrdiff_t>(i) * kc;
+        if (trans) {
+            const float* src = A + i;
+            for (int p = 0; p < kc; ++p)
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[p * lda + r] : 0.0f;
+        } else if (rows == MR) {
+            const float* src = A + i * lda;
+            for (int p = 0; p < kc; ++p)
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = src[r * lda + p];
+        } else {
+            const float* src = A + i * lda;
+            for (int p = 0; p < kc; ++p)
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[r * lda + p] : 0.0f;
+        }
+    }
+}
+
+/** transpose8x8 — r[q] becomes column q of the 8×8 block held in r[0..7]. */
+inline void transpose8x8(__m256 r[8]) noexcept {
+    const __m256 t0 = _mm256_unpacklo_ps(r[0], r[1]), t1 = _mm256_unpackhi_ps(r[0], r[1]);
+    const __m256 t2 = _mm256_unpacklo_ps(r[2], r[3]), t3 = _mm256_unpackhi_ps(r[2], r[3]);
+    const __m256 t4 = _mm256_unpacklo_ps(r[4], r[5]), t5 = _mm256_unpackhi_ps(r[4], r[5]);
+    const __m256 t6 = _mm256_unpacklo_ps(r[6], r[7]), t7 = _mm256_unpackhi_ps(r[6], r[7]);
+    const __m256 u0 = _mm256_shuffle_ps(t0, t2, 0x44), u1 = _mm256_shuffle_ps(t0, t2, 0xEE);
+    const __m256 u2 = _mm256_shuffle_ps(t1, t3, 0x44), u3 = _mm256_shuffle_ps(t1, t3, 0xEE);
+    const __m256 u4 = _mm256_shuffle_ps(t4, t6, 0x44), u5 = _mm256_shuffle_ps(t4, t6, 0xEE);
+    const __m256 u6 = _mm256_shuffle_ps(t5, t7, 0x44), u7 = _mm256_shuffle_ps(t5, t7, 0xEE);
+    r[0] = _mm256_permute2f128_ps(u0, u4, 0x20); r[1] = _mm256_permute2f128_ps(u1, u5, 0x20);
+    r[2] = _mm256_permute2f128_ps(u2, u6, 0x20); r[3] = _mm256_permute2f128_ps(u3, u7, 0x20);
+    r[4] = _mm256_permute2f128_ps(u0, u4, 0x31); r[5] = _mm256_permute2f128_ps(u1, u5, 0x31);
+    r[6] = _mm256_permute2f128_ps(u2, u6, 0x31); r[7] = _mm256_permute2f128_ps(u3, u7, 0x31);
+}
+
+/**
+ * pack_b — op(B)[0..kc)[0..nc) into 16-column micro-panels:
+ * Bp[(j/16)*16*kc + p*16 + c] = op(B)(p, j + c). Columns past nc are zero.
+ * op(B)(p, j) = B[p*ldb + j], or B[j*ldb + p] when trans (B stored N×K, as a
+ * weight matrix W in x·Wᵀ): each column of the panel is then one row of B.
+ * Full panels are transposed 8×8 in registers (8 rows of B × 8 values of p
+ * per step); with a scalar gather the transposed packed path reached 59-86%
+ * of OpenBLAS for M = 16..96 against 90-104% without the transpose.
+ */
+void pack_b(const float* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
+    for (int j = 0; j < nc; j += NR) {
+        const int cols = std::min(NR, nc - j);
+        float* dst = Bp + static_cast<std::ptrdiff_t>(j) * kc;
+        if (trans) {
+            int p0 = 0;
+            if (cols == NR) {
+                for (; p0 + 8 <= kc; p0 += 8)
+                    for (int h = 0; h < NR; h += 8) {
+                        __m256 r[8];
+                        for (int q = 0; q < 8; ++q) r[q] = _mm256_loadu_ps(B + (j + h + q) * ldb + p0);
+                        transpose8x8(r);
+                        for (int q = 0; q < 8; ++q) _mm256_storeu_ps(dst + (p0 + q) * NR + h, r[q]);
+                    }
+            }
+            for (int c = 0; c < NR; ++c) {   // K tail, and partial panels
+                const float* src = B + (j + c) * ldb;
+                for (int p = p0; p < kc; ++p) dst[p * NR + c] = c < cols ? src[p] : 0.0f;
+            }
+        } else if (cols == NR) {
+            const float* src = B + j;
+            for (int p = 0; p < kc; ++p) {
+                _mm256_storeu_ps(dst + p * NR, _mm256_loadu_ps(src + p * ldb));
+                _mm256_storeu_ps(dst + p * NR + 8, _mm256_loadu_ps(src + p * ldb + 8));
+            }
+        } else {
+            const float* src = B + j;
+            for (int p = 0; p < kc; ++p)
+                for (int c = 0; c < NR; ++c) dst[p * NR + c] = c < cols ? src[p * ldb + c] : 0.0f;
+        }
+    }
+}
+
+// ─── trans_b with few rows: dot products ─────────────────────────────────────
+inline float hsum8(__m256 v) noexcept {
+    const __m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    const __m128 t = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    return _mm_cvtss_f32(_mm_add_ss(t, _mm_movehdup_ps(t)));
+}
+
+/**
+ * dot_rows<J> — C[i][j..j+J) += alpha · Σ_p A[i][p] · B[j+c][p] for J <= 4 rows
+ * of B (stored N×K): x·Wᵀ for a few rows of x. Both operands are read along
+ * contiguous rows, 16 floats per step into 2 accumulators per output (8 for
+ * J = 4: enough to cover the FMA latency), masked loads for the K tail.
+ */
+template <int J>
+SIMD_ML_ALWAYS_INLINE void dot_rows(int K, const float* __restrict__ a, const float* __restrict__ B,
+                                    std::ptrdiff_t ldb, float* __restrict__ c, float alpha) noexcept {
+    __m256 acc[J][2];
+    for (int q = 0; q < J; ++q) acc[q][0] = acc[q][1] = _mm256_setzero_ps();
+    int p = 0;
+    for (; p + 16 <= K; p += 16) {
+        const __m256 a0 = _mm256_loadu_ps(a + p), a1 = _mm256_loadu_ps(a + p + 8);
+        for (int q = 0; q < J; ++q) {
+            acc[q][0] = _mm256_fmadd_ps(a0, _mm256_loadu_ps(B + q * ldb + p), acc[q][0]);
+            acc[q][1] = _mm256_fmadd_ps(a1, _mm256_loadu_ps(B + q * ldb + p + 8), acc[q][1]);
+        }
+    }
+    if (p < K) {
+        const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        const __m256i m0 = _mm256_cmpgt_epi32(_mm256_set1_epi32(K - p), lane);
+        const __m256i m1 = _mm256_cmpgt_epi32(_mm256_set1_epi32(K - p - 8), lane);
+        const __m256 a0 = _mm256_maskload_ps(a + p, m0), a1 = _mm256_maskload_ps(a + p + 8, m1);
+        for (int q = 0; q < J; ++q) {
+            acc[q][0] = _mm256_fmadd_ps(a0, _mm256_maskload_ps(B + q * ldb + p, m0), acc[q][0]);
+            acc[q][1] = _mm256_fmadd_ps(a1, _mm256_maskload_ps(B + q * ldb + p + 8, m1), acc[q][1]);
+        }
+    }
+    for (int q = 0; q < J; ++q) c[q] += alpha * hsum8(_mm256_add_ps(acc[q][0], acc[q][1]));
+}
+
+/** C (prescaled by beta) += alpha · A · Bᵀ, B stored N×K, row by row. */
+void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
+                      const float* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
+    for (int j = 0; j < N; j += 4) {          // 4 rows of B, reused for every row of A
+        const float* Bj = B + j * ldb;
+        for (int i = 0; i < M; ++i) {
+            const float* a = A + i * lda;
+            float* c = C + i * ldc + j;
+            switch (std::min(4, N - j)) {
+                case 4: dot_rows<4>(K, a, Bj, ldb, c, alpha); break;
+                case 3: dot_rows<3>(K, a, Bj, ldb, c, alpha); break;
+                case 2: dot_rows<2>(K, a, Bj, ldb, c, alpha); break;
+                default: dot_rows<1>(K, a, Bj, ldb, c, alpha); break;
+            }
+        }
+    }
+}
+
+// ─── Block sizes and buffers ─────────────────────────────────────────────────
+struct Blocking { int kc, mc, nc; };
+
+const Blocking& blocking() noexcept {
+    static const Blocking b = []() noexcept {
+        const dispatch::GemmBlocking g = dispatch::gemm_blocking(MR, NR);
+        return Blocking{g.kc, g.mc, g.nc};
+    }();
+    return b;
+}
+
+/**
+ * Per-thread packing buffers, grown on demand and kept for the thread's
+ * lifetime (at most (MC+6)·KC + KC·(NC+16) floats: 4.8 MiB with the Lunar
+ * Lake blocking). Allocating them per call cost 34 µs (2.1 MiB, WSL2/glibc).
+ */
+struct PackBuffers {
+    AlignedUniquePtr<float> a, b;
+    std::size_t a_cap = 0, b_cap = 0;
+    float* get_a(std::size_t n) {
+        if (n > a_cap) { a = make_aligned_array<float>(n); a_cap = n; }
+        return a.get();
+    }
+    float* get_b(std::size_t n) {
+        if (n > b_cap) { b = make_aligned_array<float>(n); b_cap = n; }
+        return b.get();
+    }
+};
+
+PackBuffers& thread_buffers() {
+    thread_local PackBuffers buf;
+    return buf;
+}
+
+/** Operands as the loops see them: op(A) is M×K, op(B) is K×N. */
+struct Operands {
+    const float* A; std::ptrdiff_t lda; bool ta;
+    const float* B; std::ptrdiff_t ldb; bool tb;
+    /** &op(A)(i, p) and &op(B)(p, j) */
+    const float* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
+    const float* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
+};
+
+/** Loops 2-5 for the column block op(B)[:, jc:jc+nc) (loop 1 is the caller). */
+void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands& op,
+                       float* C, std::ptrdiff_t ldc, const Blocking& bl) {
+    PackBuffers& buf = thread_buffers();
+    const int kc_max = std::min(K, bl.kc);
+    const int mc_max = std::min(M, bl.mc);
+    float* Bp = buf.get_b(static_cast<std::size_t>(kc_max) * ((nc + NR - 1) / NR * NR));
+    float* Ap = buf.get_a(static_cast<std::size_t>(kc_max) * ((mc_max + MR - 1) / MR * MR));
+
+    for (int pc = 0; pc < K; pc += bl.kc) {                       // loop 2
+        const int kc = std::min(K - pc, bl.kc);
+        pack_b(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
+        for (int ic = 0; ic < M; ic += bl.mc) {                   // loop 3
+            const int mc = std::min(M - ic, bl.mc);
+            pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
+            for (int jr = 0; jr < nc; jr += NR) {                 // loop 4
+                const int n = std::min(NR, nc - jr);
+                const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
+                for (int ir = 0; ir < mc; ir += MR) {             // loop 5
+                    run_tile_packed(std::min(MR, mc - ir), n, kc,
+                                    Ap + static_cast<std::ptrdiff_t>(ir) * kc, Bm,
+                                    C + (ic + ir) * ldc + jc + jr, ldc, alpha);
+                }
+            }
+        }
+    }
+}
+
+/** Direct path on op(A) in place (any trans_a) and B in place (no trans_b). */
+void direct(bool ta, int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
+            const float* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
+    const std::ptrdiff_t a_rs = ta ? 1 : lda, a_cs = ta ? lda : 1;
+    for (int i = 0; i < M; i += MR) {
+        const int rows = std::min(MR, M - i);
+        const float* Ai = ta ? A + i : A + i * lda;
+        for (int j = 0; j < N; j += NR) {
+            const int n = std::min(NR, N - j);
+            float* Cij = C + i * ldc + j;
+            if (rows == MR && n == NR)
+                kernel_6x16<MR, false, false>(K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
+            else if (n == NR)
+                run_tile_rows<false, false>(rows, K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
+            else
+                run_tile_rows<true, false>(rows, K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
+        }
+    }
+}
+
+enum class Path { direct, dot, packed };
+
+Path choose_path(bool ta, bool tb, int M, int N, int K) noexcept {
+    // trans_b without packing needs rows of B along K: the dot-product path,
+    // for a few rows of A (x·Wᵀ with a small batch). Dot vs packed, % of
+    // OpenBLAS with transb (Lunar Lake P-core): M=1 291/42, 4 169/39, 8 153/44
+    // (×4096×1024); 16×1024×1024 90/70, 24×… 78/74, 32×… 75/77, 64×… 80/84;
+    // 128³ 75/89. OpenBLAS's own transb GEMM is slow for M <= 8 (6 GFLOP/s at
+    // M = 1), so the dot path is well ahead there.
+    if (tb) return (!ta && M <= 16) ? Path::dot : Path::packed;
+    return sgemm_avx2_prefers_direct(M, N, K) ? Path::direct : Path::packed;
+}
+
+}  // namespace
+
 void scale_matrix_c(float* C, int M, int N, int ldc, float beta) noexcept {
     if (beta == 1.0f) return;
     for (int i = 0; i < M; ++i) {
-        float* row = C + i * ldc;
+        float* row = C + static_cast<std::ptrdiff_t>(i) * ldc;
         if (beta == 0.0f) {
-            std::fill(row, row + N, 0.0f);
+            std::fill(row, row + N, 0.0f);   // never multiply: C may hold NaN
         } else {
             for (int j = 0; j < N; ++j) row[j] *= beta;
         }
     }
 }
 
-// ─── Panel packing ────────────────────────────────────────────────────────────
-/**
- * pack_b_panel — Reorder B[k × n] into NR-column-major panel layout.
- *
- * Output layout: B_packed[block * k * NR + p * NR + j] = B[p][block*NR + j]
- *
- * This turns the strided column access of B into sequential streaming reads
- * in the inner kernel, enabling prefetch-friendly unit-stride loads.
- */
-void pack_b_panel(const float* B, int ldb, int k, int n, float* B_packed) {
-    for (int jc = 0; jc < n; jc += NR) {
-        int nr = std::min(NR, n - jc);
-        float* out_block = B_packed + (jc / NR) * k * NR;
-        for (int p = 0; p < k; ++p) {
-            const float* src = B + p * ldb + jc;
-            float* dst = out_block + p * NR;
-            if (nr == NR) {
-                _mm256_storeu_ps(dst, _mm256_loadu_ps(src));
-            } else {
-                for (int j = 0; j < nr; ++j) dst[j] = src[j];
-                for (int j = nr; j < NR; ++j) dst[j] = 0.0f;
-            }
-        }
-    }
+void sgemm_blocking_avx2(int* kc, int* mc, int* nc) noexcept {
+    const Blocking& b = blocking();
+    *kc = b.kc; *mc = b.mc; *nc = b.nc;
 }
 
-/**
- * pack_a_panel — Reorder A[m × k] into row-major micro-panel layout.
- *
- * Output layout: A_packed[i * k + p] = A[i][p]
- *
- * Each MR-row micro-tile of A becomes contiguous in memory, enabling
- * sequential scalar loads of A[i][p] during the inner kernel's k-loop.
- */
-void pack_a_panel(const float* A, int lda, int m, int k, float* A_packed) {
-    for (int i = 0; i < m; ++i) {
-        const float* src = A + i * lda;
-        float* dst = A_packed + i * k;
-        std::memcpy(dst, src, sizeof(float) * static_cast<std::size_t>(k));
-    }
+bool sgemm_avx2_prefers_direct(int M, int N, int K) noexcept {
+    // Packing copies M·K + K·N floats once per call. Both paths on the same
+    // 6×16 kernel, % of OpenBLAS (Lunar Lake P-core, interleaved, median of 31):
+    //   square 32: direct 97 / packed 89;  64: 93 / 86;  96: 81 / 90;
+    //   128: 74 / 93 (direct loses most at power-of-two ldb: B rows 512 B or
+    //   1 KiB apart fall into 8 or 4 of the 64 L1 sets);  256: 70 / 98;
+    //   1024×16×1024: 101 / 79;  256×256×32: 76 / 96;  1×4096×1024: 76 / 54;
+    //   6×4096×1024: 58 / 66;  7×4096×1024: 47 / 72;  48×1024×1024: 64 / 96.
+    // So: direct for products up to ~80³, for N within one 16-wide panel, and
+    // for a single row (M = 1, GEMV: packing B costs as much as using it).
+    return M == 1 || N <= NR || static_cast<long long>(M) * N * K <= 80LL * 80 * 80;
 }
 
-// ─── Scalar edge-block fallback ───────────────────────────────────────────────
-/**
- * gemm_scalar_block — Accumulate a partial mr×nr block of C.
- * Used for tail blocks where mr < MR or nr < NR.
- * Iterates in p-major order so the FP addition sequence matches the reference.
- */
-static void gemm_scalar_block(int mr, int nr, int kc,
-                               const float* __restrict__ A_packed,
-                               const float* __restrict__ B_packed,
-                               float*       __restrict__ C, int ldc,
-                               float alpha) noexcept {
-    for (int i = 0; i < mr; ++i) {
-        float* c_row = C + i * ldc;
-        const float* a_row = A_packed + i * kc;
-        for (int p = 0; p < kc; ++p) {
-            float a_val = a_row[p];
-            const float* b_col = B_packed + p * NR;
-            for (int j = 0; j < nr; ++j) {
-                c_row[j] += alpha * (a_val * b_col[j]);
-            }
-        }
-    }
-}
-
-// ─── 8×8 AVX2 Micro-kernel ───────────────────────────────────────────────────
-/**
- * inner_kernel_8x8 — Compute C[0..7][0..7] += alpha * A[0..7][0..kc-1] × B[0..kc-1][0..7]
- *
- * Register allocation:
- *   acc0..acc7  — 8 YMM accumulator registers (8 rows × 1 YMM each)
- *   c0..c7      — 8 YMM registers for reading existing C values
- *   b           — 1 YMM for B panel column
- *
- * Pattern: for each k, broadcast one scalar from each A row and FMA against B.
- * This gives 8 FMAs per k-step (8 rows × 1 column), utilizing 2 FMA ports.
- *
- * Software prefetching: pull B panel 4 rows ahead to hide L2→L1 latency
- * (Skylake L2 fill ≈ 12 cycles; at 0.5 cy/FMA × 8 FMAs = 4 cycles/step).
- */
-void inner_kernel_8x8(const float* __restrict__ A_packed,
-                       const float* __restrict__ B_packed,
-                       float*       __restrict__ C, int ldc,
-                       int k_rem, float alpha) noexcept {
-    // Load existing C values
-    __m256 c0 = _mm256_loadu_ps(C + 0 * ldc);
-    __m256 c1 = _mm256_loadu_ps(C + 1 * ldc);
-    __m256 c2 = _mm256_loadu_ps(C + 2 * ldc);
-    __m256 c3 = _mm256_loadu_ps(C + 3 * ldc);
-    __m256 c4 = _mm256_loadu_ps(C + 4 * ldc);
-    __m256 c5 = _mm256_loadu_ps(C + 5 * ldc);
-    __m256 c6 = _mm256_loadu_ps(C + 6 * ldc);
-    __m256 c7 = _mm256_loadu_ps(C + 7 * ldc);
-
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    __m256 acc2 = _mm256_setzero_ps();
-    __m256 acc3 = _mm256_setzero_ps();
-    __m256 acc4 = _mm256_setzero_ps();
-    __m256 acc5 = _mm256_setzero_ps();
-    __m256 acc6 = _mm256_setzero_ps();
-    __m256 acc7 = _mm256_setzero_ps();
-
-    // Row pointers into packed A (each row is k_rem scalars, contiguous)
-    const float* a0 = A_packed + 0 * k_rem;
-    const float* a1 = A_packed + 1 * k_rem;
-    const float* a2 = A_packed + 2 * k_rem;
-    const float* a3 = A_packed + 3 * k_rem;
-    const float* a4 = A_packed + 4 * k_rem;
-    const float* a5 = A_packed + 5 * k_rem;
-    const float* a6 = A_packed + 6 * k_rem;
-    const float* a7 = A_packed + 7 * k_rem;
-
-    const float* b_ptr = B_packed;
-
-    // Unrolled ×4 to reduce branch overhead and expose ILP to the scheduler.
-    // Each unrolled group: 4 B loads, 32 FMAs.
-    int p = 0;
-    for (; p <= k_rem - 4; p += 4) {
-        // Prefetch B 4 rows ahead (4×NR×4 bytes = 128 bytes = 2 cache lines)
-        prefetch_l1(b_ptr + 4 * NR);
-
-        // k = p+0
-        __m256 b0 = _mm256_loadu_ps(b_ptr);  b_ptr += NR;
-        acc0 = _mm256_fmadd_ps(_mm256_set1_ps(a0[p+0]), b0, acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_set1_ps(a1[p+0]), b0, acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_set1_ps(a2[p+0]), b0, acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_set1_ps(a3[p+0]), b0, acc3);
-        acc4 = _mm256_fmadd_ps(_mm256_set1_ps(a4[p+0]), b0, acc4);
-        acc5 = _mm256_fmadd_ps(_mm256_set1_ps(a5[p+0]), b0, acc5);
-        acc6 = _mm256_fmadd_ps(_mm256_set1_ps(a6[p+0]), b0, acc6);
-        acc7 = _mm256_fmadd_ps(_mm256_set1_ps(a7[p+0]), b0, acc7);
-
-        // k = p+1
-        __m256 b1 = _mm256_loadu_ps(b_ptr);  b_ptr += NR;
-        acc0 = _mm256_fmadd_ps(_mm256_set1_ps(a0[p+1]), b1, acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_set1_ps(a1[p+1]), b1, acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_set1_ps(a2[p+1]), b1, acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_set1_ps(a3[p+1]), b1, acc3);
-        acc4 = _mm256_fmadd_ps(_mm256_set1_ps(a4[p+1]), b1, acc4);
-        acc5 = _mm256_fmadd_ps(_mm256_set1_ps(a5[p+1]), b1, acc5);
-        acc6 = _mm256_fmadd_ps(_mm256_set1_ps(a6[p+1]), b1, acc6);
-        acc7 = _mm256_fmadd_ps(_mm256_set1_ps(a7[p+1]), b1, acc7);
-
-        // k = p+2
-        __m256 b2 = _mm256_loadu_ps(b_ptr);  b_ptr += NR;
-        acc0 = _mm256_fmadd_ps(_mm256_set1_ps(a0[p+2]), b2, acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_set1_ps(a1[p+2]), b2, acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_set1_ps(a2[p+2]), b2, acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_set1_ps(a3[p+2]), b2, acc3);
-        acc4 = _mm256_fmadd_ps(_mm256_set1_ps(a4[p+2]), b2, acc4);
-        acc5 = _mm256_fmadd_ps(_mm256_set1_ps(a5[p+2]), b2, acc5);
-        acc6 = _mm256_fmadd_ps(_mm256_set1_ps(a6[p+2]), b2, acc6);
-        acc7 = _mm256_fmadd_ps(_mm256_set1_ps(a7[p+2]), b2, acc7);
-
-        // k = p+3
-        __m256 b3 = _mm256_loadu_ps(b_ptr);  b_ptr += NR;
-        acc0 = _mm256_fmadd_ps(_mm256_set1_ps(a0[p+3]), b3, acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_set1_ps(a1[p+3]), b3, acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_set1_ps(a2[p+3]), b3, acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_set1_ps(a3[p+3]), b3, acc3);
-        acc4 = _mm256_fmadd_ps(_mm256_set1_ps(a4[p+3]), b3, acc4);
-        acc5 = _mm256_fmadd_ps(_mm256_set1_ps(a5[p+3]), b3, acc5);
-        acc6 = _mm256_fmadd_ps(_mm256_set1_ps(a6[p+3]), b3, acc6);
-        acc7 = _mm256_fmadd_ps(_mm256_set1_ps(a7[p+3]), b3, acc7);
-    }
-    // Scalar tail for remaining p iterations
-    for (; p < k_rem; ++p) {
-        __m256 b = _mm256_loadu_ps(b_ptr);  b_ptr += NR;
-        acc0 = _mm256_fmadd_ps(_mm256_set1_ps(a0[p]), b, acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_set1_ps(a1[p]), b, acc1);
-        acc2 = _mm256_fmadd_ps(_mm256_set1_ps(a2[p]), b, acc2);
-        acc3 = _mm256_fmadd_ps(_mm256_set1_ps(a3[p]), b, acc3);
-        acc4 = _mm256_fmadd_ps(_mm256_set1_ps(a4[p]), b, acc4);
-        acc5 = _mm256_fmadd_ps(_mm256_set1_ps(a5[p]), b, acc5);
-        acc6 = _mm256_fmadd_ps(_mm256_set1_ps(a6[p]), b, acc6);
-        acc7 = _mm256_fmadd_ps(_mm256_set1_ps(a7[p]), b, acc7);
-    }
-
-    // Apply alpha scaling (branch-free when alpha == 1.0f via FP comparison)
-    if (alpha != 1.0f) {
-        __m256 av = _mm256_set1_ps(alpha);
-        acc0 = _mm256_mul_ps(acc0, av);  acc1 = _mm256_mul_ps(acc1, av);
-        acc2 = _mm256_mul_ps(acc2, av);  acc3 = _mm256_mul_ps(acc3, av);
-        acc4 = _mm256_mul_ps(acc4, av);  acc5 = _mm256_mul_ps(acc5, av);
-        acc6 = _mm256_mul_ps(acc6, av);  acc7 = _mm256_mul_ps(acc7, av);
-    }
-
-    // Accumulate into C (C += alpha * acc)
-    _mm256_storeu_ps(C + 0 * ldc, _mm256_add_ps(c0, acc0));
-    _mm256_storeu_ps(C + 1 * ldc, _mm256_add_ps(c1, acc1));
-    _mm256_storeu_ps(C + 2 * ldc, _mm256_add_ps(c2, acc2));
-    _mm256_storeu_ps(C + 3 * ldc, _mm256_add_ps(c3, acc3));
-    _mm256_storeu_ps(C + 4 * ldc, _mm256_add_ps(c4, acc4));
-    _mm256_storeu_ps(C + 5 * ldc, _mm256_add_ps(c5, acc5));
-    _mm256_storeu_ps(C + 6 * ldc, _mm256_add_ps(c6, acc6));
-    _mm256_storeu_ps(C + 7 * ldc, _mm256_add_ps(c7, acc7));
-}
-
-// ─── Small-matrix direct path (no packing) ───────────────────────────────────
-/**
- * sgemm_direct_avx2 — AVX2 GEMM without panel packing.
- *
- * Intended for small matrices where A, B, C together fit in L2 cache.
- * In that regime, allocating the fixed-size KC×NC packing buffer (≈2 MB
- * regardless of actual N) and filling it takes longer than the arithmetic
- * itself — sgemm_packed benchmarks at ~0.7× naive scalar at N=64.
- *
- * This function processes the output matrix row-by-row (i-loop), vectorising
- * the N dimension with AVX2 (NR=8 floats / __m256 per iteration):
- *
- *   for i in [0, M):
- *     for j in [0, N) step NR:
- *       acc[0..NR-1] = Σ_p  A[i][p] * B[p][j..j+NR-1]   (FMA, p-loop)
- *       C[i][j..j+NR-1] = alpha * acc + beta * C[i][j..j+NR-1]
- *     tail scalar for N % NR remaining columns
- *
- * B is accessed with stride ldb between k-steps — normally cache-unfriendly
- * for large matrices (hence packing). For max(M,N,K) ≤ 128, the entire B
- * fits in L2 (~64 KB at N=128, K=128), so hardware prefetch easily handles
- * the stride and there are no effective cache misses.
- *
- * beta=0.0 is handled by zeroing C in the pre-pass, matching sgemm_packed's
- * semantics (beta=0 must overwrite even NaN values in C — never multiply them).
- */
-void sgemm_direct_avx2(int M, int N, int K,
-                        float alpha,
-                        const float* __restrict__ A, int lda,
-                        const float* __restrict__ B, int ldb,
-                        float beta,
-                        float*       __restrict__ C, int ldc) noexcept {
-    // beta pre-pass: C ← beta * C  (matches scale_matrix_c in sgemm_packed)
-    if (beta != 1.0f) {
-        for (int i = 0; i < M; ++i) {
-            float* crow = C + static_cast<std::size_t>(i) * ldc;
-            if (beta == 0.0f) {
-                std::fill(crow, crow + N, 0.0f);  // explicit zero — never multiply NaN
-            } else {
-                for (int j = 0; j < N; ++j) crow[j] *= beta;
-            }
-        }
-    }
-
-    const __m256 alpha_v = _mm256_set1_ps(alpha);
-
-    for (int i = 0; i < M; ++i) {
-        const float* a_row = A + static_cast<std::size_t>(i) * lda;
-        float*       c_row = C + static_cast<std::size_t>(i) * ldc;
-
-        // ── Vectorised NR=8 columns per iteration ────────────────────────────
-        // Inner k-loop: broadcast scalar a[i][p] and FMA against b[p][j..j+7].
-        // B[p*ldb + j] is strided (ldb floats between k-steps); at small N
-        // the full B matrix fits in L1/L2, so hardware prefetch is sufficient.
-        int j = 0;
-        for (; j + NR <= N; j += NR) {
-            __m256 acc = _mm256_setzero_ps();
-            for (int p = 0; p < K; ++p) {
-                acc = _mm256_fmadd_ps(
-                    _mm256_set1_ps(a_row[p]),
-                    _mm256_loadu_ps(B + static_cast<std::size_t>(p) * ldb + j),
-                    acc);
-            }
-            if (alpha != 1.0f) acc = _mm256_mul_ps(acc, alpha_v);
-            // C[i][j..j+7] += alpha * acc
-            _mm256_storeu_ps(c_row + j,
-                _mm256_add_ps(_mm256_loadu_ps(c_row + j), acc));
-        }
-        // ── Scalar tail for remaining N % NR columns ──────────────────────────
-        for (; j < N; ++j) {
-            float sum = 0.0f;
-            for (int p = 0; p < K; ++p)
-                sum += a_row[p] * B[static_cast<std::size_t>(p) * ldb + j];
-            c_row[j] += alpha * sum;
-        }
-    }
-}
-
-// ─── sgemm_packed: 5-loop Goto/BLIS GEMM ─────────────────────────────────────
-/**
- * sgemm_packed_avx2 — C = alpha*A*B + beta*C (float32, row-major), 8×8 AVX2 kernel
- *
- * Implements the standard Goto (2008) / BLIS 5-loop + 2 packing routines.
- *
- * Loop order (outermost to innermost):
- *   Loop 1 (jc): N in NC-wide tiles — parallelised with OpenMP
- *   Loop 2 (pc): K in KC-wide tiles — B packed here (L2-resident)
- *   Loop 3 (ic): M in MC-wide tiles — A packed here (L2-resident)
- *   Loop 4 (jr): nc in NR-wide tiles  } micro-kernel register tile
- *   Loop 5 (ir): mc in MR-wide tiles  }
- *
- * Packing buffers: allocated ONCE per call outside all loops, reused across
- * all panel iterations. Size is bounded by max tile dimensions (KC×NC for B,
- * MC×KC for A), regardless of actual matrix size.
- */
-void sgemm_packed_avx2(int M, int N, int K,
-                       float alpha,
-                       const float* __restrict__ A, int lda,
-                       const float* __restrict__ B, int ldb,
-                       float beta,
-                       float*       __restrict__ C, int ldc) {
-    // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
-    // Both paths apply beta first and then run no K iterations.
+void sgemm_direct_avx2(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
+                       const float* A, int lda, const float* B, int ldb, float beta,
+                       float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
+    scale_matrix_c(C, M, N, ldc, beta);
+    if (K == 0) return;
+    if (trans_b && !trans_a)
+        gemm_dot_trans_b(M, N, K, alpha, A, lda, B, ldb, C, ldc);
+    else if (!trans_b)
+        direct(trans_a, M, N, K, alpha, A, lda, B, ldb, C, ldc);
+    else  // both transposed: packing handles it
+        sgemm_packed_avx2(trans_a, trans_b, M, N, K, alpha, A, lda, B, ldb, 1.0f, C, ldc);
+}
 
-    // ── Small-matrix fast path: skip panel packing ────────────────────────────
-    // sgemm_packed's packing buffers are fixed-size KC×NC ≈ 2 MB regardless of
-    // actual N. When all dimensions fit in L2 (max(M,N,K) ≤ SMALL_GEMM_THRESHOLD),
-    // allocating and filling those buffers costs more than the arithmetic:
-    // measured at ~0.7× naive scalar at N=64 (see BENCHMARKS.md §Positioning vs
-    // OpenBLAS). sgemm_direct_avx2 uses the original strides, achieving
-    // hardware-prefetch-friendly access because the entire working set is in L2.
-    if (std::max({M, N, K}) <= SMALL_GEMM_THRESHOLD) {
-        sgemm_direct_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+void sgemm_packed_avx2(bool trans_a, bool trans_b, int M, int N, int K,
+                       float alpha,
+                       const float* A, int lda,
+                       const float* B, int ldb,
+                       float beta,
+                       float* C, int ldc) {
+    // K == 0 is valid (BLAS semantics): A·B is empty, so C = beta·C.
+    if (M <= 0 || N <= 0 || K < 0) return;
+    const Path path = choose_path(trans_a, trans_b, M, N, K);
+    if (path != Path::packed) {
+        sgemm_direct_avx2(trans_a, trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
-
     scale_matrix_c(C, M, N, ldc, beta);
+    if (K == 0) return;
+    const Blocking& bl = blocking();
+    const Operands op{A, lda, trans_a, B, ldb, trans_b};
 
-    // Buffer sizes (fixed, independent of actual M/N/K):
-    //   B_packed: KC × ceil(NC/NR) × NR floats
-    //   A_packed: MC × KC floats
-    const std::size_t b_buf_size = static_cast<std::size_t>(KC) *
-                                   static_cast<std::size_t>((NC + NR - 1) / NR) * NR;
-    const std::size_t a_buf_size = static_cast<std::size_t>(MC) *
-                                   static_cast<std::size_t>(KC);
-
+    // Loop 1 (jc): NC-wide column blocks, one per OpenMP thread.
 #ifdef SIMD_ML_OPENMP
-    // Thread-local buffers: each OpenMP thread gets its own A_packed/B_packed
-    // so there is no false sharing on the packing writes (which are hot).
-    struct ThreadBuffers {
-        ThreadBuffers()
-            : B_packed(make_aligned_array<float>(
-                  static_cast<std::size_t>(KC) *
-                  static_cast<std::size_t>((NC + NR - 1) / NR) * NR)),
-              A_packed(make_aligned_array<float>(
-                  static_cast<std::size_t>(MC) *
-                  static_cast<std::size_t>(KC))) {}
-        AlignedUniquePtr<float> B_packed;
-        AlignedUniquePtr<float> A_packed;
-    };
-    thread_local ThreadBuffers tls_bufs;
-
 #pragma omp parallel for schedule(dynamic, 1) \
     num_threads(get_num_threads()) if (get_num_threads() > 1)
-    for (int jc = 0; jc < N; jc += NC) {
-        int nc = std::min(N - jc, NC);
-        float* B_packed = tls_bufs.B_packed.get();
-        float* A_packed = tls_bufs.A_packed.get();
-
-        for (int pc = 0; pc < K; pc += KC) {
-            int kc = std::min(K - pc, KC);
-            pack_b_panel(B + static_cast<std::size_t>(pc) * ldb + jc,
-                         ldb, kc, nc, B_packed);
-
-            for (int ic = 0; ic < M; ic += MC) {
-                int mc = std::min(M - ic, MC);
-                pack_a_panel(A + static_cast<std::size_t>(ic) * lda + pc,
-                             lda, mc, kc, A_packed);
-
-                for (int jr = 0; jr < nc; jr += NR) {
-                    int nr = std::min(nc - jr, NR);
-                    const float* B_block = B_packed +
-                                           static_cast<std::size_t>(jr / NR) * kc * NR;
-                    for (int ir = 0; ir < mc; ir += MR) {
-                        int mr = std::min(mc - ir, MR);
-                        const float* A_block = A_packed +
-                                               static_cast<std::size_t>(ir) * kc;
-                        float* C_block = C + static_cast<std::size_t>(ic + ir) * ldc
-                                           + jc + jr;
-                        if (mr == MR && nr == NR) {
-                            inner_kernel_8x8(A_block, B_block, C_block, ldc, kc, alpha);
-                        } else {
-                            gemm_scalar_block(mr, nr, kc, A_block, B_block,
-                                              C_block, ldc, alpha);
-                        }
-                    }
-                }
-            }
-        }
-    }
-#else
-    // Single-threaded path: allocate buffers once, reuse for all panels.
-    // This is the critical correctness fix: earlier code allocated inside the
-    // k-loop, causing O(K/KC × N/NC) heap allocations per GEMM call.
-    auto B_packed_storage = make_aligned_array<float>(b_buf_size);
-    auto A_packed_storage = make_aligned_array<float>(a_buf_size);
-    float* B_packed = B_packed_storage.get();
-    float* A_packed = A_packed_storage.get();
-
-    for (int jc = 0; jc < N; jc += NC) {
-        int nc = std::min(N - jc, NC);
-
-        for (int pc = 0; pc < K; pc += KC) {
-            int kc = std::min(K - pc, KC);
-            pack_b_panel(B + static_cast<std::size_t>(pc) * ldb + jc,
-                         ldb, kc, nc, B_packed);
-
-            for (int ic = 0; ic < M; ic += MC) {
-                int mc = std::min(M - ic, MC);
-                pack_a_panel(A + static_cast<std::size_t>(ic) * lda + pc,
-                             lda, mc, kc, A_packed);
-
-                for (int jr = 0; jr < nc; jr += NR) {
-                    int nr = std::min(nc - jr, NR);
-                    const float* B_block = B_packed +
-                                           static_cast<std::size_t>(jr / NR) * kc * NR;
-                    for (int ir = 0; ir < mc; ir += MR) {
-                        int mr = std::min(mc - ir, MR);
-                        const float* A_block = A_packed +
-                                               static_cast<std::size_t>(ir) * kc;
-                        float* C_block = C + static_cast<std::size_t>(ic + ir) * ldc
-                                           + jc + jr;
-                        if (mr == MR && nr == NR) {
-                            inner_kernel_8x8(A_block, B_block, C_block, ldc, kc, alpha);
-                        } else {
-                            gemm_scalar_block(mr, nr, kc, A_block, B_block,
-                                              C_block, ldc, alpha);
-                        }
-                    }
-                }
-            }
-        }
-    }
-#endif  // SIMD_ML_OPENMP
+#endif
+    for (int jc = 0; jc < N; jc += bl.nc)
+        gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
 }
 
 }  // namespace gemm

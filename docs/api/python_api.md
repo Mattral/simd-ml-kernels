@@ -35,9 +35,20 @@ C = simd_ml_kernels.sgemm(A, B)
 
 # In-place with scaling: C = 2*A@B + 0.5*C
 simd_ml_kernels.sgemm(A, B, C, alpha=2.0, beta=0.5)
+
+# Transposed operands, no copy (BLAS transa/transb): a linear layer with W
+# stored [out_features, in_features], as torch.nn.Linear stores it
+W = np.random.randn(128, 512).astype(np.float32)
+y = simd_ml_kernels.sgemm(A, W, trans_b=True)          # A @ W.T, shape [256, 128]
 ```
 
-**Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 AVX2 or 8×16 AVX-512 register tile; a plain loop in the scalar table). See `docs/DESIGN.md` §2.
+`trans_a` / `trans_b` (keyword-only) mean A is stored `[K, M]` / B is stored
+`[N, K]`. The transpose is read while packing the panels (8×8 register
+transposes for B), or, for `trans_b` with `M ≤ 16`, by a dot-product path
+along rows of A and B. `examples/linear_trans_b.py` runs both and checks them
+against PyTorch.
+
+**Implementation**: a 6×16 AVX2 register tile (12 accumulators) run on A and B in place for small products and inside the Goto/BLIS 5 loops with packed panels otherwise, block sizes from the CPU caches (`build_info()["sgemm_blocking"]`); 12×32 (24 accumulators) on AVX-512; a plain loop in the scalar table. See `docs/DESIGN.md` §2.
 
 ### `GEMMConfig` — callable GEMM configuration object
 
@@ -69,8 +80,8 @@ argument:
 ```python
 C = simd_ml_kernels.sgemm(A, B)                 # "" = the table chosen for this CPU
 C = simd_ml_kernels.sgemm(A, B, isa="scalar")   # portable C++ kernel
-C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # 8×8 AVX2 kernel
-C = simd_ml_kernels.sgemm(A, B, isa="avx512")   # 8×16 AVX-512 kernel
+C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # 6×16 AVX2 kernel
+C = simd_ml_kernels.sgemm(A, B, isa="avx512")   # 12×32 AVX-512 kernel
 ```
 
 `isa=` runs that kernel table for this call only, e.g. to compare AVX2 and
@@ -126,8 +137,8 @@ y = simd_ml_kernels.relu(x)
 ### `silu(x) → np.ndarray`
 
 SiLU/Swish activation: `output[i] = x[i] * sigmoid(x[i])`.  
-Implemented as `x · 0.5·(1 + tanh(x/2))` using the Cody–Waite fast tanh.  
-Max absolute error vs float64: ≤ 2e-6 (asserted by `selftest`; measured 1.2e-6 on [−10, 10]). Relative error is larger for |output| ≪ 1.
+Implemented as `x / (1 + exp(−x))` with the Cody–Waite `exp` and a correctly rounded division.  
+Error vs float64: `|err| ≤ 1e-35 + 1e-6·|SiLU(x)|` for every finite `x` (asserted by the tests and `selftest`; measured 2.9e-7 relative and 1.3e-6 absolute over all finite floats, AVX2 kernel). `silu(+inf) = +inf`, `silu(-inf) = NaN` (as PyTorch), and `x < −88` returns −0 (`|SiLU(x)| < 1.5e-36` there).
 
 ```python
 y = simd_ml_kernels.silu(x)
