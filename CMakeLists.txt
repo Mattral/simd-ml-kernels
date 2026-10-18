@@ -106,12 +106,10 @@ set(SIMD_ML_AVX2_SRCS
     src/kernels/activations/silu_avx2.cpp
     src/kernels/activations/softmax_avx2.cpp
     src/kernels/activations/layer_norm_avx2.cpp
-    src/kernels/avx_matmul.cpp
 )
 set(SIMD_ML_AVX512_SRCS
     src/kernels/kernels_avx512.cpp
     src/kernels/gemm/avx512_gemm_packed.cpp
-    src/kernels/avx_matmul_avx512.cpp
 )
 
 set(SIMD_ML_ISAS scalar)
@@ -274,7 +272,7 @@ install(TARGETS simd_ml_kernels_lib
 )
 
 # ── Public headers ───────────────────────────────────────────────────────────
-# Install kernel headers (avx_matmul.hpp, intrinsic_gelu.hpp, etc.)
+# Install kernel headers (gemm/avx2_gemm_packed.hpp, intrinsic_gelu.hpp, etc.)
 # Headers install into ${prefix}/include/simd_ml_kernels/ so that consumers can
 # write:  #include <simd_ml_kernels/gemm/avx2_gemm_packed.hpp>
 # The INSTALL_INTERFACE include path is ${CMAKE_INSTALL_INCLUDEDIR} (see above),

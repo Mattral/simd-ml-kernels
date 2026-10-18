@@ -16,6 +16,7 @@
 #include "../kernels/gemm/f16_gemm.hpp"
 #include "../kernels/gemm/bf16_gemm.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -113,6 +114,31 @@ std::vector<CacheLevel> detect_caches() {
     }
 #endif
     return out;
+}
+
+GemmBlocking gemm_blocking(int mr, int nr) noexcept {
+    unsigned l1d = 0, l2 = 0, llc = 0;
+    try {
+        for (const CacheLevel& c : detect_caches()) {
+            if (c.type == 'I') continue;
+            if (c.level == 1) l1d = c.size_kib;
+            else if (c.level == 2) l2 = c.size_kib;
+            if (c.level >= 2) llc = std::max(llc, c.size_kib);  // no L3: the L2 is the LLC
+        }
+    } catch (...) {  // std::bad_alloc from the vector: keep the defaults
+    }
+    GemmBlocking b{};
+    b.l1d_kib = l1d; b.l2_kib = l2; b.llc_kib = llc;
+    const long long L1 = (l1d ? l1d : 32) * 1024LL, L2 = (l2 ? l2 : 256) * 1024LL,
+                    LLC = (llc ? llc : 8192) * 1024LL;
+    auto round_down = [](long long v, int m) { return v / m * m; };
+    const long long kc = std::clamp(round_down(L1 / 2 / (nr * 4LL), 8), 64LL, 1024LL);
+    const long long mc = std::clamp(round_down(L2 / 4 / (kc * 4), mr), (long long)mr, 2048LL / mr * mr);
+    const long long nc = std::clamp(round_down(LLC / 2 / (kc * 4), nr), (long long)nr, 8192LL / nr * nr);
+    b.kc = static_cast<int>(kc);
+    b.mc = static_cast<int>(mc);
+    b.nc = static_cast<int>(nc);
+    return b;
 }
 
 }  // namespace dispatch

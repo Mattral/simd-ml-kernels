@@ -213,8 +213,9 @@ def get_num_threads() -> int:
 def build_info() -> dict[str, Any]:
     """Build details: version, git_commit, compiler, isa_compiled and isa_usable
     (space-separated table names), isa_flags (table -> compiler flags),
-    runtime_isa (the active table), kernel_flags and sgemm_tile (of that
-    table), openmp, alignment, build_timestamp."""
+    runtime_isa (the active table), kernel_flags, sgemm_tile and sgemm_blocking
+    ({kc, mc, nc}, derived from the CPU caches; 0 = not blocked) of that table,
+    openmp, alignment, build_timestamp."""
     ...
 
 

@@ -140,6 +140,10 @@ class TestGEMM:
         (33,  17,  5),    # non-power-of-2
         (1,   4096, 128), # skinny M (typical attention projection)
         (7,   7,   7),    # odd sizes
+        (5,   15,  3),    # one partial 6x16 tile (direct path)
+        (13,  33,  385),  # row/column tails past a 6x16 multiple, K > KC = 384 (packed)
+        (97,  113, 769),  # K = 2*384 + 1: three KC panels on a 48 KiB-L1 core
+        (431, 40,  50),   # M > MC = 426 on a 2.5 MiB-L2 core
     ])
     def test_sgemm_vs_numpy(self, M, N, K):
         A = rand_matrix(M, K)

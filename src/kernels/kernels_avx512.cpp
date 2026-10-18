@@ -23,6 +23,7 @@ namespace simd_ml {
 const KernelTable& kernel_table_avx512() noexcept {
     static const KernelTable t = {
         Isa::avx512, "avx512", SIMD_ML_UNIT_FLAGS, "8x16 (8 ZMM accumulators)",
+        &gemm::sgemm_blocking_avx512,
         &gemm::sgemm_packed_avx512, &gemm::sgemm_f16_avx2, &gemm::sgemm_bf16_avx2,
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,

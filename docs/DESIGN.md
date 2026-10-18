@@ -21,12 +21,10 @@ pybind11 src/bindings/pybind_entry.cpp: dtype/shape/layout checks, GIL release, 
 Dispatch src/dispatch/: CPUID + XGETBV, one KernelTable per ISA, selection (§6)
            │
 Kernels  scalar unit   scalar_kernels.cpp                 every kernel, portable C++
-         AVX2 units    gemm/avx2_gemm_packed.cpp           FP32 GEMM: small-matrix path, 8×8 kernel
+         AVX2 units    gemm/avx2_gemm_packed.cpp           FP32 GEMM: 6×16 kernel, direct and packed
                        gemm/{f16,bf16}_gemm.cpp            FP16- / BF16-input GEMM (unpacked, see §4)
                        intrinsic_gelu.cpp, activations/    GeLU, ReLU, SiLU, softmax, LayerNorm
-                       avx_matmul.cpp                      second FP32 GEMM (6×16), C++ only
          AVX-512 units gemm/avx512_gemm_packed.cpp         FP32 GEMM, 8×16 kernel
-                       avx_matmul_avx512.cpp               6×32 kernel of the second GEMM
            │
 Shared   simd_math.hpp (fast_exp_avx2, tanh_avx2), cache_alloc.hpp (aligned allocation, prefetch)
 ```
@@ -43,104 +41,103 @@ active table. Kernels never throw and never allocate Python objects.
 `sgemm(A, B, C, alpha, beta)` computes `C = alpha·A·B + beta·C`, row-major,
 through the active kernel table (§6).
 
-### 2.1 Small matrices: no packing
+### 2.1 One micro-kernel, two ways to feed it
 
-If `max(M, N, K) ≤ 128` (`SMALL_GEMM_THRESHOLD`), `sgemm_direct_avx2` runs
-instead: for each row of C and each 8-column strip, one YMM accumulator
-collects `Σ_p A[i][p]·B[p][j:j+8]` directly from the unpacked inputs. At
-N = 128, A + B + C are 192 KiB, inside the L2 of any recent core, so strided B
-reads hit in cache. The K loop of one strip is a single chain of dependent
-FMAs (one accumulator; GCC 13 emits one `vfmadd231ps` per iteration), so one
-strip alone runs at one FMA per 4-cycle latency, 4 of the 32 flop/cycle an
-AVX2 core can do. Only the out-of-order window overlaps neighbouring strips:
-the reference laptop measures 6.1 flop/cycle at N = 128, about a quarter of
-OpenBLAS (BENCHMARKS.md). A register-blocked kernel without packing is the
-first target of W3 (ROADMAP).
+The AVX2 table has one micro-kernel, 6×16 (`kernel_6x16` in
+`avx2_gemm_packed.cpp`): 6 rows of C × two YMM vectors = 12 accumulators. It
+reads `A(r, p)` at `A[r·a_rs + p·a_cs]` and row `p` of B at `B + p·b_rs`, so the
+same code runs
 
-### 2.2 Large matrices: Goto/BLIS 5 loops
+- **direct**, on A and B in place (`a_rs = lda`, `a_cs = 1`, `b_rs = ldb`), and
+- **packed**, on the micro-panels of §2.2 (`a_rs = 1`, `a_cs = 6`, `b_rs = 16`;
+  this instantiation has the strides as compile-time constants, which the
+  packed path needs to reach its speed; the comment at the kernel has the
+  measurement).
+
+`sgemm_avx2_prefers_direct(M, N, K)` picks direct for products up to 80³, for
+`N ≤ 16` (one panel of columns) and for `M = 1` (each element of B is used
+once, so packing it costs as much as using it). The cut-off was measured with
+both paths on the same kernel; the numbers are in the function's comment.
+Row and column remainders use the same kernel with fewer rows (a template
+parameter, 1-6) and masked B loads and C accesses (`n < 16`), so nothing
+outside C's `M × N` window is read or written.
+
+Before this design (until 0.2.0) small products (`max(M, N, K) ≤ 128`) ran a
+loop with one accumulator per 8 columns, a chain of dependent FMAs bound by
+FMA latency, and every packed call allocated and freed its 2.1 MiB packing
+buffers.
+
+### 2.2 Goto/BLIS 5 loops
 
 ```
-for jc in 0..N step NC:            B panel  KC×NC, packed once per (jc, pc)
+for jc in 0..N step NC:                  (OpenMP: one jc block per thread)
   for pc in 0..K step KC:
-    pack_b_panel(B[pc:pc+KC, jc:jc+NC])     → NR-wide column blocks
+    pack_b(B[pc:pc+KC, jc:jc+NC])        → 16-column micro-panels, KC×16 each
     for ic in 0..M step MC:
-      pack_a_panel(A[ic:ic+MC, pc:pc+KC])   → row-major MC×KC
-      for jr in 0..NC step NR:              micro-panel of B: KC×NR
-        for ir in 0..MC step MR:
-          micro-kernel: C[ir:ir+MR, jr:jr+NR] += alpha · A_packed · B_packed
+      pack_a(A[ic:ic+MC, pc:pc+KC])      → 6-row micro-panels, k-major
+      for jr in 0..NC step 16:
+        for ir in 0..MC step 6:
+          kernel_6x16: C[ir:ir+6, jr:jr+16] += alpha · Ap · Bp
 ```
 
-`beta` is applied to all of C once before the loops (`beta = 0` writes zeros
-and never reads C, so NaN in an uninitialised C does not propagate). Tail
-blocks (`mr < MR` or `nr < NR`) go through a scalar loop over the packed
-panels. Both packing buffers are allocated once per call; with OpenMP each
-thread has its own (`thread_local`) and the `jc` loop is parallel.
-
-Packed layouts:
-
 ```
-B_packed[(j / NR) * kc * NR + p * NR + (j % NR)] = B[p][j]   (zero-padded to NR)
-A_packed[i * kc + p]                              = A[i][p]
+Bp[(j / 16)·16·kc + p·16 + (j % 16)] = B[p][j]     (zero-padded to 16 columns)
+Ap[(i / 6)·6·kc  + p·6  + (i % 6)]   = A[i][p]     (zero-padded to 6 rows)
 ```
 
-### 2.3 Blocking constants
+`beta` is applied to C once before the loops (`beta = 0` writes zeros and never
+reads C, so NaN in an uninitialised C does not propagate). The packing
+buffers are per thread (`thread_local`), grown on demand and kept, so a call
+allocates nothing once a thread has run a GEMM of that size; with the Lunar
+Lake blocking they reach at most (MC+6)·KC + KC·(NC+16) floats, 4.8 MiB.
 
-| Constant | Value | Footprint | Intended level |
-|---|---:|---|---|
-| MR × NR | 8 × 8 (AVX2), 8 × 16 (AVX-512) | 8 accumulator registers | registers |
-| KC × NR | 256 × 8 | 8 KiB (16 KiB for NR = 16) B micro-panel, reused for all MC/MR row blocks | L1 |
-| MC × KC | 128 × 256 | 128 KiB packed A | L2 |
-| KC × NC | 256 × 2048 | 2 MiB packed B | L3 (or a large L2) |
+### 2.3 Block sizes from the caches
 
-They are compile-time constants chosen for a Skylake-class core (32 KiB L1D,
-256 KiB–1.25 MiB L2). On the reference laptop's Lion Cove P-core (48 KiB L1D,
-2.5 MiB L2, from CPUID leaf 4) the A panel uses 5% of L2. Deriving them from
-CPUID leaf 4 at run time is W3. `GEMMConfig(tile_m=..., ...)` accepts tile
-sizes but does not use them.
+`dispatch::gemm_blocking(MR, NR)` derives the block sizes once, from CPUID
+leaf 4 (Intel) or 0x8000001D (AMD) of the core that runs the first GEMM:
 
-### 2.4 Micro-kernels
+| Block | Rule | Lunar Lake P-core (48 KiB L1D, 2.5 MiB L2, 8 MiB L3) | 32 KiB L1D, 256 KiB L2 |
+|---|---|---|---|
+| KC | KC×16 B micro-panel fills ½ of L1D | 384 | 256 |
+| MC | MC×KC packed A fills ¼ of L2 | 426 | 60 |
+| NC | KC×NC packed B fills ½ of the last-level cache | 2720 | depends on L3 |
 
-**8×8 AVX2** (`inner_kernel_8x8`). Per k-step: one 8-float B load, 8
-broadcasts of `A[i][p]` (`vbroadcastss` from memory, a load-port µop each) and
-8 FMAs into 8 independent YMM accumulators. K is unrolled by 4 with one
-`prefetcht0` per unrolled step, 4 k-steps (128 bytes) ahead in B; those 4
-k-steps read two cache lines of B, so software prefetches every second line
-and the hardware prefetcher has to fetch the others.
+The B micro-panel is reused for every 6-row A micro-panel of the MC block, so
+it has to stay in L1 next to the streaming A micro-panel and the C tile. The
+packed A block is reused across the whole jr loop from L2. MC barely matters
+once it is past a few dozen rows (B is re-read from L3 once per MC rows, 2/MC
+bytes per flop); half of L2 was measurably slower than a quarter. The comment
+at the top of `avx2_gemm_packed.cpp` has the sweep. `build_info()["sgemm_blocking"]`
+and the `build` block of every benchmark JSON record the values used. On a
+hybrid CPU the first GEMM's core decides (pin benchmarks).
 
-- Latency: an FMA has 4 cycles latency and 2 ports issue one each per cycle,
-  so 4 × 2 = 8 independent accumulators is the minimum that keeps both ports
-  busy, with no slack for any other stall.
-- Loads: 9 load µops per 8 FMAs. A core with 2 load ports (Skylake, Coffee
-  Lake) needs 4.5 cycles per k-step for the loads but 4 for the FMAs, so it can
-  reach at most 8/9 of FMA peak. Lion Cove has 3 load ports and is not limited
-  by this.
-- Registers: 8 accumulators + 1 B vector + broadcasts fit in 16 YMM. The source
-  loads the 8 C rows before the K loop; GCC 13 at `-O3` keeps the K loop free
-  of stack accesses and spills 6 of those 8 C rows once, outside the loop
-  (`objdump` of `inner_kernel_8x8`).
-- Peak: 2 ports × 8 lanes × 2 flop = 32 flop/cycle for AVX2+FMA. BENCHMARKS.md
+The AVX-512 table still uses its 8×16 kernel (8 ZMM accumulators) with fixed
+blocks KC = 256, MC = 128, NC = 2048 and per-call buffers; it is replaced next
+(ROADMAP, W3).
+
+### 2.4 Why 6×16
+
+- **Latency × ports:** 2 FMAs per cycle with 4-cycle latency (5 on Haswell)
+  need at least 8 independent accumulators. 6×16 has 12, so a late load does
+  not stall both FMA pipes; the previous 8×8 kernel had exactly 8.
+- **Registers:** 12 accumulators + 2 B vectors + 1 broadcast = 15 of 16 YMM.
+- **Loads per FMA:** 2 B loads + 6 broadcasts per 12 FMAs (0.67), against
+  9 per 8 (1.13) for 8×8. On a core with 2 load ports (Skylake, Coffee Lake)
+  8×8 could reach at most 8/9 of FMA peak.
+- **Measured:** the three candidate shapes (8×8, 6×16, 4×24) in one packed
+  driver on the Lunar Lake P-core; 6×16 was best or tied from N = 128 up. The
+  comment at the top of `avx2_gemm_packed.cpp` has the numbers;
+  docs/BENCHMARKS.md has the published comparison with OpenBLAS.
+- Peak: 2 ports × 8 lanes × 2 flop = 32 flop/cycle for AVX2+FMA; BENCHMARKS.md
   reports the measured flop/cycle next to OpenBLAS on the same core.
 
-**8×16 AVX-512** (`inner_kernel_8x16_avx512`). The same kernel with ZMM:
-one 16-float B load, 8 broadcasts, 8 FMAs. On a core with two 512-bit FMA
-units the peak is 64 flop/cycle, but 8 accumulators are still only
-the latency minimum, and the 32 ZMM registers are mostly unused: production
-SKX kernels keep 24–28 accumulators live (BLIS uses a 32×12 shape). Replacing
-it is W3.
-
-**6×16 AVX2 / 6×32 AVX-512** (`avx_matmul.cpp`, `simd_sgemm`). A second GEMM
-with MC = 64, KC = 256, NC = 64, alpha folded into `pack_A`, and 12
-accumulators (6 rows × 2 vectors). It is not reachable from Python; the C++
-tests and the `bench` harness use it. It allocates its packing buffers inside
-the `jc` loop.
-
-### 2.5 Choosing the micro-kernel
+### 2.5 Choosing the table
 
 The AVX2 and AVX-512 tables (§6) each have their own `sgemm`
-(`sgemm_packed_avx2`, `sgemm_packed_avx512`); both use the AVX2 small-matrix
-path. `sgemm(..., isa="scalar" | "avx2" | "avx512")` runs a given table for
-one call and raises if this build or CPU cannot run it. The scalar table's
-GEMM is a row-by-row loop with no blocking.
+(`sgemm_packed_avx2`, `sgemm_packed_avx512`); both send small products to the
+AVX2 direct path. `sgemm(..., isa="scalar" | "avx2" | "avx512")` runs a given
+table for one call and raises if this build or CPU cannot run it. The scalar
+table's GEMM is a row-by-row loop with no blocking.
 
 ---
 

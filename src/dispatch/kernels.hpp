@@ -45,12 +45,14 @@ using UnaryFn  = void (*)(const float* in, float* out, std::size_t n);
 using RowFn    = void (*)(const float* in, float* out, int n);
 using LayerNormFn = void (*)(const float* in, float* out, int n,
                              const float* gamma, const float* beta, float eps);
+using BlockingFn = void (*)(int* kc, int* mc, int* nc);
 
 struct KernelTable {
     Isa         isa;
     const char* name;        ///< "scalar", "avx2", "avx512"
     const char* flags;       ///< compiler flags of this ISA's units
     const char* sgemm_tile;  ///< micro-kernel shape, for build_info()
+    BlockingFn  sgemm_blocking;  ///< KC/MC/NC in use (0 = not blocked), for build_info()
     SgemmFn     sgemm;       ///< C = alpha*A*B + beta*C, row-major FP32
     Sgemm16Fn   sgemm_f16;   ///< IEEE binary16 inputs, FP32 accumulate and output
     Sgemm16Fn   sgemm_bf16;  ///< BF16 bit patterns, FP32 accumulate and output

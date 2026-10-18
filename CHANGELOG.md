@@ -45,6 +45,16 @@ under **Changed** with a migration note.
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- **FP32 GEMM, AVX2:** one 6×16 micro-kernel (12 YMM accumulators) replaces
+  the 8×8 kernel and the one-accumulator small-matrix loop. Small products
+  (up to 80³, N ≤ 16 or M = 1) run it on A and B in place; the rest go through
+  the packed five loops. KC/MC/NC are derived at run time from CPUID leaf 4
+  (`build_info()["sgemm_blocking"]`, also recorded in benchmark JSON) instead
+  of fixed constants. Packing buffers are per thread and kept, instead of
+  2.1 MiB allocated and freed on every call. docs/DESIGN.md §2 has the
+  reasons and the measurements behind each choice.
+- `build_info()` gains `sgemm_blocking` (`{kc, mc, nc}`); `info` and the
+  benchmark JSON `build` block gain `sgemm_tile` and `sgemm_blocking`.
 - **Renamed to simd-ml-kernels.** Repository and PyPI distribution:
   `simd-ml-kernels` (was `SIMD-Microkernels-for-ML-Workloads` / `simd-ml-microkernels`);
   import: `simd_ml_kernels` (was `simd_kernels`); the "IntrinsicML" name is
@@ -104,6 +114,9 @@ under **Changed** with a migration note.
   removed. `gemm::sgemm_packed` still exists and dispatches.
 
 ### Removed
+- `avx_matmul.cpp` / `avx_matmul_avx512.cpp` (`simd_sgemm`), the second FP32
+  GEMM, which only the C++ tests and the `bench` harness could call. Its 6×16
+  shape is now the AVX2 kernel of `sgemm`; `bench` measures `sgemm_packed`.
 - Stray `gitignore` (duplicate of `.gitignore`) and `poetry.lock` (the build
   backend is scikit-build-core; nothing used it).
 

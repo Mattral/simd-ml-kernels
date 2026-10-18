@@ -28,7 +28,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 
 | Kernel | Implementation | Notes |
 |--------|---------------|-------|
-| **GEMM** (SGEMM) | `avx_matmul.cpp`, `gemm/avx2_gemm_packed.cpp` | Goto/BLIS 5-loop, panel packing, MR×NR register blocking, AVX2/AVX-512 dispatch |
+| **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 kernel (12 accumulators), unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x * sigmoid(x)` via the exp-based tanh; max abs error ≤ 2e-6 |

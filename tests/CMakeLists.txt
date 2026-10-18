@@ -21,9 +21,6 @@ set(TEST_SRCS
     test_activations.cpp
     test_threads.cpp
 )
-if(SIMD_ML_ENABLE_X86)
-    list(APPEND TEST_SRCS test_gemm.cpp)   # avx_matmul.cpp: an AVX2 unit
-endif()
 add_executable(simd_tests ${TEST_SRCS})
 target_include_directories(simd_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/kernels

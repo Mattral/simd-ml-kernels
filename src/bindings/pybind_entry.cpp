@@ -404,6 +404,13 @@ static py::dict build_info() {
     info["isa_usable"]      = usable;            // ... that this CPU can run
     info["isa_flags"]       = isa_flags;         // compiler flags of each usable unit
     info["sgemm_tile"]      = active.sgemm_tile;
+    {
+        int kc = 0, mc = 0, nc = 0;
+        active.sgemm_blocking(&kc, &mc, &nc);   // derived from the caches on first use
+        py::dict blk;
+        blk["kc"] = kc; blk["mc"] = mc; blk["nc"] = nc;
+        info["sgemm_blocking"] = blk;
+    }
     info["alignment"]       = "64-byte (C++17 aligned operator new)";
     info["build_timestamp"] = std::string(__DATE__) + " " + std::string(__TIME__);
     info["runtime_isa"]     = active.name;       // the table every call uses
@@ -739,8 +746,9 @@ np.ndarray[float32] of shape [M, N] — same object as C if provided.
 
 Notes
 -----
-Goto/BLIS-style packed GEMM with an 8×8 (AVX2) or 8×16 (AVX-512) FMA
-micro-kernel above 128 in any dimension, an unpacked loop below; the scalar
+6×16 (AVX2) or 8×16 (AVX-512) FMA register tile: on A and B in place for
+small products, on Goto/BLIS packed panels otherwise, with block sizes
+derived from the CPU caches (build_info()["sgemm_blocking"]). The scalar
 table uses a plain row-by-row loop. Throughput relative to OpenBLAS on
 named hardware: docs/BENCHMARKS.md.
 )doc");
@@ -825,7 +833,8 @@ np.ndarray[float32] same shape as x.
     m.def("build_info", &build_info,
           "Return build details: version, commit, compiler, the kernel tables compiled\n"
           "(isa_compiled) and usable on this CPU (isa_usable), the active table\n"
-          "(runtime_isa) with its flags (kernel_flags) and GEMM tile (sgemm_tile), OpenMP.");
+          "(runtime_isa) with its flags (kernel_flags), GEMM tile (sgemm_tile) and block\n"
+          "sizes (sgemm_blocking: kc, mc, nc; 0 = not blocked), OpenMP.");
 
     m.def("detected_isa", []() {
         return std::string(simd_ml::kernels().name);

@@ -37,7 +37,7 @@ C = simd_ml_kernels.sgemm(A, B)
 simd_ml_kernels.sgemm(A, B, C, alpha=2.0, beta=0.5)
 ```
 
-**Implementation**: Goto/BLIS 5-loop structure with panel packing (8×8 AVX2 or 8×16 AVX-512 register tile; a plain loop in the scalar table). See `docs/DESIGN.md` §2.
+**Implementation**: a 6×16 AVX2 register tile (12 accumulators) run on A and B in place for small products and inside the Goto/BLIS 5 loops with packed panels otherwise, block sizes from the CPU caches (`build_info()["sgemm_blocking"]`); 8×16 on AVX-512; a plain loop in the scalar table. See `docs/DESIGN.md` §2.
 
 ### `GEMMConfig` — callable GEMM configuration object
 
@@ -69,7 +69,7 @@ argument:
 ```python
 C = simd_ml_kernels.sgemm(A, B)                 # "" = the table chosen for this CPU
 C = simd_ml_kernels.sgemm(A, B, isa="scalar")   # portable C++ kernel
-C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # 8×8 AVX2 kernel
+C = simd_ml_kernels.sgemm(A, B, isa="avx2")     # 6×16 AVX2 kernel
 C = simd_ml_kernels.sgemm(A, B, isa="avx512")   # 8×16 AVX-512 kernel
 ```
 
