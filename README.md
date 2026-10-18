@@ -109,6 +109,59 @@ call by call. The GHz column is the core clock measured during the case;
 cases where it fell below the P-core threshold are not shown.
 
 <!-- BEGIN GENERATED: results-summary -->
+#### cloud-xeon-emr-2vcpu, 2026-10-18, commit `9029f1566ddb`
+
+Source: Intel(R) Xeon(R) Processor @ 2.10GHz, vCPU 1 (KVM guest, 2 vCPU; host core not visible); Python 3.13.16, GNU 13.3.0, commit `9029f1566ddb`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cu130; 30 interleaved reps after 5 warm-up; 2026-10-18T11:50:21+00:00; [`benchmarks/results/cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb.json`](benchmarks/results/cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb.json).
+
+**FP32 GEMM, square, single thread**
+
+| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | core GHz median (min–max) |
+|---:|---:|---:|---:|---:|
+| 128 | 96.5 | 90.5 | 107% | 3.38 (3.29–3.46) |
+| 256 | 96.5 | 95.7 | 101% | 3.34 (3.25–3.39) |
+| 512 | 117.2 | 117.2 | 100% | 3.30 (2.60–3.45) |
+| 1024 | 129.0 | 144.7 | 89% | 3.48 (3.06–4.08) |
+| 2048 | 110.6 | 127.3 | 87% | 3.17 (2.87–3.49) |
+
+**FP16 / BF16-input GEMM, FP32 accumulation and output, single thread** (PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns float16 / bfloat16)
+
+| input | M×N×K | simd-ml-kernels GFLOP/s | our FP32 GFLOP/s | % of FP32 | PyTorch GFLOP/s | ours / PyTorch | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| FP16 | 128×128×128 | 60.3 | 67.3 | 90% | 46.3 | 1.30× | 3.13 (2.96–3.16) |
+| FP16 | 256×256×256 | 81.2 | 85.1 | 95% | 73.6 | 1.10× | 3.13 (3.10–3.15) |
+| FP16 | 512×512×512 | 84.9 | 84.3 | 101% | 95.5 | 0.89× | 3.12 (3.00–3.18) |
+| FP16 | 1024×1024×1024 | 106.9 | 107.3 | 100% | 119.9 | 0.89× | 3.14 (2.83–3.46) |
+| FP16 | 2048×2048×2048 | 108.8 | 112.5 | 97% | 125.0 | 0.87× | 3.27 (2.46–4.03) |
+| FP16 | 1×4096×4096 | 2.4 | 1.6 | 150% | 4.7 | 0.51× | 3.19 (3.14–3.87) |
+| BF16 | 128×128×128 | 50.4 | 68.7 | 73% | 81.1 | 0.62× | 3.12 (3.02–3.15) |
+| BF16 | 256×256×256 | 55.3 | 84.6 | 65% | 209.5 | 0.26× | 3.15 (2.68–3.23) |
+| BF16 | 512×512×512 | 73.9 | 108.5 | 68% | 627.4 | 0.12× | 3.19 (3.11–3.21) |
+| BF16 | 1024×1024×1024 | 64.3 | 94.2 | 68% | 666.1 | 0.10× | 3.12 (2.93–3.39) |
+| BF16 | 2048×2048×2048 | 68.2 | 107.1 | 64% | 785.1 | 0.09× | 3.25 (3.01–3.69) |
+| BF16 | 1×4096×4096 | 2.4 | 1.7 | 140% | 4.3 | 0.55× | 3.11 (2.60–3.41) |
+
+**INT8 GEMM (uint8 × per-channel int8, FP32 output), x·Wᵀ, single thread**, path `avx512_vnni` (PyTorch: `torch.ops.quantized.linear`, prepacked weights, which returns requantized uint8)
+
+| M×N×K | simd-ml-kernels GOP/s | × our FP32 | FP32-conversion path GOP/s | × our FP32 | PyTorch GOP/s | ours / PyTorch | core GHz median (min–max) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 128×128×128 | 129.3 | 1.43× | 70.6 | 0.78× | 64.2 | 2.01× | 3.31 (3.14–3.57) |
+| 256×256×256 | 189.3 | 1.97× | 80.7 | 0.84× | 162.9 | 1.16× | 3.21 (2.56–3.45) |
+| 512×512×512 | 264.2 | 2.31× | 86.5 | 0.76× | 377.1 | 0.70× | 3.34 (3.07–3.39) |
+| 1024×1024×1024 | 267.1 | 2.57× | 83.8 | 0.81× | 388.8 | 0.69× | 3.21 (3.19–4.05) |
+| 2048×2048×2048 | 292.7 | 2.75× | 75.0 | 0.70× | 443.2 | 0.66× | 3.67 (3.15–4.09) |
+| 1×4096×4096 | 1.9 | 0.33× | 3.0 | 0.51× | 17.6 | 0.11× | 3.21 (2.94–3.38) |
+
+**Activations and normalization, out-of-place, single thread**
+
+| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|
+| `gelu_exact` | 1048576 | 1.602 | 0.513 | 1.710 | 0.94× | 3.12 (2.24–3.26) |
+| `gelu_tanh` | 1048576 | 0.892 | 0.283 | 0.392 | 2.27× | 3.15 (2.97–3.32) |
+| `silu` | 1048576 | 1.435 | 0.437 | 1.574 | 0.91× | 3.29 (3.14–3.35) |
+| `relu` | 1048576 | 2.815 | 0.850 | 2.916 | 0.97× | 3.31 (2.61–3.41) |
+| `softmax` | 1024×1024 | 1.134 | 0.333 | 1.136 | 1.00× | 3.40 (3.27–3.42) |
+| `layer_norm` | 1024×1024 | 2.329 | 0.690 | 2.194 | 1.06× | 3.38 (3.31–3.42) |
+
 #### lnl-226v-wsl, 2026-10-18, commit `19aeaf83cd36`
 
 Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `19aeaf83cd36`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T10:43:27+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_19aeaf83cd36.json`](benchmarks/results/lnl-226v-wsl_2026-10-18_19aeaf83cd36.json).

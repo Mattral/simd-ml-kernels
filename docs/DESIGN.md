@@ -338,8 +338,12 @@ add rounded to nearest even, so the error bound is unchanged. The instruction
 ignores MXCSR: BF16 subnormal inputs (|x| < 2⁻¹²⁶) are read as zero and
 subnormal results flushed, unlike the conversion path; the tests expect that
 on this path. Small products keep the AVX2 direct path, and more than one
-OpenMP thread uses the threaded conversion path. Correct under SDE `-spr`;
-speed not measured (no machine here has AVX512_BF16).
+OpenMP thread uses the threaded conversion path. Correct under SDE `-spr`.
+Measured on an Emerald Rapids cloud VM (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`):
+this path runs at 64–73% of our FP32 GEMM on square N = 128–2048 (the
+conversion path is at 90–101% of FP32 for FP16 in the same run), so on that
+CPU it is slower than the path it replaces. Not yet diagnosed; the choice of
+default is open (ROADMAP).
 
 ### 4.2 INT8 GEMM (`sgemm_u8s8`)
 
