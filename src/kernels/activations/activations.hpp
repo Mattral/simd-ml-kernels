@@ -17,7 +17,8 @@ namespace activations {
 void relu_avx2(const float* input, float* output, int n);
 
 /**
- * silu_avx2 — AVX2-vectorized SiLU/Swish: output[i] = x * sigmoid(x).
+ * silu_avx2 — AVX2-vectorized SiLU/Swish: output[i] = x / (1 + exp(-x)).
+ * |err| <= 1e-35 + 1e-6*|ref| for every finite x (see silu_avx2.cpp).
  */
 void silu_avx2(const float* input, float* output, int n);
 

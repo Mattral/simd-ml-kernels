@@ -31,7 +31,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | **GEMM** (SGEMM) | `avx_matmul.cpp`, `gemm/avx2_gemm_packed.cpp` | Goto/BLIS 5-loop, panel packing, MR×NR register blocking, AVX2/AVX-512 dispatch |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
-| **SiLU** | `activations/silu_avx2.cpp` | `x * sigmoid(x)` via the exp-based tanh; max abs error ≤ 2e-6 |
+| **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
 | **LayerNorm** | `activations/layer_norm_avx2.cpp` | 3-pass, double accumulation, optional γ/β |
 

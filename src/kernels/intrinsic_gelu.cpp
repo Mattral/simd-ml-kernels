@@ -138,28 +138,6 @@ static inline __m256 gelu_erf_kernel_avx2(__m256 x) {
     return zero_below_minus_10(x, y);
 }
 
-/**
- * apply_elementwise — run an 8-wide kernel over n floats. The last n % 8
- * elements go through the same kernel via masked load/store (masked-off lanes
- * read as 0 and are not written), so every element gets bit-identical math
- * regardless of its position in the array, and nothing past `n` is touched.
- * `input` and `output` may be the same buffer (in-place GeLU).
- */
-template <typename Kernel>
-static inline void apply_elementwise(const float* input, float* output,
-                                     std::size_t n, Kernel kernel) {
-    std::size_t i = 0;
-    for (; i + 8 <= n; i += 8)
-        _mm256_storeu_ps(output + i, kernel(_mm256_loadu_ps(input + i)));
-    if (i < n) {
-        const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-        const __m256i mask = _mm256_cmpgt_epi32(
-            _mm256_set1_epi32(static_cast<int>(n - i)), lane);
-        _mm256_maskstore_ps(output + i, mask, kernel(_mm256_maskload_ps(input + i, mask)));
-    }
-}
-
-
 // ─── Public: gelu_forward_avx2 (tanh approximation) ──────────────────────────
 /**
  * gelu_forward_avx2 — GeLU, tanh approximation, element-wise:
@@ -171,7 +149,7 @@ static inline void apply_elementwise(const float* input, float* output,
  * the two formulas, not rounding.
  */
 void gelu_forward_avx2(const float* input, float* output, std::size_t n) {
-    apply_elementwise(input, output, n, [](__m256 v) { return gelu_kernel_avx2(v); });
+    apply_elementwise_avx2(input, output, n, [](__m256 v) { return gelu_kernel_avx2(v); });
 }
 
 // ─── Public: gelu_erf_forward_avx2 (exact) ───────────────────────────────────
@@ -181,5 +159,5 @@ void gelu_forward_avx2(const float* input, float* output, std::size_t n) {
  * Error bound: see gelu_erf_kernel_avx2.
  */
 void gelu_erf_forward_avx2(const float* input, float* output, std::size_t n) {
-    apply_elementwise(input, output, n, [](__m256 v) { return gelu_erf_kernel_avx2(v); });
+    apply_elementwise_avx2(input, output, n, [](__m256 v) { return gelu_erf_kernel_avx2(v); });
 }

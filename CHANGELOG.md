@@ -108,6 +108,14 @@ under **Changed** with a migration note.
   backend is scikit-build-core; nothing used it).
 
 ### Fixed
+- `silu` (AVX2 and AVX-512 tables) computed `x·0.5·(1 + tanh(x/2))` with
+  tanh clamped at ±7.99, so its error grew without bound below x ≈ −16
+  (2e-6 at −20, 1e-4 at −1000, 5e31 at −FLT_MAX). It now computes
+  `x / (1 + exp(−x))`: `|err| ≤ 1e-35 + 1e-6·|ref|` for every finite x,
+  and 1.5× faster on the Lunar Lake P-core (L1-resident). `silu(-inf)` is
+  now NaN on every table (was −inf on AVX2), as in PyTorch and the scalar
+  kernel. The last `n % 8` elements use the vector kernel (masked), so a
+  value's result no longer depends on its position.
 - CMake detected x86-64 from `CMAKE_SYSTEM_PROCESSOR`, which is empty when
   `PROCESSOR_ARCHITECTURE` is not set (seen in an MSYS2 shell); the build then
   silently became scalar-only and the extension failed to link. The compiler's

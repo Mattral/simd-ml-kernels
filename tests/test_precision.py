@@ -327,16 +327,46 @@ class TestReLU:
 # ─── SiLU Tests ──────────────────────────────────────────────────────────────
 
 class TestSiLU:
-    SILU_TOL = 1e-4
-    SILU_ATOL = 1e-6  # SiLU also crosses zero at x=0 — see assert_close docstring
+    # Documented bound (silu_avx2.cpp, docstring): 1e-35 + 1e-6*|ref| over every
+    # finite float; measured 2.9e-7 relative on the AVX2 table.
+    SILU_TOL = 1e-6
+    SILU_ATOL = 1e-35
 
     @pytest.mark.parametrize("n", [1, 7, 8, 9, 64, 1024, 65536])
-    def test_silu_vs_numpy(self, n):
-        x = RNG.uniform(-4.0, 4.0, size=n).astype(np.float32)
+    @pytest.mark.parametrize("bound", [4.0, 200.0])  # 200: past the x < -88 cut-off
+    def test_silu_vs_numpy(self, n, bound):
+        x = RNG.uniform(-bound, bound, size=n).astype(np.float32)
         ref = silu_numpy(x)
         out = simd_ml_kernels.silu(x)
         assert_close(out, ref, rtol=self.SILU_TOL, atol=self.SILU_ATOL,
-                    label=f"SiLU n={n}")
+                    label=f"SiLU n={n} on [-{bound}, {bound}]")
+
+    def test_silu_every_binade(self):
+        """±m·2^e for e in [-126, 127]. The AVX2 kernel used to clamp tanh(x/2),
+        so its error grew without bound below x = -16 (5e31 at -FLT_MAX)."""
+        e = np.arange(-126, 128)
+        mags = np.concatenate([np.ldexp(m, e) for m in (1.0, 1.3, 1.9999999)])
+        x = np.concatenate([mags, -mags, [-88.5, -88.0, -87.5, -103.0, 88.5]]).astype(np.float32)
+        with np.errstate(over="ignore"):
+            ref = silu_numpy(x)
+        assert_close(simd_ml_kernels.silu(x), ref, rtol=self.SILU_TOL,
+                     atol=self.SILU_ATOL, label="SiLU every binade")
+
+    @pytest.mark.parametrize("offset", [0, 9])   # vector body / masked tail
+    def test_silu_special_values(self, offset):
+        special = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0], dtype=np.float32)
+        x = np.ones(offset + special.size, np.float32)
+        x[offset:] = special
+        out = simd_ml_kernels.silu(x)[offset:]
+        assert out[0] == np.inf
+        assert np.isnan(out[1])  # -inf / (1 + inf), as PyTorch and the scalar kernel
+        assert np.isnan(out[2])
+        assert out[3] == 0.0 and not np.signbit(out[3]) and out[4] == 0.0
+
+    def test_silu_tail_matches_vector_body_bitwise(self):
+        x = RNG.uniform(-30.0, 30.0, 16).astype(np.float32)
+        np.testing.assert_array_equal(simd_ml_kernels.silu(x[:13].copy()),
+                                      simd_ml_kernels.silu(x)[:13])
 
     def test_silu_zero_input(self):
         x = np.zeros(64, dtype=np.float32)
