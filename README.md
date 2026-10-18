@@ -29,6 +29,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | Kernel | Implementation | Notes |
 |--------|---------------|-------|
 | **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 (12 accumulators) and 12×32 AVX-512 (24 accumulators) kernels; unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise; `trans_a`/`trans_b` handled in packing |
+| **FP16 / BF16 GEMM** (`sgemm_f16`, `sgemm_bf16`) | same files; `gemm/avx512bf16_gemm.cpp` | Inputs converted to FP32 once while packing, then the FP32 kernels; FP32 accumulation and output; `vdpbf16ps` on AVX512_BF16 CPUs (speed not measured) |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
@@ -107,30 +108,47 @@ call by call. The GHz column is the core clock measured during the case;
 cases where it fell below the P-core threshold are not shown.
 
 <!-- BEGIN GENERATED: results-summary -->
-#### lnl-226v-wsl, 2026-10-18, commit `b193633ecec1`
+#### lnl-226v-wsl, 2026-10-18, commit `045918e51839`
 
-Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `b193633ecec1`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T06:28:22+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json`](benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json).
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `045918e51839`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T07:17:13+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_045918e51839.json`](benchmarks/results/lnl-226v-wsl_2026-10-18_045918e51839.json).
 
 **FP32 GEMM, square, single thread**
 
 | N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | core GHz median (min–max) |
 |---:|---:|---:|---:|---:|
-| 128 | 96.0 | 103.2 | 93% | 4.30 (3.93–4.47) |
-| 256 | 112.0 | 118.1 | 95% | 4.40 (3.75–4.63) |
-| 512 | 115.1 | 121.7 | 95% | 4.24 (3.93–4.49) |
-| 1024 | 115.9 | 117.4 | 99% | 4.15 (3.87–4.47) |
-| 2048 | 115.0 | 122.9 | 94% | 4.39 (4.19–4.69) |
+| 128 | 98.7 | 107.7 | 92% | 4.34 (3.80–4.51) |
+| 256 | 106.2 | 114.4 | 93% | 4.26 (3.97–4.65) |
+| 512 | 118.7 | 117.7 | 101% | 4.46 (3.79–4.59) |
+| 1024 | 119.4 | 122.1 | 98% | 4.35 (4.18–4.71) |
+| 2048 | 117.4 | 120.9 | 97% | 4.39 (4.19–4.58) |
+
+**FP16 / BF16-input GEMM, FP32 accumulation and output, single thread** (PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns float16 / bfloat16)
+
+| input | M×N×K | simd-ml-kernels GFLOP/s | our FP32 GFLOP/s | % of FP32 | PyTorch GFLOP/s | ours / PyTorch | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| FP16 | 128×128×128 | 104.6 | 109.1 | 96% | 71.5 | 1.46× | 4.29 (3.65–4.65) |
+| FP16 | 256×256×256 | 100.3 | 105.7 | 95% | 71.1 | 1.41× | 4.13 (3.75–4.50) |
+| FP16 | 512×512×512 | 116.1 | 120.7 | 96% | 82.2 | 1.41× | 4.28 (3.95–4.42) |
+| FP16 | 1024×1024×1024 | 116.9 | 119.2 | 98% | 82.8 | 1.41× | 4.36 (3.78–4.59) |
+| FP16 | 2048×2048×2048 | 116.3 | 116.3 | 100% | 81.8 | 1.42× | 4.43 (3.95–4.57) |
+| FP16 | 1×4096×4096 | 5.3 | 2.9 | 180% | 8.4 | 0.63× | 4.49 (4.13–4.63) |
+| BF16 | 128×128×128 | 103.6 | 103.8 | 100% | 89.2 | 1.16× | 4.43 (4.18–4.64) |
+| BF16 | 256×256×256 | 114.4 | 115.5 | 99% | 113.6 | 1.01× | 4.41 (4.16–4.72) |
+| BF16 | 512×512×512 | 120.3 | 120.3 | 100% | 118.5 | 1.02× | 4.17 (4.05–4.54) |
+| BF16 | 1024×1024×1024 | 117.2 | 117.9 | 99% | 120.3 | 0.97× | 4.30 (3.93–4.70) |
+| BF16 | 2048×2048×2048 | 118.2 | 117.4 | 101% | 121.7 | 0.97× | 4.48 (3.63–4.64) |
+| BF16 | 1×4096×4096 | 5.0 | 3.1 | 162% | 8.5 | 0.58× | 4.36 (3.85–4.63) |
 
 **Activations and normalization, out-of-place, single thread**
 
 | kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|
-| `gelu_exact` | 1048576 | 2.651 | 0.631 | 1.612 | 1.64× | 4.20 (3.83–4.68) |
-| `gelu_tanh` | 1048576 | 1.615 | 0.381 | 0.549 | 2.94× | 4.24 (4.06–4.66) |
-| `silu` | 1048576 | 2.904 | 0.705 | 2.146 | 1.35× | 4.12 (3.77–4.39) |
-| `relu` | 1048576 | 4.423 | 1.075 | 3.976 | 1.11× | 4.12 (3.67–4.31) |
-| `softmax` | 1024×1024 | 1.588 | 0.377 | 1.314 | 1.21× | 4.21 (3.71–4.41) |
-| `layer_norm` | 1024×1024 | 3.923 | 1.018 | 4.200 | 0.93× | 3.85 (3.63–4.32) |
+| `gelu_exact` | 1048576 | 2.428 | 0.545 | 0.368 | 6.60× | 4.45 (3.70–4.54) |
+| `gelu_tanh` | 1048576 | 1.521 | 0.342 | 0.517 | 2.95× | 4.45 (4.18–4.52) |
+| `silu` | 1048576 | 2.904 | 0.677 | 2.178 | 1.33× | 4.29 (3.62–4.66) |
+| `relu` | 1048576 | 4.994 | 1.127 | 4.439 | 1.13× | 4.43 (3.93–4.54) |
+| `softmax` | 1024×1024 | 1.764 | 0.395 | 1.364 | 1.29× | 4.47 (4.24–4.70) |
+| `layer_norm` | 1024×1024 | 3.398 | 0.772 | 3.629 | 0.94× | 4.40 (3.70–4.56) |
 <!-- END GENERATED: results-summary -->
 
 Run it on your hardware:

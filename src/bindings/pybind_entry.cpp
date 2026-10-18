@@ -583,10 +583,10 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
     // exponent, 7-bit mantissa) gives wrong values without any error.
     auto check_bf16 = [](const py::array& arr, const char* name) {
         const auto dt = arr.dtype();
-        const bool is_uint16 = dt.kind() == 'u' && dt.itemsize() == 2;
-        const bool is_ml_dtypes_bf16 =
-            dt.itemsize() == 2 && py::str(dt.attr("name")).cast<std::string>() == "bfloat16";
-        if (is_uint16 || is_ml_dtypes_bf16) return;
+        // uint16 first: the name lookup goes through Python attribute access
+        // and cost ~1.5 µs per operand (BF16 GEMM at 44% of FP32 at N = 32).
+        if (dt.kind() == 'u' && dt.itemsize() == 2) return;
+        if (dt.itemsize() == 2 && py::str(dt.attr("name")).cast<std::string>() == "bfloat16") return;
         const std::string got = py::str(dt.attr("name"));
         std::string msg = std::string(name) +
             " must hold BF16 values: a uint16 array of BF16 bit patterns or an "
@@ -877,9 +877,9 @@ Useful for checking before requesting isa='avx512' explicitly:
 )doc");
 
     m.def("bf16_avx512bf16_available", &py_bf16_avx512bf16_available,
-          "Return True if this CPU supports AVX-512 BF16 (vdpbf16ps). "
-          "Not required for sgemm_bf16 (which uses AVX2); indicates "
-          "availability of the higher-throughput packing path (v1.0 roadmap).");
+          "Return True if this CPU supports AVX-512 BF16 (vdpbf16ps). Not required for "
+          "sgemm_bf16; where it is True, the AVX-512 table's sgemm_bf16 uses vdpbf16ps "
+          "for packed single-threaded products (speed not measured; see sgemm_bf16).");
 
     m.def("sgemm_bf16", &py_sgemm_bf16,
           py::arg("A"), py::arg("B"),
@@ -889,12 +889,17 @@ Useful for checking before requesting isa='avx512' explicitly:
 BF16-input GEMM: C[float32] = alpha * A[bfloat16] @ B[bfloat16] + beta * C[float32]
 
 A and B store Brain Float 16 values (same exponent as FP32, 7-bit mantissa).
-Output C is always float32 — BF16 accumulation would lose mantissa bits at
-each step. Runs on every CPU (AVX2 table: zero-extend + shift in registers).
+Accumulation and C are float32. Runs on every CPU.
 
-BF16→FP32 conversion is exact: BF16 is the top 16 bits of an FP32 value, so
-zero-extending to 32 bits and shifting left by 16 (vpmovzxwd + vpslld, AVX2)
-reconstructs it.
+BF16→FP32 conversion is exact (BF16 is the top 16 bits of an FP32 value), so
+the result has the FP32 GEMM's error bound, |C - AB| <= 2·K·u·(|A||B|),
+u = 2^-24, for the BF16 values. The AVX2 and AVX-512 tables convert once per
+element while packing A and B and run the FP32 micro-kernel: about the FP32
+GEMM's speed on compute-bound shapes, faster where reading B dominates
+(one or a few rows of A), half the memory for A and B (docs/BENCHMARKS.md).
+On CPUs with AVX512_BF16 (bf16_avx512bf16_available()), packed
+single-threaded products use vdpbf16ps instead; that instruction reads BF16
+subnormals (|x| < 2^-126) as zero and flushes subnormal results.
 
 Input formats accepted
 ----------------------
@@ -959,8 +964,12 @@ ndarray[float32] of shape [M, N]
 
 Notes
 -----
-AVX2 table: F16C converts 8 values per instruction, FMA accumulates; no
-packing or cache blocking (docs/DESIGN.md §4), so large sizes are slow.
+FP16→FP32 conversion is exact, so the result has the FP32 GEMM's error
+bound for the FP16 values. The AVX2 and AVX-512 tables convert once per
+element while packing A and B (F16C, 8 or 16 values per instruction) and run
+the FP32 micro-kernel: about the FP32 GEMM's speed on compute-bound shapes,
+faster where reading B dominates, half the memory for A and B
+(docs/DESIGN.md §4, docs/BENCHMARKS.md).
 
 Example
 -------

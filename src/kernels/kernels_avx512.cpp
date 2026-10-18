@@ -3,8 +3,10 @@
  * (-mavx512f -mavx512dq -mavx512bw -mavx512vl); dispatch.cpp uses it only on
  * CPUs that also pass the AVX2 checks and have OS ZMM state.
  *
- * Only FP32 GEMM has an AVX-512 path. Every other entry is the AVX2 kernel:
- * an AVX-512 variant goes in only when it is measured to be faster.
+ * Only the GEMMs have AVX-512 paths: FP32, and FP16/BF16 through the same
+ * 12×32 kernel with the conversion in packing (BF16 with vdpbf16ps where the
+ * CPU has AVX512_BF16). Every other entry is the AVX2 kernel: an AVX-512
+ * variant goes in only when it is measured to be faster.
  */
 
 #include "../dispatch/kernels.hpp"
@@ -24,7 +26,7 @@ const KernelTable& kernel_table_avx512() noexcept {
     static const KernelTable t = {
         Isa::avx512, "avx512", SIMD_ML_UNIT_FLAGS, "12x32 (24 ZMM accumulators)",
         &gemm::sgemm_blocking_avx512,
-        &gemm::sgemm_packed_avx512, &gemm::sgemm_f16_avx2, &gemm::sgemm_bf16_avx2,
+        &gemm::sgemm_packed_avx512, &gemm::sgemm_f16_avx512, &gemm::sgemm_bf16_avx512,
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,
         &activations::softmax_row_avx2, &activations::layer_norm_avx2,

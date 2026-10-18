@@ -95,6 +95,44 @@ def gemm_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows) + _excluded_note(doc, excluded)
 
 
+LOWP = [("sgemm_f16", "FP16"), ("sgemm_bf16", "BF16")]
+
+
+def lowp_table(doc: dict, detail: bool) -> str:
+    """FP16/BF16-input GEMM: ours, our FP32 GEMM on the same values, and
+    PyTorch's matmul on float16/bfloat16 tensors (interleaved in one case)."""
+    rows = ["| input | M×N×K | simd-ml-kernels GFLOP/s | our FP32 GFLOP/s | % of FP32 | PyTorch GFLOP/s | ours / PyTorch |"
+            + (" IQR ms (ours) | IQR ms (FP32) | IQR ms (PyTorch) |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---|---|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "") + "---:|"]
+    excluded = []
+    for kernel, label in LOWP:
+        by_shape: dict[tuple, dict] = {}
+        for r in doc["results"]:
+            if r["kernel"] == kernel:
+                by_shape.setdefault(tuple(r["shape"]), {})[r["impl"]] = r
+        for shape in sorted(by_shape, key=lambda s: (s[0] != s[1], s)):
+            impls = by_shape[shape]
+            o, f = impls.get(OURS), impls.get(OURS + " fp32")
+            t = next((v for k, v in impls.items() if k.startswith("torch")), None)
+            if o is None or f is None:
+                continue
+            shp = "×".join(str(s) for s in shape)
+            if _throttled(o, f, t):
+                excluded.append((f"{label} {shp}", o))
+                continue
+            tg = f"{t['gflops']:.1f}" if t else "not measured"
+            ratio = f"{o['gflops'] / t['gflops']:.2f}×" if t else "—"
+            line = (f"| {label} | {shp} | {o['gflops']:.1f} | {f['gflops']:.1f} |"
+                    f" {100 * o['gflops'] / f['gflops']:.0f}% | {tg} | {ratio} |")
+            if detail:
+                ti = f"{t['p25_s'] * 1e3:.3f}–{t['p75_s'] * 1e3:.3f}" if t else "—"
+                line += (f" {o['p25_s'] * 1e3:.3f}–{o['p75_s'] * 1e3:.3f} |"
+                         f" {f['p25_s'] * 1e3:.3f}–{f['p75_s'] * 1e3:.3f} | {ti} |")
+            rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded)
+
+
 ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm"]
 
 
@@ -138,6 +176,11 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
         out.append("Source: " + _source(d, link_prefix) + ".\n")
         out.append("**FP32 GEMM, square, single thread**\n")
         out.append(gemm_table(d, detail) + "\n")
+        if any(r["kernel"] in dict(LOWP) for r in d["results"]):
+            out.append("**FP16 / BF16-input GEMM, FP32 accumulation and output, single thread** "
+                       "(PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns "
+                       "float16 / bfloat16)\n")
+            out.append(lowp_table(d, detail) + "\n")
         out.append("**Activations and normalization, out-of-place, single thread**\n")
         out.append(act_table(d, detail) + "\n")
     return "\n".join(out).rstrip() + "\n"

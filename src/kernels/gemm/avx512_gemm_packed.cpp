@@ -30,6 +30,8 @@
  */
 
 #include "avx2_gemm_packed.hpp"
+#include "bf16_gemm.hpp"
+#include "f16_gemm.hpp"
 #include "cache_alloc.hpp"
 #include "../../dispatch/cpuid.hpp"
 
@@ -37,6 +39,7 @@
 #include <cstddef>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
 #if !defined(__AVX512F__)
@@ -60,6 +63,37 @@ constexpr int NR = NR512;  // 32
 #else
 #  define SIMD_ML_ALWAYS_INLINE inline
 #endif
+
+// ─── Input element types (as in the AVX2 unit) ───────────────────────────────
+// Packing reads A and B through one of these and writes FP32; masked loads
+// return 0 in the masked-off lanes, which converts to +0.0f.
+struct F32 {
+    using T = float;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept { return *p; }
+    static SIMD_ML_ALWAYS_INLINE __m512 sixteen(__mmask16 m, const T* p) noexcept {
+        return _mm512_maskz_loadu_ps(m, p);
+    }
+};
+struct F16 {
+    using T = std::uint16_t;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept { return _cvtsh_ss(*p); }
+    static SIMD_ML_ALWAYS_INLINE __m512 sixteen(__mmask16 m, const T* p) noexcept {
+        return _mm512_cvtph_ps(_mm256_maskz_loadu_epi16(m, p));
+    }
+};
+struct BF16 {
+    using T = std::uint16_t;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept {
+        const std::uint32_t bits = static_cast<std::uint32_t>(*p) << 16;
+        float f;
+        std::memcpy(&f, &bits, sizeof(f));
+        return f;
+    }
+    static SIMD_ML_ALWAYS_INLINE __m512 sixteen(__mmask16 m, const T* p) noexcept {
+        const __m512i w = _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(m, p));
+        return _mm512_castsi512_ps(_mm512_slli_epi32(w, 16));
+    }
+};
 
 /**
  * kernel_12x32<R, Tail> — C[0..R)[0..n) += alpha · Ap · Bp on packed
@@ -117,42 +151,47 @@ SIMD_ML_ALWAYS_INLINE void run_tile(int rows, int n, int k, const float* Ap, con
 
 /**
  * pack_a — op(A) into 12-row micro-panels, k-major, rows past mc zero; trans:
- * A stored K×M (as pack_a in the AVX2 unit).
+ * A stored K×M (as pack_a in the AVX2 unit). E converts FP16/BF16 to FP32.
  */
-void pack_a(const float* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
+template <class E>
+void pack_a(const typename E::T* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
     for (int i = 0; i < mc; i += MR) {
         const int rows = std::min(MR, mc - i);
         float* dst = Ap + static_cast<std::ptrdiff_t>(i) * kc;
         if (trans) {
-            const float* src = A + i;
+            const typename E::T* src = A + i;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[p * lda + r] : 0.0f;
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? E::one(src + p * lda + r) : 0.0f;
         } else {
-            const float* src = A + i * lda;
+            const typename E::T* src = A + i * lda;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[r * lda + p] : 0.0f;
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? E::one(src + r * lda + p) : 0.0f;
         }
     }
 }
 
-/** pack_b — op(B) into 32-column micro-panels, columns past nc zero; trans: B stored N×K. */
-void pack_b(const float* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
+/**
+ * pack_b — op(B) into 32-column micro-panels, columns past nc zero; trans: B
+ * stored N×K. E converts FP16/BF16 to FP32 (16 values per conversion).
+ */
+template <class E>
+void pack_b(const typename E::T* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
     for (int j = 0; j < nc; j += NR) {
         const int cols = std::min(NR, nc - j);
         float* dst = Bp + static_cast<std::ptrdiff_t>(j) * kc;
         if (trans) {  // each panel column is one contiguous row of B
             for (int c = 0; c < NR; ++c) {
-                const float* src = B + (j + c) * ldb;
-                for (int p = 0; p < kc; ++p) dst[p * NR + c] = c < cols ? src[p] : 0.0f;
+                const typename E::T* src = B + (j + c) * ldb;
+                for (int p = 0; p < kc; ++p) dst[p * NR + c] = c < cols ? E::one(src + p) : 0.0f;
             }
             continue;
         }
-        const float* src = B + j;
+        const typename E::T* src = B + j;
         const __mmask16 m0 = static_cast<__mmask16>(cols >= 16 ? 0xFFFFu : (1u << cols) - 1u);
         const __mmask16 m1 = static_cast<__mmask16>(cols <= 16 ? 0u : cols >= 32 ? 0xFFFFu : (1u << (cols - 16)) - 1u);
         for (int p = 0; p < kc; ++p) {
-            _mm512_storeu_ps(dst + p * NR, _mm512_maskz_loadu_ps(m0, src + p * ldb));
-            _mm512_storeu_ps(dst + p * NR + 16, _mm512_maskz_loadu_ps(m1, src + p * ldb + 16));
+            _mm512_storeu_ps(dst + p * NR, E::sixteen(m0, src + p * ldb));
+            _mm512_storeu_ps(dst + p * NR + 16, E::sixteen(m1, src + p * ldb + 16));
         }
     }
 }
@@ -186,15 +225,18 @@ PackBuffers& thread_buffers() {
     return buf;
 }
 
-/** Operands as the loops see them: op(A) is M×K, op(B) is K×N. */
+/** Operands as the loops see them: op(A) is M×K, op(B) is K×N, elements E::T. */
+template <class E>
 struct Operands {
-    const float* A; std::ptrdiff_t lda; bool ta;
-    const float* B; std::ptrdiff_t ldb; bool tb;
-    const float* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
-    const float* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
+    using T = typename E::T;
+    const T* A; std::ptrdiff_t lda; bool ta;
+    const T* B; std::ptrdiff_t ldb; bool tb;
+    const T* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
+    const T* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
 };
 
-void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands& op,
+template <class E>
+void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands<E>& op,
                        float* C, std::ptrdiff_t ldc, const Blocking& bl) {
     PackBuffers& buf = thread_buffers();
     const int kc_max = std::min(K, bl.kc);
@@ -203,10 +245,10 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
     float* Ap = buf.get_a(static_cast<std::size_t>(kc_max) * ((mc_max + MR - 1) / MR * MR));
     for (int pc = 0; pc < K; pc += bl.kc) {
         const int kc = std::min(K - pc, bl.kc);
-        pack_b(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
+        pack_b<E>(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
         for (int ic = 0; ic < M; ic += bl.mc) {
             const int mc = std::min(M - ic, bl.mc);
-            pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
+            pack_a<E>(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
             for (int jr = 0; jr < nc; jr += NR) {
                 const int n = std::min(NR, nc - jr);
                 const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
@@ -220,7 +262,8 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
 
 #ifdef SIMD_ML_OPENMP
 /** Loops 2-5 of one column block on every thread of a team (as in the AVX2 unit). */
-void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands& op,
+template <class E>
+void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands<E>& op,
                             float* C, std::ptrdiff_t ldc, const Blocking& bl, float* Bp,
                             float* Ap) noexcept {
     const int team = omp_get_num_threads(), t = omp_get_thread_num();
@@ -231,14 +274,14 @@ void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Ope
     const int b1 = std::min(nc, static_cast<int>(static_cast<long long>(t + 1) * panels / team) * NR);
     for (int pc = 0; pc < K; pc += bl.kc) {
         const int kc = std::min(K - pc, bl.kc);
-        if (b1 > b0) pack_b(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
+        if (b1 > b0) pack_b<E>(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
         int packed_ic = -1;
 #pragma omp barrier
 #pragma omp for schedule(dynamic, 1)
         for (int c = 0; c < chunks; ++c) {
             const int ic = c / ch.n_chunks * ch.mc, j0 = c % ch.n_chunks * ch.nc;
             const int mc = std::min(M - ic, ch.mc), j1 = std::min(nc, j0 + ch.nc);
-            if (ic != packed_ic) { pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
+            if (ic != packed_ic) { pack_a<E>(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
             for (int jr = j0; jr < j1; jr += NR) {
                 const int n = std::min(NR, nc - jr);
                 const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
@@ -251,7 +294,8 @@ void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Ope
 }
 
 /** Loops 1-5 on `threads` threads; buffers allocated before the region (as in the AVX2 unit). */
-void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands& op,
+template <class E>
+void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands<E>& op,
                       float* C, std::ptrdiff_t ldc, const Blocking& bl) {
     PackBuffers& buf = thread_buffers();
     const int kc_max = std::min(K, bl.kc);
@@ -268,6 +312,29 @@ void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Opera
     }
 }
 #endif
+
+/** Loops 1-5 (C already scaled by beta, K > 0). */
+template <class E>
+void packed(int M, int N, int K, float alpha, const Operands<E>& op, float* C, std::ptrdiff_t ldc) {
+    const Blocking& bl = blocking();
+#ifdef SIMD_ML_OPENMP
+    if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
+        gemm_packed_team(threads, M, N, K, alpha, op, C, ldc, bl);
+        return;
+    }
+#endif
+    for (int jc = 0; jc < N; jc += bl.nc)
+        gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
+}
+
+/** FP16/BF16 packed path: conversion in pack_a/pack_b, the 12×32 FP32 kernel inside. */
+template <class E>
+void sgemm_lowp_packed(int M, int N, int K, float alpha, const typename E::T* A, int lda,
+                       const typename E::T* B, int ldb, float beta, float* C, int ldc) {
+    scale_matrix_c(C, M, N, ldc, beta);
+    if (K == 0) return;
+    packed<E>(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, false}, C, ldc);
+}
 
 }  // namespace
 
@@ -291,16 +358,35 @@ void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K,
     }
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
-    const Blocking& bl = blocking();
-    const Operands op{A, lda, trans_a, B, ldb, trans_b};
-#ifdef SIMD_ML_OPENMP
-    if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
-        gemm_packed_team(threads, M, N, K, alpha, op, C, ldc, bl);
+    packed<F32>(M, N, K, alpha, Operands<F32>{A, lda, trans_a, B, ldb, trans_b}, C, ldc);
+}
+
+// Small products take the AVX2 direct path, as for FP32.
+void sgemm_f16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+                      const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
+    if (M <= 0 || N <= 0 || K < 0) return;
+    if (sgemm_avx2_prefers_direct(M, N, K))
+        sgemm_f16_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    else
+        sgemm_lowp_packed<F16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+// With AVX512_BF16 (CPUID, checked once by dispatch.cpp) and one thread,
+// packed shapes use vdpbf16ps (avx512bf16_gemm.cpp); speed not measured.
+void sgemm_bf16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+                       const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
+    if (M <= 0 || N <= 0 || K < 0) return;
+    if (sgemm_avx2_prefers_direct(M, N, K)) {
+        sgemm_bf16_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+#ifdef SIMD_ML_HAVE_AVX512BF16
+    if (bf16_avx512bf16_available() && gemm_threads(M, N, K, MR, NR) == 1) {
+        sgemm_bf16_avx512bf16(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 #endif
-    for (int jc = 0; jc < N; jc += bl.nc)
-        gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
+    sgemm_lowp_packed<BF16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 }  // namespace gemm

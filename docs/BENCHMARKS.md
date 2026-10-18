@@ -15,7 +15,8 @@ environments are never mixed in one table.
 | Repetitions | ≥ 5 warm-up and ≥ 30 timed calls per case. The implementations of a case (ours and the baseline) alternate call by call, so clock and thermal drift during the run affects both alike. |
 | Statistic | Median; the interquartile range (p25–p75) is in the detailed tables. |
 | Clock | The core clock is sampled on the benchmark thread (5 ms chain of dependent register-register integer adds, 1 add/cycle) before each case, after every 5 timed rounds and after the case; per-cycle rates use the median sample, and the tables show the min–max. One sample after the case was not enough: in one run it read 3.07 GHz for a case that would then have reached 37.8 flop/cycle, above the 32 flop/cycle an AVX2 core with two 256-bit FMA pipes can execute. With `--min-ghz`, a case with any sample below that value is repeated (up to 3 attempts). A case that is still below it after the last attempt (`below_min_ghz` in the JSON) is left out of the tables here and in the README; a "Not shown" line under the table names it with its clock, and its numbers stay only in the JSON. An add-*immediate* chain is not used: Golden Cove-class cores fold it in the renamer (it measured 22 "GHz"). On the Lunar Lake laptop the add chain agrees with a 3-cycle `imul` chain within 2% on a P-core (4.35 vs 4.37–4.43 GHz). |
-| Baselines | Same process, same inputs. GEMM: NumPy `matmul` (OpenBLAS), writing into a preallocated C, as `sgemm` does. Activations: PyTorch CPU `torch.nn.functional` (oneDNN where it applies); out-of-place for both libraries, so both include allocating the output. |
+| Baselines | Same process, same inputs. GEMM: NumPy `matmul` (OpenBLAS), writing into a preallocated C, as `sgemm` does. FP16/BF16-input GEMM: our FP32 GEMM on the same values, and PyTorch's `torch.matmul` on float16 / bfloat16 tensors (it returns float16 / bfloat16; ours returns float32). Activations: PyTorch CPU `torch.nn.functional` (oneDNN where it applies); out-of-place for both libraries, so both include allocating the output. |
+| Allocation | On Linux, `bench` fixes glibc malloc's thresholds (`mallopt`: blocks below 32 MiB from the heap, heap never trimmed; recorded as `protocol.malloc`), so allocating an output reuses warm pages in every case. With glibc's dynamic defaults the mmap threshold depends on which large blocks were freed earlier: after the FP16/BF16 GEMM cases each 4 MiB activation output became a fresh mmap, page-faulted in on every call, and both libraries' activations measured 2–9× slower (SiLU 0.31–0.41 Gelem/s instead of about 3 for ours, 0.6–0.7 instead of about 2.2 for PyTorch). |
 | Metadata | CPU model, core label, pinned CPUs, caches of that core (CPUID leaf 4), OS, compiler, kernel flags, git commit, NumPy/BLAS/PyTorch versions, thread env vars, command, UTC timestamp. |
 | Files | `benchmarks/results/<label>_<date>_<commit>.json`; schema `simd-ml-kernels-bench/1` (see `python/simd_ml_kernels/_cli.py`, `cmd_bench`). |
 
@@ -48,6 +49,48 @@ clock sample of at least 3.6 GHz.
 ## Results
 
 <!-- BEGIN GENERATED: results-detail -->
+#### lnl-226v-wsl, 2026-10-18, commit `045918e51839`
+
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `045918e51839`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T07:17:13+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_045918e51839.json`](../benchmarks/results/lnl-226v-wsl_2026-10-18_045918e51839.json).
+
+**FP32 GEMM, square, single thread**
+
+| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | flop/cycle (ours / OpenBLAS) | IQR ms (ours) | IQR ms (OpenBLAS) | core GHz median (min–max) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 98.7 | 107.7 | 92% | 22.8 / 24.8 | 0.040–0.045 | 0.035–0.041 | 4.34 (3.80–4.51) |
+| 256 | 106.2 | 114.4 | 93% | 24.9 / 26.8 | 0.282–0.363 | 0.267–0.320 | 4.26 (3.97–4.65) |
+| 512 | 118.7 | 117.7 | 101% | 26.6 / 26.4 | 2.138–2.444 | 2.189–2.385 | 4.46 (3.79–4.59) |
+| 1024 | 119.4 | 122.1 | 98% | 27.4 / 28.0 | 17.520–18.268 | 17.397–17.883 | 4.35 (4.18–4.71) |
+| 2048 | 117.4 | 120.9 | 97% | 26.7 / 27.5 | 145.067–147.927 | 141.040–142.750 | 4.39 (4.19–4.58) |
+
+**FP16 / BF16-input GEMM, FP32 accumulation and output, single thread** (PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns float16 / bfloat16)
+
+| input | M×N×K | simd-ml-kernels GFLOP/s | our FP32 GFLOP/s | % of FP32 | PyTorch GFLOP/s | ours / PyTorch | IQR ms (ours) | IQR ms (FP32) | IQR ms (PyTorch) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FP16 | 128×128×128 | 104.6 | 109.1 | 96% | 71.5 | 1.46× | 0.038–0.050 | 0.036–0.046 | 0.055–0.076 | 4.29 (3.65–4.65) |
+| FP16 | 256×256×256 | 100.3 | 105.7 | 95% | 71.1 | 1.41× | 0.290–0.392 | 0.269–0.359 | 0.405–0.549 | 4.13 (3.75–4.50) |
+| FP16 | 512×512×512 | 116.1 | 120.7 | 96% | 82.2 | 1.41× | 2.225–2.498 | 2.153–2.441 | 3.143–3.554 | 4.28 (3.95–4.42) |
+| FP16 | 1024×1024×1024 | 116.9 | 119.2 | 98% | 82.8 | 1.41× | 18.065–18.743 | 17.754–18.319 | 25.503–26.315 | 4.36 (3.78–4.59) |
+| FP16 | 2048×2048×2048 | 116.3 | 116.3 | 100% | 81.8 | 1.42× | 146.570–148.865 | 146.719–148.900 | 207.603–211.642 | 4.43 (3.95–4.57) |
+| FP16 | 1×4096×4096 | 5.3 | 2.9 | 180% | 8.4 | 0.63× | 6.061–6.632 | 11.017–11.709 | 3.869–4.239 | 4.49 (4.13–4.63) |
+| BF16 | 128×128×128 | 103.6 | 103.8 | 100% | 89.2 | 1.16× | 0.036–0.046 | 0.036–0.046 | 0.040–0.053 | 4.43 (4.18–4.64) |
+| BF16 | 256×256×256 | 114.4 | 115.5 | 99% | 113.6 | 1.01× | 0.275–0.330 | 0.269–0.314 | 0.273–0.366 | 4.41 (4.16–4.72) |
+| BF16 | 512×512×512 | 120.3 | 120.3 | 100% | 118.5 | 1.02× | 2.165–2.401 | 2.160–2.382 | 2.187–2.499 | 4.17 (4.05–4.54) |
+| BF16 | 1024×1024×1024 | 117.2 | 117.9 | 99% | 120.3 | 0.97× | 18.146–18.576 | 17.661–18.412 | 17.551–18.224 | 4.30 (3.93–4.70) |
+| BF16 | 2048×2048×2048 | 118.2 | 117.4 | 101% | 121.7 | 0.97× | 143.962–146.735 | 144.340–148.024 | 139.650–142.467 | 4.48 (3.63–4.64) |
+| BF16 | 1×4096×4096 | 5.0 | 3.1 | 162% | 8.5 | 0.58× | 6.499–6.977 | 10.755–11.482 | 3.745–4.173 | 4.36 (3.85–4.63) |
+
+**Activations and normalization, out-of-place, single thread**
+
+| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | IQR µs (ours) | IQR µs (PyTorch) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `gelu_exact` | 1048576 | 2.428 | 0.545 | 0.368 | 6.60× | 384.3–477.4 | 2722.4–3027.5 | 4.45 (3.70–4.54) |
+| `gelu_tanh` | 1048576 | 1.521 | 0.342 | 0.517 | 2.95× | 625.3–789.3 | 1872.6–2217.4 | 4.45 (4.18–4.52) |
+| `silu` | 1048576 | 2.904 | 0.677 | 2.178 | 1.33× | 326.0–466.9 | 459.0–548.1 | 4.29 (3.62–4.66) |
+| `relu` | 1048576 | 4.994 | 1.127 | 4.439 | 1.13× | 200.9–233.9 | 209.9–275.4 | 4.43 (3.93–4.54) |
+| `softmax` | 1024×1024 | 1.764 | 0.395 | 1.364 | 1.29× | 532.3–653.6 | 710.2–836.1 | 4.47 (4.24–4.70) |
+| `layer_norm` | 1024×1024 | 3.398 | 0.772 | 3.629 | 0.94× | 254.1–365.9 | 235.8–316.3 | 4.40 (3.70–4.56) |
+
 #### lnl-226v-wsl, 2026-10-18, commit `b193633ecec1`
 
 Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `b193633ecec1`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T06:28:22+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json`](../benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json).
@@ -123,10 +166,18 @@ Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, s
 | `layer_norm` | 1024×1024 | 3.184 | 0.740 | 3.905 | 0.82× | 313.0–428.4 | 250.5–322.3 | 4.30 (4.19–4.42) |
 <!-- END GENERATED: results-detail -->
 
+PyTorch's exact GeLU (`F.gelu`, erf) is the least stable baseline on the
+laptop: 1.571, 1.612 and 0.368 Gelem/s in the runs on `7a698867be89`,
+`b193633ecec1` and `045918e51839`, while ours measured 2.414, 2.651 and 2.428;
+so its ratio (1.54×, 1.64×, 6.60×) mostly tracks PyTorch. The cause is not
+investigated.
+
 ## What is not measured yet
 
 - AVX-512 performance: neither the laptop (Lunar Lake) nor the workstation
-  (i9-9900, Coffee Lake) has AVX-512.
+  (i9-9900, Coffee Lake) has AVX-512. This includes the BF16 `vdpbf16ps` path
+  (AVX512_BF16), which is checked for correctness under Intel SDE only.
+- FP16/BF16 GEMM with more than one thread.
 - Multi-threaded GEMM scaling (W3).
 - The workstation (i9-9900).
 - Fraction of theoretical peak: the per-cycle numbers above are measured, but

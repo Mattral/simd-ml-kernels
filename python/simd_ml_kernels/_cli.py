@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import os
@@ -324,6 +325,33 @@ def _record(results, kernel, impl, shape, t, work, unit, clock):
     return r
 
 
+def _pin_malloc() -> str | None:
+    """Fix glibc malloc's thresholds for the bench process, so allocating an
+    activation's output (out-of-place, for both libraries) costs the same in
+    every case. With glibc's dynamic defaults, the mmap threshold depends on
+    which large blocks were freed earlier in the process; after the FP16/BF16
+    GEMM cases every 4 MiB output became a fresh mmap and was page-faulted in
+    on each call: SiLU on 2^20 floats measured 0.4-0.75 Gelem/s for ours and
+    0.6 for PyTorch instead of about 3 and 2.2 (Lunar Lake, WSL2). Blocks below
+    32 MiB (glibc's maximum threshold) now come from the heap, which is never
+    trimmed, so outputs reuse warm pages. Returns what was set, or None."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        m_trim_threshold, m_top_pad, m_mmap_threshold = -1, -2, -3
+        settings = {"M_MMAP_THRESHOLD": (m_mmap_threshold, 32 << 20),
+                    "M_TRIM_THRESHOLD": (m_trim_threshold, 1 << 30),
+                    "M_TOP_PAD": (m_top_pad, 64 << 20)}
+        if all(libc.mallopt(p, v) == 1 for p, v in settings.values()):
+            return "glibc mallopt " + ", ".join(f"{k}={v}" for k, (_, v) in settings.items())
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     bad = {k: os.environ.get(k) for k in THREAD_ENV if os.environ.get(k) != "1"}
     if bad and not args.allow_threads:
@@ -338,6 +366,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     except ImportError:
         torch = None
 
+    malloc = _pin_malloc()
     rng = np.random.default_rng(0)
     results: list[dict] = []
     def show(r):
@@ -359,6 +388,29 @@ def cmd_bench(args: argparse.Namespace) -> int:
         stats, clock = _time([fn for _, fn in impls], args.warmup, args.reps, args.min_ghz)
         for (impl, _), t in zip(impls, stats):
             show(_record(results, "sgemm", impl, (n, n, n), t, 2.0 * n ** 3, "flop", clock))
+
+    # FP16 / BF16 inputs: against our FP32 GEMM on the same values (the
+    # conversion's cost) and PyTorch's matmul on float16 / bfloat16 tensors
+    # (oneDNN; it returns float16 / bfloat16, ours float32). The square sizes
+    # are compute-bound; 1 x 4096 x 4096 (one row times a weight matrix) is
+    # bound by reading B, where 2-byte inputs halve the traffic.
+    for m, n, k in [(s, s, s) for s in args.sizes] + [(1, 4096, 4096)]:
+        a = rng.standard_normal((m, k)).astype(np.float32)
+        b = rng.standard_normal((k, n)).astype(np.float32)
+        c = np.empty((m, n), np.float32)
+        for kernel, lowp_fn, conv, tdtype in (
+                ("sgemm_f16", sk.sgemm_f16, _as_f16, "float16"),
+                ("sgemm_bf16", sk.sgemm_bf16, _as_bf16, "bfloat16")):
+            impls = [("simd_ml_kernels", functools.partial(lowp_fn, conv(a)[0], conv(b)[0], C=c)),
+                     ("simd_ml_kernels fp32", functools.partial(sk.sgemm, a, b, C=c))]
+            if torch is not None:
+                at = torch.from_numpy(a).to(getattr(torch, tdtype))
+                bt = torch.from_numpy(b).to(getattr(torch, tdtype))
+                impls.append(("torch " + torch.__version__ + " " + tdtype,
+                              functools.partial(torch.matmul, at, bt)))
+            stats, clock = _time([f for _, f in impls], args.warmup, args.reps, args.min_ghz)
+            for (impl, _), t in zip(impls, stats):
+                show(_record(results, kernel, impl, (m, n, k), t, 2.0 * m * n * k, "flop", clock))
 
     x = rng.standard_normal(args.elems).astype(np.float32)
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)
@@ -418,7 +470,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
                          "clock": "core GHz sampled on the same thread (5 ms dependent "
                                   "add-reg-reg chain, 1 cycle/add) before, every 5 rounds and "
                                   "after each case; per-cycle rates use the median",
-                         "min_ghz": args.min_ghz},
+                         "min_ghz": args.min_ghz,
+                         "malloc": malloc or "not pinned (allocator defaults)"},
             "command": " ".join(["python -m simd_ml_kernels"] + (args.argv or [])),
             "python": platform.python_version(),
             "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),

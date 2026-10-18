@@ -110,7 +110,8 @@ re-measured; see docs/BENCHMARKS.md for what is measured.
 - [❌] Tile-size re-tuning for Sapphire Rapids / Zen 4 (larger L2, different
       port layout) — current MC/KC/NC constants were derived for Skylake-class
       caches and are not yet re-validated on newer AVX-512 microarchitectures.
-- [❌] AVX-512 BF16/VNNI paths (separate from the FP32 work done here).
+- [⚠️] AVX-512 BF16/VNNI paths: BF16 `vdpbf16ps` done in W4 (CPUID-gated,
+      correct under SDE `-spr`, speed not measured); VNNI INT8 is W4's next item.
 
 **Since resolved:** `isa=` (in `sgemm()` / `GEMMConfig`) now genuinely forces
 a specific kernel per-call — `set_gemm_isa_override`/`get_gemm_isa_override`
@@ -139,23 +140,12 @@ hardware where auto-detect and a forced choice happen to coincide.
       arithmetic itself. The direct path fixes this.
       Tested in `test_gemm_packed.cpp::test_small_gemm_direct_path()` across 8
       representative shapes including the key N=64 regression case.
-- [✅] BF16 GEMM kernel (AVX2 zero-extend path; vdpbf16ps packing path → v1.0).
-      `sgemm_bf16_avx2`: converts BF16→FP32 using only AVX2 integer ops
-      (`_mm256_cvtepu16_epi32` + `_mm256_slli_epi32`, 3 instructions per 8
-      values — cheaper than F16C's VCVTPH2PS). Requires no special compile
-      flag beyond AVX2. `bf16_avx512bf16_available()` provides a runtime
-      check for vdpbf16ps availability (Ice Lake-SP+) ahead of the v1.0
-      packing path. Exposed as `simd_ml_kernels.sgemm_bf16(A, B)` → float32.
-      Tested in `tests/test_gemm_bf16.cpp` across 14 shapes including BF16
-      bit-pattern unit test and beta=0 NaN-safety check.
-- [✅] FP16 GEMM kernel (F16C extension). `sgemm_f16_avx2`: converts FP16
-      inputs on load via `_mm256_cvtph_ps` (1 instruction per 8 values, hidden
-      behind FMA latency), accumulates in FP32, stores FP32 output. Exposed as
-      `simd_ml_kernels.sgemm_f16(A_f16, B_f16)` → `ndarray[float32]`. Runtime
-      guard via `f16c_available()` / `simd_ml_kernels.f16c_available()`.
-      Implemented in `src/kernels/gemm/f16_gemm.{hpp,cpp}`, tested in
-      `tests/test_gemm_f16.cpp` across 14 shapes including single-row
-      inference (M=1, N=64, K=128) and alpha/beta variants.
+- [✅] BF16 and FP16 GEMM (`sgemm_bf16`, `sgemm_f16` → float32). Since W4 the
+      inputs are converted to FP32 once while packing and the FP32 micro-kernels
+      run unchanged (DESIGN.md §4); the first versions converted B on every use
+      without blocking and ran at 12–17% of the FP32 GEMM. `vdpbf16ps` on
+      AVX512_BF16 CPUs. Tested in `tests/test_gemm_lowp.cpp` and
+      `tests/test_precision.py` against float64.
 - [✅] Vectorized `exp` via Cody–Waite (`fast_exp_avx2` in `simd_math.hpp`, shared by GeLU/SiLU/Softmax)
 - [✅] Vectorized Softmax inner loop using fast exp approximation (`softmax_avx2.cpp` Pass 2)
 - [❌] `FlashAttention`-style fused attention microkernel (research target)
@@ -181,8 +171,11 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   for rows up to 1024 and less accurate). Remaining: AVX-512 measurement on
   real hardware; OpenMP on by default with a scaling table. Measured on
   ≥ 2 CPUs.
-- **W4 — low precision that is faster than FP32.** BF16/FP16 converted at pack
-  time; `vdpbf16ps` and VNNI INT8 where available.
+- **W4 — low precision that is faster than FP32.** Done: BF16/FP16 converted
+  at pack time (95–101% of the FP32 GEMM at N = 128–2048, faster where
+  reading B dominates; memory savings only on AVX2, which has no 16-bit FMA;
+  BENCHMARKS.md), `vdpbf16ps` behind CPUID (speed not measured). Next: INT8
+  with VNNI (AVX-VNNI, AVX-512 VNNI) and per-channel scales.
 - **W5 — CPU LLM decode kernels.** Quantized GEMV with fused dequantization,
   RMSNorm/SwiGLU epilogues, flash-decoding attention; judged by % of measured
   STREAM bandwidth vs PyTorch CPU and llama.cpp.
@@ -215,5 +208,5 @@ between simd-ml-kernels and production BLAS libraries.
 | Fixed tile sizes (MC/KC/NC) | Chosen for Skylake-class caches; not derived from the running CPU | W3 |
 | Small matrices (max(M,N,K) ≤ 128) | One FMA chain per output strip: 24% of OpenBLAS at N = 128 on the reference laptop | W3 |
 | Single-threaded default | OpenMP is a build option, off by default; the threaded GEMM (shared B panel, dynamic chunks) has no published scaling numbers yet (needs a non-hybrid 8-core CPU) | W3 |
-| BF16/FP16 GEMM unpacked and unblocked | They convert B on every use and have no cache blocking; speed not measured with the current protocol | W4 |
+| BF16/FP16 GEMM: memory savings only on AVX2 | No 16-bit FMA on AVX2: about the FP32 GEMM's speed on compute-bound shapes; the single-row case is faster than our FP32 but loses to PyTorch (0.58–0.63×); narrow N ≤ 16 shapes pay for converting A (DESIGN.md §4); `vdpbf16ps` speed not measured | W5 (GEMV), AVX512_BF16 hardware |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

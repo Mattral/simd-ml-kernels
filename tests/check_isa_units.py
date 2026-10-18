@@ -85,7 +85,8 @@ def main() -> int:
         name, objs = spec.split("=", 1)
         units[name] += [o for o in objs.split("|") if o]
 
-    forbidden = {"scalar": ("vex", "evex", "bitcount"), "avx2": ("evex",), "avx512": ()}
+    forbidden = {"scalar": ("vex", "evex", "bitcount"), "avx2": ("evex",), "avx512": (),
+                 "avx512bf16": ()}
     errors = []
     owner: dict[str, set[str]] = defaultdict(set)
     for unit, objs in units.items():

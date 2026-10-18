@@ -73,8 +73,9 @@ def sgemm_f16(
     A and B must have dtype=np.float16 (IEEE 754 half-precision, 16-bit).
     Output C is always float32 — FP16 accumulation loses precision at K > 64.
 
-    Runs on every CPU: F16C conversion in the AVX2 kernels, exact software
-    conversion in the scalar ones.
+    Runs on every CPU: F16C conversion in the AVX2/AVX-512 kernels (once per
+    element while packing, then the FP32 micro-kernel), exact software
+    conversion in the scalar ones. The error bound is the FP32 GEMM's.
 
     Parameters
     ----------
@@ -259,10 +260,10 @@ def bf16_avx512bf16_available() -> bool:
     """
     Return True if this CPU supports AVX-512 BF16 (vdpbf16ps instruction).
 
-    Available on Intel Ice Lake-SP (Xeon, 2021+), Sapphire Rapids,
-    and AMD Zen4+ (EPYC Genoa). NOT required for sgemm_bf16 (which uses the
-    AVX2 zero-extend path). Indicates availability of the higher-throughput
-    vdpbf16ps packing path planned for v1.0.
+    Available on Intel Cooper Lake, Sapphire Rapids and later, and AMD Zen 4
+    and later. Not required for sgemm_bf16; where True, the AVX-512 table's
+    sgemm_bf16 uses vdpbf16ps for packed single-threaded products (speed not
+    measured; BF16 subnormal inputs read as zero).
     """
     ...
 
@@ -281,7 +282,11 @@ def sgemm_bf16(
     Accepts uint16 dtype (explicit bit-cast) or bfloat16 dtype (numpy>=2.0 / ml_dtypes).
     Output C is always float32.
 
-    Runs on every CPU. BF16→FP32 is exact: zero-extend and shift left by 16.
+    Runs on every CPU. BF16→FP32 is exact (zero-extend and shift left by 16),
+    so the error bound is the FP32 GEMM's for the BF16 values. The AVX2 and
+    AVX-512 tables convert once per element while packing and run the FP32
+    micro-kernel; with AVX512_BF16, packed single-threaded products use
+    vdpbf16ps (BF16 subnormal inputs read as zero, subnormal results flushed).
 
     Parameters
     ----------

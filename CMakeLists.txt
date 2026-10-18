@@ -66,11 +66,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
     endif()
     set(AVX2_FLAGS   -mavx2 -mfma -mf16c)
     set(AVX512_FLAGS -mavx2 -mfma -mf16c -mavx512f -mavx512dq -mavx512bw -mavx512vl)
+    set(AVX512BF16_FLAGS ${AVX512_FLAGS} -mavx512bf16)
     set(SIMD_MATH_FLAGS -ffast-math -fno-finite-math-only)
 elseif(MSVC)
     set(BASE_FLAGS /O2 /DNDEBUG)
     set(AVX2_FLAGS /arch:AVX2)
     set(AVX512_FLAGS /arch:AVX512)
+    set(AVX512BF16_FLAGS /arch:AVX512)
     set(SIMD_MATH_FLAGS /fp:fast)
 endif()
 
@@ -99,8 +101,6 @@ set(SIMD_ML_SCALAR_SRCS
 set(SIMD_ML_AVX2_SRCS
     src/kernels/kernels_avx2.cpp
     src/kernels/gemm/avx2_gemm_packed.cpp
-    src/kernels/gemm/f16_gemm.cpp
-    src/kernels/gemm/bf16_gemm.cpp
     src/kernels/intrinsic_gelu.cpp
     src/kernels/activations/relu_avx2.cpp
     src/kernels/activations/silu_avx2.cpp
@@ -112,13 +112,30 @@ set(SIMD_ML_AVX512_SRCS
     src/kernels/gemm/avx512_gemm_packed.cpp
 )
 
+# Extension units (no kernel table of their own): avx512bf16 holds the
+# vdpbf16ps BF16 GEMM, called from the AVX-512 table after a CPUID check;
+# built only if the compiler accepts -mavx512bf16 (GCC 10+, Clang 9+).
+set(SIMD_ML_AVX512BF16_SRCS
+    src/kernels/gemm/avx512bf16_gemm.cpp
+)
+
 set(SIMD_ML_ISAS scalar)
 if(SIMD_ML_ENABLE_X86)
     list(APPEND SIMD_ML_ISAS avx2 avx512)
+    if(MSVC)
+        list(APPEND SIMD_ML_ISAS avx512bf16)
+    else()
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag(-mavx512bf16 SIMD_ML_CXX_HAS_AVX512BF16)
+        if(SIMD_ML_CXX_HAS_AVX512BF16)
+            list(APPEND SIMD_ML_ISAS avx512bf16)
+        endif()
+    endif()
 endif()
 set(_isa_flags_scalar "")
 set(_isa_flags_avx2   ${AVX2_FLAGS} ${SIMD_MATH_FLAGS})
 set(_isa_flags_avx512 ${AVX512_FLAGS} ${SIMD_MATH_FLAGS})
+set(_isa_flags_avx512bf16 ${AVX512BF16_FLAGS} ${SIMD_MATH_FLAGS})
 set(SIMD_ML_ISA_OBJECTS "")
 foreach(isa IN LISTS SIMD_ML_ISAS)
     string(TOUPPER ${isa} ISA)
@@ -137,6 +154,9 @@ foreach(isa IN LISTS SIMD_ML_ISAS)
     list(APPEND SIMD_ML_ISA_OBJECTS $<TARGET_OBJECTS:simd_ml_isa_${isa}>)
     message(STATUS "ISA unit ${isa}: ${_flags_str}")
 endforeach()
+if("avx512bf16" IN_LIST SIMD_ML_ISAS)
+    target_compile_definitions(simd_ml_isa_avx512 PRIVATE SIMD_ML_HAVE_AVX512BF16)
+endif()
 
 # ─── Kernel library (shared between Python extension, tests and benchmarks) ───
 add_library(simd_ml_kernels_lib STATIC ${SIMD_ML_ISA_OBJECTS})

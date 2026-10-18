@@ -1,0 +1,1461 @@
+{
+ "schema": "simd-ml-kernels-bench/1",
+ "machine": {
+  "label": "lnl-226v-wsl",
+  "cpu_model": "Intel(R) Core(TM) Ultra 5 226V",
+  "core": "WSL2 vCPU 2 (P-core by measured clock, see protocol)",
+  "pinned_cpus": [
+   2
+  ],
+  "caches": [
+   {
+    "level": 1,
+    "type": "D",
+    "size_kib": 48,
+    "ways": 12,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 1,
+    "type": "I",
+    "size_kib": 64,
+    "ways": 16,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 2,
+    "type": "U",
+    "size_kib": 2560,
+    "ways": 10,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 3,
+    "type": "U",
+    "size_kib": 8192,
+    "ways": 8,
+    "line_bytes": 64,
+    "max_sharing_cpus": 8
+   }
+  ],
+  "logical_cpus": 8,
+  "os": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "note": "AC power; Windows power scheme Balanced, power mode Best performance; WSL2 Ubuntu 24.04"
+ },
+ "build": {
+  "version": "0.2.0",
+  "git_commit": "045918e51839",
+  "compiler": "GNU 13.3.0",
+  "kernel_flags": "-O3 -DNDEBUG -Wall -Wextra -Wshadow -Wno-unused-parameter -mavx2 -mfma -mf16c -ffast-math -fno-finite-math-only",
+  "isa_compiled": "scalar avx2 avx512",
+  "openmp": false,
+  "sgemm_tile": "6x16 (12 YMM accumulators)",
+  "sgemm_blocking": {
+   "kc": 384,
+   "mc": 426,
+   "nc": 2720
+  }
+ },
+ "baselines": {
+  "numpy": "2.5.4",
+  "blas": {
+   "name": "scipy-openblas",
+   "version": "0.3.34.106.0"
+  },
+  "torch": "2.14.1+cpu"
+ },
+ "env": {
+  "OPENBLAS_NUM_THREADS": "1",
+  "OMP_NUM_THREADS": "1",
+  "MKL_NUM_THREADS": "1"
+ },
+ "protocol": {
+  "warmup": 5,
+  "reps": 30,
+  "statistic": "median; p25/p75 = interquartile range",
+  "interleaved": "implementations of a case alternate call by call",
+  "clock": "core GHz sampled on the same thread (5 ms dependent add-reg-reg chain, 1 cycle/add) before, every 5 rounds and after each case; per-cycle rates use the median",
+  "min_ghz": 3.6,
+  "malloc": "glibc mallopt M_MMAP_THRESHOLD=33554432, M_TRIM_THRESHOLD=1073741824, M_TOP_PAD=67108864"
+ },
+ "command": "python -m simd_ml_kernels bench --json benchmarks/results/lnl-226v-wsl_2026-10-18_045918e51839.json --label lnl-226v-wsl --min-ghz 3.6 --core WSL2 vCPU 2 (P-core by measured clock, see protocol) --note AC power; Windows power scheme Balanced, power mode Best performance; WSL2 Ubuntu 24.04",
+ "python": "3.12.3",
+ "timestamp_utc": "2026-10-18T07:17:13+00:00",
+ "results": [
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.24955e-05,
+   "p25_s": 4.0164000000000004e-05,
+   "p75_s": 4.4970000000000005e-05,
+   "min_s": 3.5564e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.337297141959807,
+    "min": 3.795456762346336,
+    "max": 4.51064413959463,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 98.69995646597874,
+   "flop_per_cycle": 22.75609745782397
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 3.8934500000000005e-05,
+   "p25_s": 3.5427000000000005e-05,
+   "p75_s": 4.0687e-05,
+   "min_s": 3.3367e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.337297141959807,
+    "min": 3.795456762346336,
+    "max": 4.51064413959463,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 107.7271828327062,
+   "flop_per_cycle": 24.83739972309798
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.0003159705,
+   "p25_s": 0.00028172475000000005,
+   "p75_s": 0.00036310225,
+   "min_s": 0.00025889900000000004,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.264944052699851,
+    "min": 3.9702304182776706,
+    "max": 4.645800312662361,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 106.1948251498162,
+   "flop_per_cycle": 24.899464995933847
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.000293409,
+   "p25_s": 0.00026662925000000003,
+   "p75_s": 0.00032045275,
+   "min_s": 0.000252726,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.264944052699851,
+    "min": 3.9702304182776706,
+    "max": 4.645800312662361,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 114.3606092519316,
+   "flop_per_cycle": 26.81409365253866
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0022617625000000002,
+   "p25_s": 0.0021382445000000003,
+   "p75_s": 0.00244392475,
+   "min_s": 0.002073924,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.4573763566170115,
+    "min": 3.7862968615763943,
+    "max": 4.592375928831951,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 118.68419252684576,
+   "flop_per_cycle": 26.626468808418682
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.002281103,
+   "p25_s": 0.002189284,
+   "p75_s": 0.002385473,
+   "min_s": 0.002030824,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.4573763566170115,
+    "min": 3.7862968615763943,
+    "max": 4.592375928831951,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 117.67791984842421,
+   "flop_per_cycle": 26.400714329121072
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.017989567,
+   "p25_s": 0.01752016575,
+   "p75_s": 0.018268,
+   "min_s": 0.017008927,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.354642170525365,
+    "min": 4.1816101150360945,
+    "max": 4.708892350796785,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 119.37383751371003,
+   "flop_per_cycle": 27.413007278002866
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.017585976,
+   "p25_s": 0.01739688675,
+   "p75_s": 0.0178825185,
+   "min_s": 0.016902068000000003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.354642170525365,
+    "min": 4.1816101150360945,
+    "max": 4.708892350796785,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 122.11341855578559,
+   "flop_per_cycle": 28.042124650864995
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.1463917655,
+   "p25_s": 0.14506679075,
+   "p75_s": 0.1479274815,
+   "min_s": 0.142790611,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.393378430609674,
+    "min": 4.188283695191073,
+    "max": 4.578896780517949,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 117.35543406640589,
+   "flop_per_cycle": 26.711888338314697
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.1421259695,
+   "p25_s": 0.14104018250000003,
+   "p75_s": 0.14275001075,
+   "min_s": 0.137196849,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.393378430609674,
+    "min": 4.188283695191073,
+    "max": 4.578896780517949,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 120.87776248379436,
+   "flop_per_cycle": 27.51362405788021
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.0112e-05,
+   "p25_s": 3.8403500000000006e-05,
+   "p75_s": 5.010875e-05,
+   "min_s": 3.7359e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.290779994689245,
+    "min": 3.6522735691305224,
+    "max": 4.648774437784,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 104.56481850817711,
+   "flop_per_cycle": 24.369652752552767
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 3.8439e-05,
+   "p25_s": 3.607625e-05,
+   "p75_s": 4.6081e-05,
+   "min_s": 3.5697e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.290779994689245,
+    "min": 3.6522735691305224,
+    "max": 4.648774437784,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 109.11584588568901,
+   "flop_per_cycle": 25.43030545046428
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "torch 2.14.1+cpu float16",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 5.86995e-05,
+   "p25_s": 5.450675000000001e-05,
+   "p75_s": 7.6205e-05,
+   "min_s": 5.3001e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.290779994689245,
+    "min": 3.6522735691305224,
+    "max": 4.648774437784,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 71.45382839717546,
+   "flop_per_cycle": 16.652876280213572
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.04695e-05,
+   "p25_s": 3.590325e-05,
+   "p75_s": 4.5820000000000005e-05,
+   "min_s": 3.4892000000000004e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.425963021398719,
+    "min": 4.175332967892286,
+    "max": 4.644048216830612,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 103.64111244270376,
+   "flop_per_cycle": 23.41662412035934
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.04245e-05,
+   "p25_s": 3.61475e-05,
+   "p75_s": 4.647475e-05,
+   "min_s": 3.5875000000000005e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.425963021398719,
+    "min": 4.175332967892286,
+    "max": 4.644048216830612,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 103.7564843102574,
+   "flop_per_cycle": 23.442691185763152
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "torch 2.14.1+cpu bfloat16",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.7047e-05,
+   "p25_s": 3.959525e-05,
+   "p75_s": 5.2980000000000004e-05,
+   "min_s": 3.8390000000000003e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.425963021398719,
+    "min": 4.175332967892286,
+    "max": 4.644048216830612,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 89.15135927901886,
+   "flop_per_cycle": 20.142816116625557
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.0003345545,
+   "p25_s": 0.000290424,
+   "p75_s": 0.00039163875000000007,
+   "min_s": 0.00026591900000000004,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.130538511251259,
+    "min": 3.7469964865005583,
+    "max": 4.496539131131788,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 100.2958621091631,
+   "flop_per_cycle": 24.28154630103681
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.0003173825,
+   "p25_s": 0.00026931700000000004,
+   "p75_s": 0.0003592865,
+   "min_s": 0.000256238,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.130538511251259,
+    "min": 3.7469964865005583,
+    "max": 4.496539131131788,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 105.72237599741638,
+   "flop_per_cycle": 25.595300881334726
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "torch 2.14.1+cpu float16",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.0004721095,
+   "p25_s": 0.00040518725,
+   "p75_s": 0.00054931075,
+   "min_s": 0.00037387200000000003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.130538511251259,
+    "min": 3.7469964865005583,
+    "max": 4.496539131131788,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 71.07340987631048,
+   "flop_per_cycle": 17.206814482594012
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.000293416,
+   "p25_s": 0.00027536250000000003,
+   "p75_s": 0.0003300275,
+   "min_s": 0.000264434,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.412797481120934,
+    "min": 4.15634096325379,
+    "max": 4.717506844807588,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 114.35788096082014,
+   "flop_per_cycle": 25.915053081423324
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.0002904865,
+   "p25_s": 0.00026870700000000003,
+   "p75_s": 0.00031402700000000003,
+   "min_s": 0.00025735,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.412797481120934,
+    "min": 4.15634096325379,
+    "max": 4.717506844807588,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 115.51115800562161,
+   "flop_per_cycle": 26.176401364396988
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "torch 2.14.1+cpu bfloat16",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.00029549000000000003,
+   "p25_s": 0.00027254575000000005,
+   "p75_s": 0.00036649400000000003,
+   "min_s": 0.00025316,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.412797481120934,
+    "min": 4.15634096325379,
+    "max": 4.717506844807588,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 113.55522014281362,
+   "flop_per_cycle": 25.733159209918796
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0023114715,
+   "p25_s": 0.0022252885000000003,
+   "p75_s": 0.00249811475,
+   "min_s": 0.0020769630000000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.277283908698184,
+    "min": 3.9497231836506743,
+    "max": 4.418568283977925,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 116.13184761308976,
+   "flop_per_cycle": 27.150839198895998
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.002224579,
+   "p25_s": 0.0021528575,
+   "p75_s": 0.00244053775,
+   "min_s": 0.00208261,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.277283908698184,
+    "min": 3.9497231836506743,
+    "max": 4.418568283977925,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 120.66798077299121,
+   "flop_per_cycle": 28.211356400168725
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "torch 2.14.1+cpu float16",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0032654760000000002,
+   "p25_s": 0.0031433510000000004,
+   "p75_s": 0.0035542525,
+   "min_s": 0.003043174,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.277283908698184,
+    "min": 3.9497231836506743,
+    "max": 4.418568283977925,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 82.20408173264786,
+   "flop_per_cycle": 19.218757390754345
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0022314975000000004,
+   "p25_s": 0.002165421,
+   "p75_s": 0.00240075525,
+   "min_s": 0.002041268,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.167343712374928,
+    "min": 4.046457182220638,
+    "max": 4.537217612452966,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 120.29386364985844,
+   "flop_per_cycle": 28.865836838138833
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0022309555000000003,
+   "p25_s": 0.0021604517500000003,
+   "p75_s": 0.002381582,
+   "min_s": 0.002092353,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.167343712374928,
+    "min": 4.046457182220638,
+    "max": 4.537217612452966,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 120.32308847038857,
+   "flop_per_cycle": 28.872849655546563
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "torch 2.14.1+cpu bfloat16",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0022651045,
+   "p25_s": 0.0021866362500000004,
+   "p75_s": 0.00249871275,
+   "min_s": 0.0020738600000000003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.167343712374928,
+    "min": 4.046457182220638,
+    "max": 4.537217612452966,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 118.5090824727954,
+   "flop_per_cycle": 28.43755894693367
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.018372876000000003,
+   "p25_s": 0.018064918000000003,
+   "p75_s": 0.018742720750000004,
+   "min_s": 0.017616435,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.358088704448868,
+    "min": 3.7754099245710857,
+    "max": 4.589561501321395,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 116.88336915788251,
+   "flop_per_cycle": 26.81986923271306
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.018009227000000003,
+   "p25_s": 0.017753695,
+   "p75_s": 0.01831912275,
+   "min_s": 0.017262659,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.358088704448868,
+    "min": 3.7754099245710857,
+    "max": 4.589561501321395,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 119.24352155703295,
+   "flop_per_cycle": 27.361425992845344
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "torch 2.14.1+cpu float16",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.0259262585,
+   "p25_s": 0.02550276375,
+   "p75_s": 0.026314692250000004,
+   "min_s": 0.025297508000000003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.358088704448868,
+    "min": 3.7754099245710857,
+    "max": 4.589561501321395,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 82.83044959996832,
+   "flop_per_cycle": 19.00614127367635
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.018326539500000003,
+   "p25_s": 0.0181464635,
+   "p75_s": 0.0185757185,
+   "min_s": 0.017126691,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.295720578703721,
+    "min": 3.930905684600638,
+    "max": 4.700957408738257,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 117.17889501179422,
+   "flop_per_cycle": 27.278053324211832
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.018214372,
+   "p25_s": 0.017660960500000003,
+   "p75_s": 0.018412315500000002,
+   "min_s": 0.01732339,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.295720578703721,
+    "min": 3.930905684600638,
+    "max": 4.700957408738257,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 117.90050450270809,
+   "flop_per_cycle": 27.44603666430413
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "torch 2.14.1+cpu bfloat16",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.017849410500000003,
+   "p25_s": 0.0175509995,
+   "p75_s": 0.01822377475,
+   "min_s": 0.017022294,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.295720578703721,
+    "min": 3.930905684600638,
+    "max": 4.700957408738257,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 120.31118047287892,
+   "flop_per_cycle": 28.007217478093995
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.1477161525,
+   "p25_s": 0.146569993,
+   "p75_s": 0.14886457150000001,
+   "min_s": 0.144206374,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.432654136347833,
+    "min": 3.9532168412571944,
+    "max": 4.570696351550937,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 116.30325386385894,
+   "flop_per_cycle": 26.237836358621
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.14767055950000002,
+   "p25_s": 0.14671920225,
+   "p75_s": 0.14890017725000002,
+   "min_s": 0.14462004,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.432654136347833,
+    "min": 3.9532168412571944,
+    "max": 4.570696351550937,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 116.33916226883395,
+   "flop_per_cycle": 26.245937239914795
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "torch 2.14.1+cpu float16",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.21004061400000001,
+   "p25_s": 0.20760281225000002,
+   "p75_s": 0.21164208225000003,
+   "min_s": 0.20259807100000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.432654136347833,
+    "min": 3.9532168412571944,
+    "max": 4.570696351550937,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 81.79308209411347,
+   "flop_per_cycle": 18.45239433941144
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.1453257075,
+   "p25_s": 0.143961627,
+   "p75_s": 0.146734892,
+   "min_s": 0.14126039,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.480363141557135,
+    "min": 3.6324482395244018,
+    "max": 4.641839530060166,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 118.21631203137271,
+   "flop_per_cycle": 26.385430889489687
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.1463546135,
+   "p25_s": 0.1443399225,
+   "p75_s": 0.14802446975,
+   "min_s": 0.142132863,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.480363141557135,
+    "min": 3.6324482395244018,
+    "max": 4.641839530060166,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 117.38522464821376,
+   "flop_per_cycle": 26.19993534886034
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "torch 2.14.1+cpu bfloat16",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.14116361100000002,
+   "p25_s": 0.1396497835,
+   "p75_s": 0.14246748825,
+   "min_s": 0.136135003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.480363141557135,
+    "min": 3.6324482395244018,
+    "max": 4.641839530060166,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 121.70182572051091,
+   "flop_per_cycle": 27.163384278314066
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1,
+    4096,
+    4096
+   ],
+   "median_s": 0.0063319455,
+   "p25_s": 0.006061383,
+   "p75_s": 0.006631912500000001,
+   "min_s": 0.005624144,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.492512005727285,
+    "min": 4.132921038378699,
+    "max": 4.630536264334163,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 5.299229439040497,
+   "flop_per_cycle": 1.179569343895969
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    1,
+    4096,
+    4096
+   ],
+   "median_s": 0.011408721,
+   "p25_s": 0.011017220500000001,
+   "p75_s": 0.011709005750000001,
+   "min_s": 0.010207151000000001,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.492512005727285,
+    "min": 4.132921038378699,
+    "max": 4.630536264334163,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 2.9411212702983973,
+   "flop_per_cycle": 0.6546718776819972
+  },
+  {
+   "kernel": "sgemm_f16",
+   "impl": "torch 2.14.1+cpu float16",
+   "shape": [
+    1,
+    4096,
+    4096
+   ],
+   "median_s": 0.0039817255,
+   "p25_s": 0.0038690547500000003,
+   "p75_s": 0.00423918675,
+   "min_s": 0.0036571200000000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.492512005727285,
+    "min": 4.132921038378699,
+    "max": 4.630536264334163,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 8.427108297646335,
+   "flop_per_cycle": 1.8758120817268877
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1,
+    4096,
+    4096
+   ],
+   "median_s": 0.006755787000000001,
+   "p25_s": 0.006498602000000001,
+   "p75_s": 0.00697746175,
+   "min_s": 0.006206526,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.363660783960572,
+    "min": 3.8460258918309065,
+    "max": 4.628218130234587,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 4.966768786523317,
+   "flop_per_cycle": 1.1382114771110479
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "simd_ml_kernels fp32",
+   "shape": [
+    1,
+    4096,
+    4096
+   ],
+   "median_s": 0.0109704545,
+   "p25_s": 0.010754837750000001,
+   "p75_s": 0.01148185525,
+   "min_s": 0.009254662,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.363660783960572,
+    "min": 3.8460258918309065,
+    "max": 4.628218130234587,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 3.0586182185979625,
+   "flop_per_cycle": 0.7009294191336937
+  },
+  {
+   "kernel": "sgemm_bf16",
+   "impl": "torch 2.14.1+cpu bfloat16",
+   "shape": [
+    1,
+    4096,
+    4096
+   ],
+   "median_s": 0.003949833,
+   "p25_s": 0.0037445372500000003,
+   "p75_s": 0.004173446000000001,
+   "min_s": 0.003483747,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.363660783960572,
+    "min": 3.8460258918309065,
+    "max": 4.628218130234587,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 8.495152073518046,
+   "flop_per_cycle": 1.9467947886195738
+  },
+  {
+   "kernel": "gelu_exact",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.00043181450000000004,
+   "p25_s": 0.00038432700000000006,
+   "p75_s": 0.0004774385,
+   "min_s": 0.000333584,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.453601091904133,
+    "min": 3.704520431307565,
+    "max": 4.544039247854819,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 2.428301967627303,
+   "elem_per_cycle": 0.5452446048752616
+  },
+  {
+   "kernel": "gelu_exact",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.0028487010000000004,
+   "p25_s": 0.0027223512500000003,
+   "p75_s": 0.00302753075,
+   "min_s": 0.002620395,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.453601091904133,
+    "min": 3.704520431307565,
+    "max": 4.544039247854819,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 0.36808917467996816,
+   "elem_per_cycle": 0.08264978543971749
+  },
+  {
+   "kernel": "gelu_tanh",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.000689187,
+   "p25_s": 0.00062525125,
+   "p75_s": 0.000789258,
+   "min_s": 0.000562815,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.445447131596798,
+    "min": 4.178627195607428,
+    "max": 4.5166257977490325,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.521468048584782,
+   "elem_per_cycle": 0.34225309705534
+  },
+  {
+   "kernel": "gelu_tanh",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.002029772,
+   "p25_s": 0.0018725787500000002,
+   "p75_s": 0.0022174195,
+   "min_s": 0.001802638,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.445447131596798,
+    "min": 4.178627195607428,
+    "max": 4.5166257977490325,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 0.5165979233135545,
+   "elem_per_cycle": 0.11620831561391064
+  },
+  {
+   "kernel": "silu",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.00036105800000000004,
+   "p25_s": 0.000326037,
+   "p75_s": 0.00046693525000000006,
+   "min_s": 0.000309442,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.287924666000087,
+    "min": 3.624344685098812,
+    "max": 4.659436903167388,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 2.9041760603559537,
+   "elem_per_cycle": 0.6772917638651198
+  },
+  {
+   "kernel": "silu",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.00048147950000000005,
+   "p25_s": 0.000458964,
+   "p75_s": 0.00054808975,
+   "min_s": 0.000427785,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.287924666000087,
+    "min": 3.624344685098812,
+    "max": 4.659436903167388,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 2.1778206548773102,
+   "elem_per_cycle": 0.5078962025955672
+  },
+  {
+   "kernel": "relu",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.0002099755,
+   "p25_s": 0.00020088575000000002,
+   "p75_s": 0.00023386200000000002,
+   "min_s": 0.000190678,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.430458411442355,
+    "min": 3.933119660052602,
+    "max": 4.544229579220147,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 4.993801657812459,
+   "elem_per_cycle": 1.1271523607839726
+  },
+  {
+   "kernel": "relu",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.00023622250000000002,
+   "p25_s": 0.00020994625,
+   "p75_s": 0.000275388,
+   "min_s": 0.000192656,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.430458411442355,
+    "min": 3.933119660052602,
+    "max": 4.544229579220147,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 4.438933632486321,
+   "elem_per_cycle": 1.001912944498492
+  },
+  {
+   "kernel": "softmax",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.0005943595,
+   "p25_s": 0.00053234075,
+   "p75_s": 0.0006535955,
+   "min_s": 0.000505803,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.468876006157533,
+    "min": 4.23939803631083,
+    "max": 4.696109840443798,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.7642117270776358,
+   "elem_per_cycle": 0.3947775066139182
+  },
+  {
+   "kernel": "softmax",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.000768483,
+   "p25_s": 0.0007102085000000001,
+   "p75_s": 0.0008361345,
+   "min_s": 0.0006667940000000001,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.468876006157533,
+    "min": 4.23939803631083,
+    "max": 4.696109840443798,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.364475206348091,
+   "elem_per_cycle": 0.3053284997095513
+  },
+  {
+   "kernel": "layer_norm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.000308558,
+   "p25_s": 0.00025414425,
+   "p75_s": 0.00036593700000000004,
+   "min_s": 0.00022826700000000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.400723979305075,
+    "min": 3.696459939226308,
+    "max": 4.559483517566203,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 3.398310852416726,
+   "elem_per_cycle": 0.7722163144968155
+  },
+  {
+   "kernel": "layer_norm",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.0002889535,
+   "p25_s": 0.00023575600000000002,
+   "p75_s": 0.00031625600000000006,
+   "min_s": 0.000200609,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.400723979305075,
+    "min": 3.696459939226308,
+    "max": 4.559483517566203,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 3.628874542097604,
+   "elem_per_cycle": 0.8246085324057622
+  }
+ ]
+}
