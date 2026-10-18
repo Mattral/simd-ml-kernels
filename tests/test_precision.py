@@ -201,10 +201,11 @@ class TestGEMM:
         a_scale = 0.0173
         fn = simd_ml_kernels.sgemm_u8s8 if path == "table" else simd_ml_kernels._core._sgemm_u8s8_convert
         C = fn(A, np.ascontiguousarray(B.T) if trans_b else B, a_scale, zp, scales, trans_b=trans_b)
-        a64, b64 = A.astype(np.float64) - zp, B.astype(np.float64)
+        # Exact integer sums (int64 matmul, no BLAS; float64 BLAS was wrong under SDE -skx).
+        ai, bi = A.astype(np.int64) - zp, B.astype(np.int64)
         sc = np.float64(np.float32(a_scale)) * scales.astype(np.float64)
-        ref = (a64 @ b64) * sc
-        bound = 2 * (K + 2) * 2.0 ** -24 * (np.abs(a64) @ np.abs(b64)) * np.abs(sc) + 1e-30
+        ref = (ai @ bi).astype(np.float64) * sc
+        bound = 2 * (K + 2) * 2.0 ** -24 * (np.abs(ai) @ np.abs(bi)).astype(np.float64) * np.abs(sc) + 1e-30
         assert C.dtype == np.float32 and C.shape == (M, N)
         err = np.abs(C.astype(np.float64) - ref)
         assert (err <= bound).all(), f"[{M}x{N}x{K}] max err/bound {np.max(err / bound):.3g}"

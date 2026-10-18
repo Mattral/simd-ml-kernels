@@ -125,10 +125,13 @@ def _u8s8_check(run: Callable) -> Callable[[], tuple]:
             scales = rng.uniform(1e-3, 1e-1, n).astype(np.float32)
             a_scale = 0.02
             c = run(a, np.ascontiguousarray(b.T) if tb else b, a_scale, zp, scales, tb).astype(np.float64)
-            a64, b64 = a.astype(np.float64) - zp, b.astype(np.float64)
+            # Exact sums in int64 (NumPy's integer matmul does not use BLAS):
+            # under Intel SDE -skx, OpenBLAS's float64 matmul of these
+            # integers was off by up to 3.4e5 (exact natively and under -hsw).
+            ai, bi = a.astype(np.int64) - zp, b.astype(np.int64)
             sc = np.float64(np.float32(a_scale)) * scales.astype(np.float64)
-            mag = (np.abs(a64) @ np.abs(b64)) * np.abs(sc)
-            ratio = np.max(np.abs(c - (a64 @ b64) * sc) / (2 * (k + 2) * U32 * mag + 1e-300))
+            mag = (np.abs(ai) @ np.abs(bi)).astype(np.float64) * np.abs(sc)
+            ratio = np.max(np.abs(c - (ai @ bi).astype(np.float64) * sc) / (2 * (k + 2) * U32 * mag + 1e-300))
             if ratio > worst:
                 worst, detail = float(ratio), f"{m}x{k}x{n}{' trans_b' if tb else ''}"
         return worst, 1.0, f"max err / (2*(K+2)*u*|s||A-zp||B|), worst at {detail}"
