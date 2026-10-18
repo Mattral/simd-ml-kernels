@@ -39,7 +39,7 @@ int run_dispatch_tests() {
         char what[96];
         std::snprintf(what, sizeof what, "%s table: isa and name match, every entry set", t->name);
         ok &= check(t->isa == isa && std::strcmp(t->name, simd_ml::isa_name(isa)) == 0 &&
-                    t->sgemm && t->sgemm_f16 && t->sgemm_bf16 && t->gelu_erf && t->gelu_tanh &&
+                    t->sgemm && t->sgemm_f16 && t->sgemm_bf16 && t->sgemm_u8s8 && t->gelu_erf && t->gelu_tanh &&
                     t->relu && t->silu && t->softmax_row && t->layer_norm_row, what);
     }
     ok &= check(simd_ml::kernels_for(Isa::scalar) != nullptr, "scalar table is always usable");

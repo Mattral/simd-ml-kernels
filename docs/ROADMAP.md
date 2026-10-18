@@ -110,8 +110,8 @@ re-measured; see docs/BENCHMARKS.md for what is measured.
 - [❌] Tile-size re-tuning for Sapphire Rapids / Zen 4 (larger L2, different
       port layout) — current MC/KC/NC constants were derived for Skylake-class
       caches and are not yet re-validated on newer AVX-512 microarchitectures.
-- [⚠️] AVX-512 BF16/VNNI paths: BF16 `vdpbf16ps` done in W4 (CPUID-gated,
-      correct under SDE `-spr`, speed not measured); VNNI INT8 is W4's next item.
+- [✅] AVX-512 BF16/VNNI paths (W4): BF16 `vdpbf16ps` and INT8 AVX512_VNNI,
+      CPUID-gated, correct under SDE `-spr` / `-icx`; speed not measured.
 
 **Since resolved:** `isa=` (in `sgemm()` / `GEMMConfig`) now genuinely forces
 a specific kernel per-call — `set_gemm_isa_override`/`get_gemm_isa_override`
@@ -174,8 +174,12 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
 - **W4 — low precision that is faster than FP32.** Done: BF16/FP16 converted
   at pack time (95–101% of the FP32 GEMM at N = 128–2048, faster where
   reading B dominates; memory savings only on AVX2, which has no 16-bit FMA;
-  BENCHMARKS.md), `vdpbf16ps` behind CPUID (speed not measured). Next: INT8
-  with VNNI (AVX-VNNI, AVX-512 VNNI) and per-channel scales.
+  BENCHMARKS.md), `vdpbf16ps` behind CPUID (speed not measured); INT8
+  `sgemm_u8s8` with per-channel scales: AVX-VNNI 2.39–3.68× the FP32 GEMM and
+  1.66–2.04× PyTorch's quantized linear at N = 128–2048, AVX512_VNNI correct
+  under SDE (speed not measured), FP32 conversion path (memory only) without
+  VNNI. Left for W5: single-row (GEMV) shapes, where both low-precision
+  families lose to PyTorch.
 - **W5 — CPU LLM decode kernels.** Quantized GEMV with fused dequantization,
   RMSNorm/SwiGLU epilogues, flash-decoding attention; judged by % of measured
   STREAM bandwidth vs PyTorch CPU and llama.cpp.
@@ -208,5 +212,6 @@ between simd-ml-kernels and production BLAS libraries.
 | Fixed tile sizes (MC/KC/NC) | Chosen for Skylake-class caches; not derived from the running CPU | W3 |
 | Small matrices (max(M,N,K) ≤ 128) | One FMA chain per output strip: 24% of OpenBLAS at N = 128 on the reference laptop | W3 |
 | Single-threaded default | OpenMP is a build option, off by default; the threaded GEMM (shared B panel, dynamic chunks) has no published scaling numbers yet (needs a non-hybrid 8-core CPU) | W3 |
+| INT8 GEMM: single-threaded; GEMV shapes | No threaded path; one row times a weight matrix runs at 0.46× PyTorch's quantized linear (every call packs all of B), and the FP32 conversion path (CPUs without VNNI) at 0.47× our FP32 GEMM there (DESIGN.md §4.2); AVX512_VNNI speed not measured | W5 (quantized GEMV), AVX512_VNNI hardware |
 | BF16/FP16 GEMM: memory savings only on AVX2 | No 16-bit FMA on AVX2: about the FP32 GEMM's speed on compute-bound shapes; the single-row case is faster than our FP32 but loses to PyTorch (0.58–0.63×); narrow N ≤ 16 shapes pay for converting A (DESIGN.md §4); `vdpbf16ps` speed not measured | W5 (GEMV), AVX512_BF16 hardware |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

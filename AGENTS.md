@@ -46,6 +46,7 @@ src/kernels/kernels_{avx2,avx512}.cpp        the AVX2 / AVX-512 tables
 src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32/FP16/BF16 GEMM, AVX2: 6x16 kernel, direct (small) and 5-loop packed paths
 src/kernels/gemm/avx512_gemm_packed.cpp      the same on AVX-512 (12x32 kernel); avx512bf16_gemm.cpp: vdpbf16ps, CPUID-gated
 src/kernels/gemm/{f16,bf16}_gemm.hpp         FP16 / BF16-input GEMM declarations (inputs converted to FP32 while packing)
+src/kernels/gemm/int8_gemm.hpp, *vnni_gemm.cpp  INT8 GEMM (uint8 x int8, per-column scales): AVX-VNNI / AVX512_VNNI units
 src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM (tests)
 src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh (AVX2)
 src/kernels/activations/                     relu, silu, softmax, layer_norm (AVX2; + activations.hpp)
@@ -138,7 +139,7 @@ Code and repository
 schema, command, python, timestamp_utc
 machine   label, cpu_model, core, pinned_cpus, caches[] (CPUID leaf 4), logical_cpus, os, note
 build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp,
-          sgemm_tile, sgemm_blocking {kc, mc, nc}
+          sgemm_tile, sgemm_blocking {kc, mc, nc}, u8s8_path
 baselines numpy, blas {name, version}, torch
 env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS
 protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc

@@ -42,6 +42,10 @@ using SgemmFn  = void (*)(bool trans_a, bool trans_b, int M, int N, int K, float
 using Sgemm16Fn = void (*)(int M, int N, int K, float alpha,
                            const std::uint16_t* A, int lda, const std::uint16_t* B, int ldb,
                            float beta, float* C, int ldc);
+/** C[i][j] = a_scale·b_scales[j]·Σ_k (A[i][k] − a_zero_point)·op(B)[k][j]; gemm/int8_gemm.hpp. */
+using GemmU8S8Fn = void (*)(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
+                            int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
+                            const float* b_scales, float* C, int ldc);
 using UnaryFn  = void (*)(const float* in, float* out, std::size_t n);
 using RowFn    = void (*)(const float* in, float* out, int n);
 using LayerNormFn = void (*)(const float* in, float* out, int n,
@@ -57,6 +61,7 @@ struct KernelTable {
     SgemmFn     sgemm;       ///< C = alpha*op(A)*op(B) + beta*C, row-major FP32
     Sgemm16Fn   sgemm_f16;   ///< IEEE binary16 inputs, FP32 accumulate and output
     Sgemm16Fn   sgemm_bf16;  ///< BF16 bit patterns, FP32 accumulate and output
+    GemmU8S8Fn  sgemm_u8s8;  ///< uint8 × int8 with per-column scales, FP32 output
     UnaryFn     gelu_erf;    ///< exact GeLU; in == out allowed
     UnaryFn     gelu_tanh;   ///< tanh-approximate GeLU; in == out allowed
     RowFn       relu;

@@ -8,7 +8,8 @@
  * ─── CPUID bits used ──────────────────────────────────────────────────────────
  * Leaf 1, ECX:      12 FMA, 20 SSE4.2, 27 OSXSAVE (XGETBV usable), 28 AVX, 29 F16C
  * Leaf 7.0, EBX:     5 AVX2, 16 AVX-512F, 17 AVX-512DQ, 30 AVX-512BW, 31 AVX-512VL
- * Leaf 7.1, EAX:     5 AVX512_BF16
+ * Leaf 7.0, ECX:    11 AVX512_VNNI
+ * Leaf 7.1, EAX:     4 AVX-VNNI (VEX-encoded vpdpbusd on YMM), 5 AVX512_BF16
  *
  * XGETBV(0) returns XCR0: the OS must save a register file's state on context
  * switches, or using it faults even when CPUID reports the instructions. YMM
@@ -35,6 +36,8 @@ struct CpuFeatures {
     bool has_avx512bw   = false;  ///< AVX-512BW and OS ZMM state
     bool has_avx512vl   = false;  ///< AVX-512VL and OS ZMM state
     bool has_avx512bf16 = false;  ///< AVX512_BF16 + AVX-512F and OS ZMM state
+    bool has_avx_vnni   = false;  ///< AVX-VNNI + AVX2 and OS YMM state (Alder Lake, Lunar Lake, Sapphire Rapids)
+    bool has_avx512vnni = false;  ///< AVX512_VNNI + AVX-512F and OS ZMM state (Cascade Lake and later)
 
     /**
      * detect() — run CPUID/XGETBV. Implemented in dispatch.cpp; cheap, but

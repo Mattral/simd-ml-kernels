@@ -15,6 +15,7 @@
 #include "../kernels/gemm/avx2_gemm_packed.hpp"
 #include "../kernels/gemm/f16_gemm.hpp"
 #include "../kernels/gemm/bf16_gemm.hpp"
+#include "../kernels/gemm/int8_gemm.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -70,8 +71,10 @@ CpuFeatures CpuFeatures::detect() noexcept {
         f.has_avx512dq = os_zmm && (b & (1u << 17)) != 0;
         f.has_avx512bw = os_zmm && (b & (1u << 30)) != 0;
         f.has_avx512vl = os_zmm && (b & (1u << 31)) != 0;
+        f.has_avx512vnni = f.has_avx512f && (c & (1u << 11)) != 0;
         if (max_subleaf >= 1) {
             cpuid_ex(7, 1, a, b, c, d);
+            f.has_avx_vnni   = f.has_avx2 && (a & (1u << 4)) != 0;
             f.has_avx512bf16 = f.has_avx512f && (a & (1u << 5)) != 0;
         }
     }
@@ -257,6 +260,25 @@ void sgemm_packed(int M, int N, int K, float alpha,
 bool f16c_available() noexcept { return cpu_features().has_f16c; }
 
 bool bf16_avx512bf16_available() noexcept { return cpu_features().has_avx512bf16; }
+
+bool avx_vnni_available() noexcept { return cpu_features().has_avx_vnni; }
+
+bool avx512vnni_available() noexcept { return cpu_features().has_avx512vnni; }
+
+// The choice sgemm_u8s8_avx2 / sgemm_u8s8_avx512 make, from the active table.
+const char* u8s8_path() noexcept {
+    const KernelTable& t = kernels();
+    const dispatch::CpuFeatures& f = cpu_features();
+    if (t.isa == Isa::scalar) return "scalar";
+#ifdef SIMD_ML_HAVE_AVX512VNNI
+    if (t.isa == Isa::avx512 && f.has_avx512vnni) return "avx512_vnni";
+#endif
+#ifdef SIMD_ML_HAVE_AVXVNNI
+    if (f.has_avx_vnni) return "avx_vnni";
+#endif
+    (void)f;
+    return "fp32_convert";
+}
 
 
 // 0: not set, follow OpenMP's own default (OMP_NUM_THREADS, else one per

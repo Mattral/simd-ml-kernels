@@ -32,6 +32,7 @@
 #include "avx2_gemm_packed.hpp"
 #include "bf16_gemm.hpp"
 #include "f16_gemm.hpp"
+#include "int8_gemm.hpp"
 #include "cache_alloc.hpp"
 #include "../../dispatch/cpuid.hpp"
 
@@ -369,6 +370,20 @@ void sgemm_f16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A, 
         sgemm_f16_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
     else
         sgemm_lowp_packed<F16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+// INT8: AVX512_VNNI (avx512vnni_gemm.cpp) where the CPU has it, else the AVX2
+// table's choice (AVX-VNNI, or the FP32 conversion path).
+void sgemm_u8s8_avx512(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
+                       int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
+                       const float* b_scales, float* C, int ldc) {
+#ifdef SIMD_ML_HAVE_AVX512VNNI
+    if (avx512vnni_available()) {
+        sgemm_u8s8_avx512vnni(trans_b, M, N, K, A, lda, a_zero_point, B, ldb, a_scale, b_scales, C, ldc);
+        return;
+    }
+#endif
+    sgemm_u8s8_avx2(trans_b, M, N, K, A, lda, a_zero_point, B, ldb, a_scale, b_scales, C, ldc);
 }
 
 // With AVX512_BF16 (CPUID, checked once by dispatch.cpp) and one thread,

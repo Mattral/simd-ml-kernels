@@ -7,6 +7,17 @@ under **Changed** with a migration note.
 ## Unreleased
 
 ### Added
+- **`sgemm_u8s8(A, B, a_scale, a_zero_point, b_scales, C=None, *, trans_b=False)`**:
+  INT8 GEMM, uint8 activations × int8 weights with one scale per output
+  column, float32 output (PyTorch's quantized-linear arithmetic, not
+  requantized). AVX-VNNI and AVX512_VNNI kernels (`vpdpbusd`, exact int32
+  sums per K block), an FP32 conversion path for AVX2 CPUs without VNNI, and
+  an exact scalar version; `build_info()['u8s8_path']` names the path.
+  Measured with AVX-VNNI on the reference laptop: 2.39–3.68× the FP32 GEMM and
+  1.66–2.04× PyTorch's `quantized.linear` at N = 128–2048; a single row times
+  a 4096×4096 matrix loses to PyTorch (0.46×); the conversion path runs at
+  the FP32 GEMM's speed. AVX512_VNNI: correct under SDE, speed not measured.
+  docs/DESIGN.md §4.2.
 - `sgemm(..., trans_a=False, trans_b=False)` (keyword-only): C = alpha·op(A)·op(B)
   + beta·C with op(X) = X or Xᵀ, as BLAS transa/transb. A stored `[K, M]` /
   B stored `[N, K]` are read in place: the transpose happens while packing

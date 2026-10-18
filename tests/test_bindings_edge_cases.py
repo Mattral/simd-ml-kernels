@@ -187,6 +187,80 @@ class TestSgemmBf16Inputs:
         np.testing.assert_allclose(out, A @ B, rtol=1e-2)
 
 
+class TestSgemmU8S8Arguments:
+    """sgemm_u8s8 rejects every input it would otherwise misread."""
+
+    @staticmethod
+    def _args(M=4, K=6, N=5):
+        return (np.ones((M, K), np.uint8), np.ones((K, N), np.int8), 0.5, 1, np.ones(N, np.float32))
+
+    def test_valid_call(self):
+        C = simd_ml_kernels.sgemm_u8s8(*self._args())
+        np.testing.assert_array_equal(C, np.zeros((4, 5), np.float32))   # (1 - 1) * 1 summed
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.uint16, np.float32])
+    def test_A_must_be_uint8(self, dtype):
+        A, B, s, zp, bs = self._args()
+        with pytest.raises(simd_ml_kernels.DTypeError, match="A must be uint8"):
+            simd_ml_kernels.sgemm_u8s8(A.astype(dtype), B, s, zp, bs)
+
+    @pytest.mark.parametrize("dtype", [np.uint8, np.int16, np.float32])
+    def test_B_must_be_int8(self, dtype):
+        A, B, s, zp, bs = self._args()
+        with pytest.raises(simd_ml_kernels.DTypeError, match="B must be int8"):
+            simd_ml_kernels.sgemm_u8s8(A, B.astype(dtype), s, zp, bs)
+
+    def test_scales_must_be_float32_length_n(self):
+        A, B, s, zp, bs = self._args()
+        with pytest.raises(simd_ml_kernels.DTypeError, match="b_scales"):
+            simd_ml_kernels.sgemm_u8s8(A, B, s, zp, bs.astype(np.float64))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="b_scales must have N = 5"):
+            simd_ml_kernels.sgemm_u8s8(A, B, s, zp, np.ones(4, np.float32))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):
+            simd_ml_kernels.sgemm_u8s8(A, B, s, zp, np.ones((5, 1), np.float32))
+
+    @pytest.mark.parametrize("zp", [-1, 256])
+    def test_zero_point_range(self, zp):
+        A, B, s, _, bs = self._args()
+        with pytest.raises(simd_ml_kernels.ArgumentError, match=r"\[0, 255\]"):
+            simd_ml_kernels.sgemm_u8s8(A, B, s, zp, bs)
+
+    def test_non_finite_scale(self):
+        A, B, _, zp, bs = self._args()
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="finite"):
+            simd_ml_kernels.sgemm_u8s8(A, B, float("nan"), zp, bs)
+
+    def test_shape_mismatch_and_trans_b(self):
+        A, B, s, zp, bs = self._args()
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="Shape mismatch"):
+            simd_ml_kernels.sgemm_u8s8(A, B, s, zp, bs, trans_b=True)   # B is [K, N], not [N, K]
+        C = simd_ml_kernels.sgemm_u8s8(A, np.ascontiguousarray(B.T), s, zp, bs, trans_b=True)
+        assert C.shape == (4, 5)
+
+    def test_non_contiguous_rejected(self):
+        A, B, s, zp, bs = self._args()
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
+            simd_ml_kernels.sgemm_u8s8(np.asfortranarray(np.ones((4, 6), np.uint8)), B, s, zp, bs)
+
+    def test_C_written_in_place_and_validated(self):
+        A, B, s, zp, bs = self._args()
+        C = np.full((4, 5), 9.0, np.float32)
+        out = simd_ml_kernels.sgemm_u8s8(A, B, s, zp, bs, C)
+        assert np.shares_memory(out, C) and not C.any()
+        with pytest.raises(simd_ml_kernels.DTypeError, match="C must be float32"):
+            simd_ml_kernels.sgemm_u8s8(A, B, s, zp, bs, np.zeros((4, 5)))
+
+    @pytest.mark.parametrize("M,K,N", [(0, 3, 5), (4, 3, 0), (4, 0, 5)])
+    def test_empty_dimensions(self, M, K, N):
+        C = simd_ml_kernels.sgemm_u8s8(np.ones((M, K), np.uint8), np.ones((K, N), np.int8), 1.0, 0,
+                                       np.ones(N, np.float32))
+        assert C.shape == (M, N)
+        np.testing.assert_array_equal(C, 0.0)
+
+    def test_path_reported(self):
+        assert simd_ml_kernels.build_info()["u8s8_path"] in ("avx512_vnni", "avx_vnni", "fp32_convert", "scalar")
+
+
 class TestEmptyAndSingleElement:
     """Verify correct behaviour for boundary sizes."""
 

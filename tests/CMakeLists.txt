@@ -17,6 +17,7 @@ set(TEST_SRCS
     test_gelu.cpp
     test_gemm_packed.cpp
     test_gemm_lowp.cpp
+    test_gemm_int8.cpp
     test_activations.cpp
     test_threads.cpp
 )
@@ -27,6 +28,14 @@ target_include_directories(simd_tests PRIVATE
 )
 if(SIMD_ML_ENABLE_X86)
     target_compile_definitions(simd_tests PRIVATE SIMD_ML_X86_AVAILABLE=1)
+    # Extension units in this build (CMakeLists.txt): their entry points are
+    # called directly by the tests.
+    foreach(ext IN LISTS _ext_units)
+        if(ext IN_LIST SIMD_ML_ISAS)
+            string(TOUPPER ${ext} EXT)
+            target_compile_definitions(simd_tests PRIVATE SIMD_ML_HAVE_${EXT})
+        endif()
+    endforeach()
 else()
     target_compile_definitions(simd_tests PRIVATE SIMD_ML_X86_AVAILABLE=0)
 endif()

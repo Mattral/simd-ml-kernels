@@ -303,6 +303,34 @@ def sgemm_bf16(
     ...
 
 
+def sgemm_u8s8(
+    A: NDArray[np.uint8],
+    B: NDArray[np.int8],
+    a_scale: float,
+    a_zero_point: int,
+    b_scales: NDArray[np.float32],
+    C: Optional[NDArray[np.float32]] = None,
+    *,
+    trans_b: bool = False,
+) -> NDArray[np.float32]:
+    """
+    INT8 GEMM with per-channel scales, float32 output:
+    C[i, j] = a_scale * b_scales[j] * sum_k (A[i, k] - a_zero_point) * B[k, j]
+
+    A: uint8 [M, K] (activations, per-tensor scale and zero point); B: int8
+    [K, N], or [N, K] with trans_b=True (weights, symmetric, one scale per
+    output column); b_scales: float32 [N]. As PyTorch's quantized linear, but
+    the result is float32, not requantized. C is overwritten.
+
+    Paths (build_info()['u8s8_path']): avx_vnni / avx512_vnni (vpdpbusd, exact
+    int32 sums per K block), fp32_convert (AVX2 without VNNI: about the FP32
+    GEMM's speed, a quarter of its operand memory), scalar (exact int64 sums).
+    Error bound: |C - C_exact| <= 2*(K+2)*2^-24 * |a_scale*b_scales[j]| *
+    sum_k |A[i,k] - a_zero_point| * |B[k,j]|. Single-threaded.
+    """
+    ...
+
+
 def is_aligned(arr: np.ndarray) -> bool:
     """Return True if the array's data buffer is 64-byte aligned."""
     ...
@@ -313,3 +341,13 @@ def is_aligned(arr: np.ndarray) -> bool:
 def _measure_core_ghz(seconds: float = 0.05) -> float: ...
 def _cpu_caches() -> list[dict[str, int | str]]: ...
 def _set_isa(isa: str) -> None: ...
+def _sgemm_u8s8_convert(
+    A: NDArray[np.uint8],
+    B: NDArray[np.int8],
+    a_scale: float,
+    a_zero_point: int,
+    b_scales: NDArray[np.float32],
+    C: Optional[NDArray[np.float32]] = None,
+    *,
+    trans_b: bool = False,
+) -> NDArray[np.float32]: ...
