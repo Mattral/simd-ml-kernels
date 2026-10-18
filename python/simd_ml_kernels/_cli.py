@@ -185,7 +185,8 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
         ("gelu (tanh)", _elementwise_check(lambda x: sk.gelu(x, approximate="tanh"),
                                            _gelu_tanh, atol=2e-6)),
         ("relu", _elementwise_check(sk.relu, lambda x: np.maximum(x, 0.0), atol=1e-30)),
-        ("silu", _elementwise_check(sk.silu, lambda x: x / (1.0 + np.exp(-x)), atol=2e-6)),
+        ("silu", _elementwise_check(sk.silu, lambda x: x / (1.0 + np.exp(-x)), atol=1e-35,
+                                    rtol=1e-6, lo=-200.0, hi=200.0)),
         ("softmax", _softmax_check),
         ("layer_norm", _layer_norm_check),
     ]

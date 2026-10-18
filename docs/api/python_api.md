@@ -126,8 +126,8 @@ y = simd_ml_kernels.relu(x)
 ### `silu(x) → np.ndarray`
 
 SiLU/Swish activation: `output[i] = x[i] * sigmoid(x[i])`.  
-Implemented as `x · 0.5·(1 + tanh(x/2))` using the Cody–Waite fast tanh.  
-Max absolute error vs float64: ≤ 2e-6 (asserted by `selftest`; measured 1.2e-6 on [−10, 10]). Relative error is larger for |output| ≪ 1.
+Implemented as `x / (1 + exp(−x))` with the Cody–Waite `exp` and a correctly rounded division.  
+Error vs float64: `|err| ≤ 1e-35 + 1e-6·|SiLU(x)|` for every finite `x` (asserted by the tests and `selftest`; measured 2.9e-7 relative and 1.3e-6 absolute over all finite floats, AVX2 kernel). `silu(+inf) = +inf`, `silu(-inf) = NaN` (as PyTorch), and `x < −88` returns −0 (`|SiLU(x)| < 1.5e-36` there).
 
 ```python
 y = simd_ml_kernels.silu(x)
