@@ -93,9 +93,9 @@ def _gemm_check(run: Callable, to_input: Callable) -> Callable[[], tuple]:
     def check():
         rng = np.random.default_rng(0)
         worst, detail = 0.0, ""
-        # 1x1x1, tails of the 8-wide tiles, the small direct path (<= 128)
-        # and the packed path (> 128).
-        for m, k, n in [(1, 1, 1), (7, 9, 5), (33, 17, 65), (130, 129, 131)]:
+        # 1x1x1, tails of the 6x16 tile, the unpacked paths (small products;
+        # M <= 4 with trans_b) and the packed path.
+        for m, k, n in [(1, 1, 1), (7, 9, 5), (3, 70, 33), (33, 17, 65), (130, 129, 131)]:
             a = rng.standard_normal((m, k)).astype(np.float32)
             b = rng.standard_normal((k, n)).astype(np.float32)
             a_in, a64 = to_input(a)
@@ -181,6 +181,10 @@ def _layer_norm_check():
 def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
     checks = [
         ("sgemm", _gemm_check(lambda a, b: sk.sgemm(a, b), _as_f32)),
+        ("sgemm trans_b", _gemm_check(
+            lambda a, b: sk.sgemm(a, np.ascontiguousarray(b.T), trans_b=True), _as_f32)),
+        ("sgemm trans_a", _gemm_check(
+            lambda a, b: sk.sgemm(np.ascontiguousarray(a.T), b, trans_a=True), _as_f32)),
         ("sgemm_bf16", _gemm_check(lambda a, b: sk.sgemm_bf16(a, b), _as_bf16)),
         ("gelu (exact)", _elementwise_check(sk.gelu, _gelu_erf, atol=2e-6)),
         ("gelu (tanh)", _elementwise_check(lambda x: sk.gelu(x, approximate="tanh"),

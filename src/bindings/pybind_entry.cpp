@@ -161,7 +161,9 @@ static py::array_t<float> py_sgemm(py::array A,
                                      py::object C   = py::none(),
                                      float alpha    = 1.0f,
                                      float beta     = 0.0f,
-                                     const std::string& isa = "") {
+                                     const std::string& isa = "",
+                                     bool trans_a = false,
+                                     bool trans_b = false) {
     const simd_ml::KernelTable& table = table_for_isa(isa);
 
     validate_array(A, "A");
@@ -169,14 +171,23 @@ static py::array_t<float> py_sgemm(py::array A,
     if (A.ndim() != 2) throw ArgumentError("A must be 2-D");
     if (B.ndim() != 2) throw ArgumentError("B must be 2-D");
 
-    int M = static_cast<int>(A.shape(0));
-    int K = static_cast<int>(A.shape(1));
-    int N = static_cast<int>(B.shape(1));
+    // op(A) is M×K, op(B) is K×N; A is stored K×M with trans_a, B N×K with trans_b.
+    const int lda = static_cast<int>(A.shape(1));
+    const int ldb = static_cast<int>(B.shape(1));
+    const int M = static_cast<int>(A.shape(trans_a ? 1 : 0));
+    const int K = static_cast<int>(A.shape(trans_a ? 0 : 1));
+    const int N = static_cast<int>(B.shape(trans_b ? 0 : 1));
+    const int K_b = static_cast<int>(B.shape(trans_b ? 1 : 0));
 
-    if (B.shape(0) != K) {
+    if (K_b != K) {
+        auto dims = [](const py::array& x) {
+            return "[" + std::to_string(x.shape(0)) + "×" + std::to_string(x.shape(1)) + "]";
+        };
         throw ArgumentError(
-            "Shape mismatch: A is [" + std::to_string(M) + "×" + std::to_string(K) +
-            "] but B is [" + std::to_string(B.shape(0)) + "×" + std::to_string(N) + "]");
+            "Shape mismatch: " + std::string(trans_a ? "A.T" : "A") + " is [" +
+            std::to_string(M) + "×" + std::to_string(K) + "] (A is " + dims(A) + ") but " +
+            (trans_b ? "B.T" : "B") + " is [" + std::to_string(K_b) + "×" + std::to_string(N) +
+            "] (B is " + dims(B) + ")");
     }
 
     py::array_t<float> C_out;
@@ -198,7 +209,7 @@ static py::array_t<float> py_sgemm(py::array A,
 
     {
         py::gil_scoped_release release;
-        table.sgemm(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
+        table.sgemm(trans_a, trans_b, M, N, K, alpha, A_ptr, lda, B_ptr, ldb, beta, C_ptr, N);
     }
     return C_out;
 }
@@ -676,7 +687,7 @@ struct GEMMConfig {
     {
         float a = alpha_o.is_none() ? alpha : alpha_o.cast<float>();
         float b = beta_o.is_none()  ? beta  : beta_o.cast<float>();
-        return py_sgemm(A, B, C_obj, a, b, isa);
+        return py_sgemm(A, B, C_obj, a, b, isa, false, false);
     }
 
     std::string repr() const {
@@ -723,14 +734,16 @@ PYBIND11_MODULE(_core, m) {
     m.def("sgemm", &py_sgemm,
           py::arg("A"), py::arg("B"), py::arg("C") = py::none(),
           py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
-          py::arg("isa") = "",
+          py::arg("isa") = "", py::kw_only(),
+          py::arg("trans_a") = false, py::arg("trans_b") = false,
           R"doc(
-SIMD GEMM: computes C = alpha * A @ B + beta * C  (float32).
+SIMD GEMM: computes C = alpha * op(A) @ op(B) + beta * C  (float32), where
+op(X) is X, or X.T when trans_a / trans_b is True (as BLAS transa / transb).
 
 Parameters
 ----------
-A     : np.ndarray[float32], shape [M, K], C-contiguous
-B     : np.ndarray[float32], shape [K, N], C-contiguous
+A     : np.ndarray[float32], C-contiguous, shape [M, K] (or [K, M] with trans_a)
+B     : np.ndarray[float32], C-contiguous, shape [K, N] (or [N, K] with trans_b)
 C     : np.ndarray[float32], shape [M, N], optional (allocated if None)
 alpha : float, default 1.0
 beta  : float, default 0.0  (0 = overwrite C, 1 = accumulate into C)
@@ -739,6 +752,10 @@ isa   : str, default "" (the kernels chosen for this CPU, detected_isa()).
         only, e.g. to compare AVX2 and AVX-512 on one machine. A table this
         build or CPU cannot run raises RuntimeError; build_info()["isa_usable"]
         lists the ones that work.
+trans_a, trans_b : bool, keyword-only, default False. Use the transpose of
+        A / B as stored, without copying it: a linear layer x @ W.T with W
+        of shape [out, in] is sgemm(x, W, trans_b=True). The transpose is
+        read while packing (or along rows, for trans_b with M <= 4).
 
 Returns
 -------
@@ -746,7 +763,7 @@ np.ndarray[float32] of shape [M, N] — same object as C if provided.
 
 Notes
 -----
-6×16 (AVX2) or 8×16 (AVX-512) FMA register tile: on A and B in place for
+6×16 (AVX2) or 12×32 (AVX-512) FMA register tile: on A and B in place for
 small products, on Goto/BLIS packed panels otherwise, with block sizes
 derived from the CPU caches (build_info()["sgemm_blocking"]). The scalar
 table uses a plain row-by-row loop. Throughput relative to OpenBLAS on

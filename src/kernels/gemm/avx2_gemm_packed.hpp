@@ -17,25 +17,30 @@ namespace gemm {
 static constexpr int MR_AVX2 = 6;
 static constexpr int NR_AVX2 = 16;
 
+// Every FP32 GEMM entry point computes C = alpha·op(A)·op(B) + beta·C,
+// row-major, op(X) = X or Xᵀ (BLAS semantics): with trans_a A is stored K×M
+// (lda >= M), with trans_b B is stored N×K (ldb >= K). Transposes are handled
+// while packing (or by the unpacked paths' strides), never by a copy.
+
 /**
- * sgemm_direct_avx2 — the unpacked path: C = alpha*A*B + beta*C with the
- * 6×16 kernel reading A and B with their own strides. Public so the tests can
- * run it on sizes the dispatcher would send to the packed path.
+ * sgemm_direct_avx2 — the unpacked paths: the 6×16 kernel on op(A) and B in
+ * place, or for trans_b dot products along rows of A and B. Public so the
+ * tests can run it on shapes the dispatcher would send to the packed path.
  */
-void sgemm_direct_avx2(int M, int N, int K,
+void sgemm_direct_avx2(bool trans_a, bool trans_b, int M, int N, int K,
                        float alpha,
                        const float* A, int lda,
                        const float* B, int ldb,
                        float beta,
-                       float* C, int ldc) noexcept;
+                       float* C, int ldc);
 
 /** Whether sgemm_packed_avx2 takes the direct path for this shape. */
 bool sgemm_avx2_prefers_direct(int M, int N, int K) noexcept;
 
 /**
- * sgemm_packed — C = alpha*A*B + beta*C (float32, row-major), through the
- * kernel table chosen for this CPU (dispatch/kernels.hpp); defined in
- * dispatch.cpp, so it can be called from code built for any CPU.
+ * sgemm_packed — C = alpha*A*B + beta*C (float32, row-major, no transposes),
+ * through the kernel table chosen for this CPU (dispatch/kernels.hpp);
+ * defined in dispatch.cpp, so it can be called from code built for any CPU.
  */
 void sgemm_packed(int M, int N, int K,
                   float alpha,
@@ -49,10 +54,10 @@ void sgemm_packed(int M, int N, int K,
  * Call only on a CPU that has the ISA; prefer kernels_for(Isa::...)->sgemm,
  * which checks.
  */
-void sgemm_packed_avx2(int M, int N, int K, float alpha,
+void sgemm_packed_avx2(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
                        const float* A, int lda, const float* B, int ldb,
                        float beta, float* C, int ldc);
-void sgemm_packed_avx512(int M, int N, int K, float alpha,
+void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
                          const float* A, int lda, const float* B, int ldb,
                          float beta, float* C, int ldc);
 
@@ -63,12 +68,9 @@ void sgemm_blocking_avx2(int* kc, int* mc, int* nc) noexcept;
 void scale_matrix_c(float* C, int M, int N, int ldc, float beta) noexcept;
 
 // ─── AVX-512 path (avx512_gemm_packed.cpp) ────────────────────────────────────
-// 8×16 kernel with fixed blocking; its own packing.
-static constexpr int MR512 = 8;
-static constexpr int NR512 = 16;
-static constexpr int KC512 = 256;
-static constexpr int MC512 = 128;
-static constexpr int NC512 = 2048;
+// 12×32 micro-kernel (24 ZMM accumulators), same five loops and blocking rules.
+static constexpr int MR512 = 12;
+static constexpr int NR512 = 32;
 
 /** KC/MC/NC of the AVX-512 path. */
 void sgemm_blocking_avx512(int* kc, int* mc, int* nc) noexcept;

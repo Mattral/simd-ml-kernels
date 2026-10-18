@@ -41,6 +41,23 @@ class TestInputValidation:
         with pytest.raises(simd_ml_kernels.ArgumentError, match="Shape mismatch"):
             simd_ml_kernels.sgemm(A, B)
 
+    def test_sgemm_k_mismatch_transposed_names_the_transpose(self):
+        A = np.ones((16, 8), np.float32)    # A.T is 8x16
+        B = np.ones((8, 32), np.float32)    # B.T is 32x8: K 16 vs 32
+        with pytest.raises(simd_ml_kernels.ArgumentError, match=r"A\.T is \[8×16\].*B\.T is \[32×8\]"):
+            simd_ml_kernels.sgemm(A, B, trans_a=True, trans_b=True)
+
+    def test_sgemm_trans_flags_are_keyword_only(self):
+        A = np.ones((4, 4), np.float32)
+        with pytest.raises(TypeError):
+            simd_ml_kernels.sgemm(A, A, None, 1.0, 0.0, "", True)
+
+    def test_sgemm_trans_c_shape_checked(self):
+        A = np.ones((8, 4), np.float32)     # trans_a: op(A) is 4x8
+        B = np.ones((8, 6), np.float32)
+        with pytest.raises(simd_ml_kernels.ArgumentError):
+            simd_ml_kernels.sgemm(A, B, np.zeros((8, 6), np.float32), trans_a=True)
+
     def test_gelu_wrong_dtype(self):
         x = np.random.randn(64).astype(np.float64)
         with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):

@@ -1,20 +1,43 @@
 /**
- * avx512_gemm_packed.cpp — AVX-512 path of sgemm: the 8×16 micro-kernel and
- * its NR = 16 packing, inside the same Goto/BLIS 5 loops as the AVX2 path
- * (avx2_gemm_packed.cpp; docs/DESIGN.md §2).
+ * avx512_gemm_packed.cpp — FP32 GEMM, AVX-512: a 12×32 micro-kernel (24 ZMM
+ * accumulators) inside the same Goto/BLIS five loops as the AVX2 path
+ * (avx2_gemm_packed.cpp, docs/DESIGN.md §2). An AVX-512 unit: compiled with
+ * -mavx512f -mavx512dq -mavx512bw -mavx512vl and used only when dispatch.cpp
+ * has found those and OS ZMM state. Small products (sgemm_avx2_prefers_direct)
+ * use the AVX2 direct path, which any CPU that runs this unit also runs.
  *
- * An AVX-512 unit: compiled with -mavx512f -mavx512dq -mavx512bw -mavx512vl
- * and used only when dispatch.cpp has found those and OS ZMM state. Small
- * products (sgemm_avx2_prefers_direct) use the AVX2 direct path, which is in
- * an AVX2 unit; any CPU that runs this one also runs that.
+ * ─── Why 12×32 (24 accumulators) ─────────────────────────────────────────────
+ * Ports and latency: Skylake-SP to Sapphire Rapids (two 512-bit FMA units) and
+ * Zen 5 issue 2 ZMM FMAs per cycle with 4-cycle latency, so 8 independent
+ * accumulators are the minimum. The previous 8×16 kernel had exactly 8 and
+ * left 23 of the 32 ZMM registers unused; any L1 miss or late broadcast
+ * stalled both FMA pipes.
+ * Registers: 12 rows × 2 vectors = 24 accumulators + 2 B vectors = 26 of 32.
+ * A is broadcast straight from memory (vbroadcastss / embedded {1to16}), so
+ * no register holds it. 14×32 (28 accumulators, 30 registers) also fits;
+ * MR is a single constant below.
+ * Loads per FMA: per k-step 2 B loads + 12 broadcasts feed 24 FMAs (0.58);
+ * two load ports (Skylake-SP) need 7 cycles for them, the FMAs 12.
+ * Shape: the row-major view of BLIS's Skylake-X SGEMM kernel (32×12,
+ * column-major, 24 accumulators).
+ * Performance of this kernel is measured on real AVX-512 hardware only (cloud
+ * VM; docs/BENCHMARKS.md). Intel SDE runs check correctness, not speed.
+ *
+ * ─── Block sizes ──────────────────────────────────────────────────────────────
+ * dispatch::gemm_blocking(12, 32): the KC×32 B micro-panel fills half of L1D
+ * (KC = 128 with 32 KiB, 192 with 48 KiB), the MC×KC A block a quarter of L2,
+ * the KC×NC B panel half of the LLC; same rules as AVX2.
  */
 
 #include "avx2_gemm_packed.hpp"
 #include "cache_alloc.hpp"
+#include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
 #include <cstddef>
-#include <cstring>
+#include <array>
+#include <cstdint>
+#include <utility>
 
 #if !defined(__AVX512F__)
 #  error "avx512_gemm_packed.cpp is an AVX-512 unit: compile with -mavx512f (CMakeLists.txt)"
@@ -24,251 +47,204 @@
 namespace simd_ml {
 namespace gemm {
 
+namespace {
+
+constexpr int MR = MR512;  // 12
+constexpr int NR = NR512;  // 32
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define SIMD_ML_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#  define SIMD_ML_ALWAYS_INLINE inline
+#endif
+
 /**
- * pack_b_panel_avx512 — AVX-512 counterpart of pack_b_panel, blocking on
- * NR512=16 instead of NR=8. Fully independent implementation (not
- * parameterized sharing) to keep the proven AVX2 path completely untouched.
+ * kernel_12x32<R, Tail> — C[0..R)[0..n) += alpha · Ap · Bp on packed
+ * micro-panels: Ap[p*12 + r] = A(r, p), Bp[p*32 + c] = B(p, c). R < 12 handles
+ * the last rows of M; Tail (n < 32) masks the C accesses (B is zero-padded).
  */
-static void pack_b_panel_avx512(const float* B, int ldb, int k, int n, float* B_packed) {
-    for (int jc = 0; jc < n; jc += NR512) {
-        int nr = std::min(NR512, n - jc);
-        float* out_block = B_packed + (jc / NR512) * k * NR512;
-        for (int p = 0; p < k; ++p) {
-            const float* src = B + p * ldb + jc;
-            float* dst = out_block + p * NR512;
-            if (nr == NR512) {
-                _mm512_storeu_ps(dst, _mm512_loadu_ps(src));
-            } else {
-                for (int j = 0; j < nr; ++j) dst[j] = src[j];
-                for (int j = nr; j < NR512; ++j) dst[j] = 0.0f;
+template <int R, bool Tail>
+SIMD_ML_ALWAYS_INLINE void kernel_12x32(int k, const float* __restrict__ Ap,
+                                        const float* __restrict__ Bp, float* __restrict__ C,
+                                        std::ptrdiff_t ldc, int n, float alpha) noexcept {
+    __m512 acc[R][2];
+    for (int r = 0; r < R; ++r) acc[r][0] = acc[r][1] = _mm512_setzero_ps();
+#pragma GCC unroll 4
+    for (int p = 0; p < k; ++p) {
+        const __m512 b0 = _mm512_loadu_ps(Bp + p * NR);
+        const __m512 b1 = _mm512_loadu_ps(Bp + p * NR + 16);
+        const float* a = Ap + p * MR;
+        for (int r = 0; r < R; ++r) {
+            const __m512 av = _mm512_set1_ps(a[r]);
+            acc[r][0] = _mm512_fmadd_ps(av, b0, acc[r][0]);
+            acc[r][1] = _mm512_fmadd_ps(av, b1, acc[r][1]);
+        }
+    }
+    const __m512 alpha_v = _mm512_set1_ps(alpha);
+    const __mmask16 m0 = Tail ? static_cast<__mmask16>(n >= 16 ? 0xFFFFu : (1u << n) - 1u) : 0xFFFF;
+    const __mmask16 m1 = Tail ? static_cast<__mmask16>(n <= 16 ? 0u : (1u << (n - 16)) - 1u) : 0xFFFF;
+    for (int r = 0; r < R; ++r) {
+        float* c = C + r * ldc;
+        if (Tail) {
+            _mm512_mask_storeu_ps(c, m0, _mm512_fmadd_ps(acc[r][0], alpha_v, _mm512_maskz_loadu_ps(m0, c)));
+            _mm512_mask_storeu_ps(c + 16, m1, _mm512_fmadd_ps(acc[r][1], alpha_v, _mm512_maskz_loadu_ps(m1, c + 16)));
+        } else {
+            _mm512_storeu_ps(c, _mm512_fmadd_ps(acc[r][0], alpha_v, _mm512_loadu_ps(c)));
+            _mm512_storeu_ps(c + 16, _mm512_fmadd_ps(acc[r][1], alpha_v, _mm512_loadu_ps(c + 16)));
+        }
+    }
+}
+
+using KernelFn = void (*)(int, const float*, const float*, float*, std::ptrdiff_t, int, float);
+
+template <bool Tail, std::size_t... I>
+constexpr auto make_row_table(std::index_sequence<I...>) {
+    // Entry r runs a kernel for r + 1 rows.
+    return std::array<KernelFn, sizeof...(I)>{{&kernel_12x32<int(I) + 1, Tail>...}};
+}
+
+/** One micro-tile: rows <= 12, n <= 32 columns. */
+SIMD_ML_ALWAYS_INLINE void run_tile(int rows, int n, int k, const float* Ap, const float* Bp,
+                                    float* C, std::ptrdiff_t ldc, float alpha) noexcept {
+    static constexpr auto full = make_row_table<false>(std::make_index_sequence<MR>{});
+    static constexpr auto tail = make_row_table<true>(std::make_index_sequence<MR>{});
+    if (rows == MR && n == NR) kernel_12x32<MR, false>(k, Ap, Bp, C, ldc, n, alpha);
+    else (n == NR ? full : tail)[rows - 1](k, Ap, Bp, C, ldc, n, alpha);
+}
+
+/**
+ * pack_a — op(A) into 12-row micro-panels, k-major, rows past mc zero; trans:
+ * A stored K×M (as pack_a in the AVX2 unit).
+ */
+void pack_a(const float* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
+    for (int i = 0; i < mc; i += MR) {
+        const int rows = std::min(MR, mc - i);
+        float* dst = Ap + static_cast<std::ptrdiff_t>(i) * kc;
+        if (trans) {
+            const float* src = A + i;
+            for (int p = 0; p < kc; ++p)
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[p * lda + r] : 0.0f;
+        } else {
+            const float* src = A + i * lda;
+            for (int p = 0; p < kc; ++p)
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[r * lda + p] : 0.0f;
+        }
+    }
+}
+
+/** pack_b — op(B) into 32-column micro-panels, columns past nc zero; trans: B stored N×K. */
+void pack_b(const float* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
+    for (int j = 0; j < nc; j += NR) {
+        const int cols = std::min(NR, nc - j);
+        float* dst = Bp + static_cast<std::ptrdiff_t>(j) * kc;
+        if (trans) {  // each panel column is one contiguous row of B
+            for (int c = 0; c < NR; ++c) {
+                const float* src = B + (j + c) * ldb;
+                for (int p = 0; p < kc; ++p) dst[p * NR + c] = c < cols ? src[p] : 0.0f;
+            }
+            continue;
+        }
+        const float* src = B + j;
+        const __mmask16 m0 = static_cast<__mmask16>(cols >= 16 ? 0xFFFFu : (1u << cols) - 1u);
+        const __mmask16 m1 = static_cast<__mmask16>(cols <= 16 ? 0u : cols >= 32 ? 0xFFFFu : (1u << (cols - 16)) - 1u);
+        for (int p = 0; p < kc; ++p) {
+            _mm512_storeu_ps(dst + p * NR, _mm512_maskz_loadu_ps(m0, src + p * ldb));
+            _mm512_storeu_ps(dst + p * NR + 16, _mm512_maskz_loadu_ps(m1, src + p * ldb + 16));
+        }
+    }
+}
+
+struct Blocking { int kc, mc, nc; };
+
+const Blocking& blocking() noexcept {
+    static const Blocking b = []() noexcept {
+        const dispatch::GemmBlocking g = dispatch::gemm_blocking(MR, NR);
+        return Blocking{g.kc, g.mc, g.nc};
+    }();
+    return b;
+}
+
+/** Per-thread packing buffers, grown on demand and kept (see the AVX2 unit). */
+struct PackBuffers {
+    AlignedUniquePtr<float> a, b;
+    std::size_t a_cap = 0, b_cap = 0;
+    float* get_a(std::size_t n) {
+        if (n > a_cap) { a = make_aligned_array<float>(n); a_cap = n; }
+        return a.get();
+    }
+    float* get_b(std::size_t n) {
+        if (n > b_cap) { b = make_aligned_array<float>(n); b_cap = n; }
+        return b.get();
+    }
+};
+
+PackBuffers& thread_buffers() {
+    thread_local PackBuffers buf;
+    return buf;
+}
+
+/** Operands as the loops see them: op(A) is M×K, op(B) is K×N. */
+struct Operands {
+    const float* A; std::ptrdiff_t lda; bool ta;
+    const float* B; std::ptrdiff_t ldb; bool tb;
+    const float* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
+    const float* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
+};
+
+void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands& op,
+                       float* C, std::ptrdiff_t ldc, const Blocking& bl) {
+    PackBuffers& buf = thread_buffers();
+    const int kc_max = std::min(K, bl.kc);
+    const int mc_max = std::min(M, bl.mc);
+    float* Bp = buf.get_b(static_cast<std::size_t>(kc_max) * ((nc + NR - 1) / NR * NR));
+    float* Ap = buf.get_a(static_cast<std::size_t>(kc_max) * ((mc_max + MR - 1) / MR * MR));
+    for (int pc = 0; pc < K; pc += bl.kc) {
+        const int kc = std::min(K - pc, bl.kc);
+        pack_b(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
+        for (int ic = 0; ic < M; ic += bl.mc) {
+            const int mc = std::min(M - ic, bl.mc);
+            pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
+            for (int jr = 0; jr < nc; jr += NR) {
+                const int n = std::min(NR, nc - jr);
+                const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
+                for (int ir = 0; ir < mc; ir += MR)
+                    run_tile(std::min(MR, mc - ir), n, kc, Ap + static_cast<std::ptrdiff_t>(ir) * kc,
+                             Bm, C + (ic + ir) * ldc + jc + jr, ldc, alpha);
             }
         }
     }
 }
 
-/** pack_a_rows — A[m × k] into row-major MR512-row blocks: A_packed[i*k + p] = A[i][p]. */
-static void pack_a_rows(const float* A, int lda, int m, int k, float* A_packed) {
-    for (int i = 0; i < m; ++i)
-        std::memcpy(A_packed + static_cast<std::size_t>(i) * k,
-                    A + static_cast<std::size_t>(i) * lda,
-                    sizeof(float) * static_cast<std::size_t>(k));
-}
+}  // namespace
 
 void sgemm_blocking_avx512(int* kc, int* mc, int* nc) noexcept {
-    *kc = KC512; *mc = MC512; *nc = NC512;
+    const Blocking& b = blocking();
+    *kc = b.kc; *mc = b.mc; *nc = b.nc;
 }
 
-/**
- * gemm_scalar_block_avx512 — AVX-512-path counterpart of gemm_scalar_block.
- * Identical logic, but reads the B_packed stride as NR512 (16) rather than
- * NR (8), since B_packed for this path was produced by pack_b_panel_avx512.
- * Deliberately duplicated rather than parameterized — this function is only
- * ever hit for small edge/tail blocks, so the tiny code duplication costs
- * nothing at runtime and keeps both ISA paths fully independent to verify.
- */
-static void gemm_scalar_block_avx512(int mr, int nr, int kc,
-                                     const float* __restrict__ A_packed,
-                                     const float* __restrict__ B_packed,
-                                     float*       __restrict__ C, int ldc,
-                                     float alpha) noexcept {
-    for (int i = 0; i < mr; ++i) {
-        float* c_row = C + i * ldc;
-        const float* a_row = A_packed + i * kc;
-        for (int p = 0; p < kc; ++p) {
-            float a_val = a_row[p];
-            const float* b_col = B_packed + p * NR512;
-            for (int j = 0; j < nr; ++j) {
-                c_row[j] += alpha * (a_val * b_col[j]);
-            }
-        }
-    }
-}
-
-// ─── 8×16 AVX-512 Micro-kernel ───────────────────────────────────────────────
-/**
- * inner_kernel_8x16_avx512 — Compute C[0..7][0..15] += alpha * A × B
- *
- * 8 rows, one __m512 accumulator per row (16 floats, the full NR512 width),
- * broadcast-based FMA.
- *
- * Register budget (32 ZMM available): 8 accumulators + 1 B load + transient
- * broadcast = 9 in flight at any moment, 23 registers of headroom.
- */
-static void inner_kernel_8x16_avx512(const float* __restrict__ A_packed,
-                              const float* __restrict__ B_packed,
-                              float*       __restrict__ C, int ldc,
-                              int k_rem, float alpha) noexcept {
-    __m512 c0 = _mm512_loadu_ps(C + 0 * ldc);
-    __m512 c1 = _mm512_loadu_ps(C + 1 * ldc);
-    __m512 c2 = _mm512_loadu_ps(C + 2 * ldc);
-    __m512 c3 = _mm512_loadu_ps(C + 3 * ldc);
-    __m512 c4 = _mm512_loadu_ps(C + 4 * ldc);
-    __m512 c5 = _mm512_loadu_ps(C + 5 * ldc);
-    __m512 c6 = _mm512_loadu_ps(C + 6 * ldc);
-    __m512 c7 = _mm512_loadu_ps(C + 7 * ldc);
-
-    __m512 acc0 = _mm512_setzero_ps();
-    __m512 acc1 = _mm512_setzero_ps();
-    __m512 acc2 = _mm512_setzero_ps();
-    __m512 acc3 = _mm512_setzero_ps();
-    __m512 acc4 = _mm512_setzero_ps();
-    __m512 acc5 = _mm512_setzero_ps();
-    __m512 acc6 = _mm512_setzero_ps();
-    __m512 acc7 = _mm512_setzero_ps();
-
-    const float* a0 = A_packed + 0 * k_rem;
-    const float* a1 = A_packed + 1 * k_rem;
-    const float* a2 = A_packed + 2 * k_rem;
-    const float* a3 = A_packed + 3 * k_rem;
-    const float* a4 = A_packed + 4 * k_rem;
-    const float* a5 = A_packed + 5 * k_rem;
-    const float* a6 = A_packed + 6 * k_rem;
-    const float* a7 = A_packed + 7 * k_rem;
-
-    const float* b_ptr = B_packed;
-
-    for (int p = 0; p < k_rem; ++p) {
-        __m512 b = _mm512_loadu_ps(b_ptr);  b_ptr += NR512;
-        acc0 = _mm512_fmadd_ps(_mm512_set1_ps(a0[p]), b, acc0);
-        acc1 = _mm512_fmadd_ps(_mm512_set1_ps(a1[p]), b, acc1);
-        acc2 = _mm512_fmadd_ps(_mm512_set1_ps(a2[p]), b, acc2);
-        acc3 = _mm512_fmadd_ps(_mm512_set1_ps(a3[p]), b, acc3);
-        acc4 = _mm512_fmadd_ps(_mm512_set1_ps(a4[p]), b, acc4);
-        acc5 = _mm512_fmadd_ps(_mm512_set1_ps(a5[p]), b, acc5);
-        acc6 = _mm512_fmadd_ps(_mm512_set1_ps(a6[p]), b, acc6);
-        acc7 = _mm512_fmadd_ps(_mm512_set1_ps(a7[p]), b, acc7);
-    }
-
-    if (alpha != 1.0f) {
-        __m512 av = _mm512_set1_ps(alpha);
-        acc0 = _mm512_mul_ps(acc0, av);  acc1 = _mm512_mul_ps(acc1, av);
-        acc2 = _mm512_mul_ps(acc2, av);  acc3 = _mm512_mul_ps(acc3, av);
-        acc4 = _mm512_mul_ps(acc4, av);  acc5 = _mm512_mul_ps(acc5, av);
-        acc6 = _mm512_mul_ps(acc6, av);  acc7 = _mm512_mul_ps(acc7, av);
-    }
-
-    _mm512_storeu_ps(C + 0 * ldc, _mm512_add_ps(c0, acc0));
-    _mm512_storeu_ps(C + 1 * ldc, _mm512_add_ps(c1, acc1));
-    _mm512_storeu_ps(C + 2 * ldc, _mm512_add_ps(c2, acc2));
-    _mm512_storeu_ps(C + 3 * ldc, _mm512_add_ps(c3, acc3));
-    _mm512_storeu_ps(C + 4 * ldc, _mm512_add_ps(c4, acc4));
-    _mm512_storeu_ps(C + 5 * ldc, _mm512_add_ps(c5, acc5));
-    _mm512_storeu_ps(C + 6 * ldc, _mm512_add_ps(c6, acc6));
-    _mm512_storeu_ps(C + 7 * ldc, _mm512_add_ps(c7, acc7));
-}
-
-// ─── sgemm_packed_avx512 ─────────────────────────────────────────────────────
-void sgemm_packed_avx512(int M, int N, int K,
+void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K,
                          float alpha,
-                         const float* __restrict__ A, int lda,
-                         const float* __restrict__ B, int ldb,
+                         const float* A, int lda,
+                         const float* B, int ldb,
                          float beta,
-                         float*       __restrict__ C, int ldc) {
+                         float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
-    if (sgemm_avx2_prefers_direct(M, N, K)) {
-        sgemm_direct_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    // Same unpacked paths as the AVX2 table (they are in the AVX2 unit).
+    const bool unpacked = trans_b ? (!trans_a && M <= 16) : sgemm_avx2_prefers_direct(M, N, K);
+    if (unpacked) {
+        sgemm_direct_avx2(trans_a, trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
     scale_matrix_c(C, M, N, ldc, beta);
-
-    const std::size_t b_buf_size_512 = static_cast<std::size_t>(KC512) *
-        static_cast<std::size_t>((NC512 + NR512 - 1) / NR512) * NR512;
-    const std::size_t a_buf_size = static_cast<std::size_t>(MC512) *
-        static_cast<std::size_t>(KC512);   // MR512 == MR, so A buffer is identical
-
+    if (K == 0) return;
+    const Blocking& bl = blocking();
+    const Operands op{A, lda, trans_a, B, ldb, trans_b};
 #ifdef SIMD_ML_OPENMP
-    struct ThreadBuffersAVX512 {
-        ThreadBuffersAVX512()
-            : B_packed(make_aligned_array<float>(
-                  static_cast<std::size_t>(KC512) *
-                  static_cast<std::size_t>((NC512 + NR512 - 1) / NR512) * NR512)),
-              A_packed(make_aligned_array<float>(
-                  static_cast<std::size_t>(MC512) *
-                  static_cast<std::size_t>(KC512))) {}
-        AlignedUniquePtr<float> B_packed;
-        AlignedUniquePtr<float> A_packed;
-    };
-    thread_local ThreadBuffersAVX512 tls_bufs512;
-
 #pragma omp parallel for schedule(dynamic, 1) \
-num_threads(get_num_threads()) if (get_num_threads() > 1)
-    for (int jc = 0; jc < N; jc += NC512) {
-        int nc = std::min(N - jc, NC512);
-        float* B_packed = tls_bufs512.B_packed.get();
-        float* A_packed = tls_bufs512.A_packed.get();
-
-        for (int pc = 0; pc < K; pc += KC512) {
-            int kc = std::min(K - pc, KC512);
-            pack_b_panel_avx512(B + static_cast<std::size_t>(pc) * ldb + jc,
-                                ldb, kc, nc, B_packed);
-
-            for (int ic = 0; ic < M; ic += MC512) {
-                int mc = std::min(M - ic, MC512);
-                pack_a_rows(A + static_cast<std::size_t>(ic) * lda + pc,
-                             lda, mc, kc, A_packed);
-
-                for (int jr = 0; jr < nc; jr += NR512) {
-                    int nr = std::min(nc - jr, NR512);
-                    const float* B_block = B_packed +
-                        static_cast<std::size_t>(jr / NR512) * kc * NR512;
-                    for (int ir = 0; ir < mc; ir += MR512) {
-                        int mr = std::min(mc - ir, MR512);
-                        const float* A_block = A_packed +
-                            static_cast<std::size_t>(ir) * kc;
-                        float* C_block = C + static_cast<std::size_t>(ic + ir) * ldc
-                                           + jc + jr;
-                        if (mr == MR512 && nr == NR512) {
-                            inner_kernel_8x16_avx512(A_block, B_block, C_block, ldc, kc, alpha);
-                        } else {
-                            gemm_scalar_block_avx512(mr, nr, kc, A_block, B_block,
-                                                     C_block, ldc, alpha);
-                        }
-                    }
-                }
-            }
-        }
-    }
-#else
-    auto B_packed_storage = make_aligned_array<float>(b_buf_size_512);
-    auto A_packed_storage = make_aligned_array<float>(a_buf_size);
-    float* B_packed = B_packed_storage.get();
-    float* A_packed = A_packed_storage.get();
-
-    for (int jc = 0; jc < N; jc += NC512) {
-        int nc = std::min(N - jc, NC512);
-
-        for (int pc = 0; pc < K; pc += KC512) {
-            int kc = std::min(K - pc, KC512);
-            pack_b_panel_avx512(B + static_cast<std::size_t>(pc) * ldb + jc,
-                                ldb, kc, nc, B_packed);
-
-            for (int ic = 0; ic < M; ic += MC512) {
-                int mc = std::min(M - ic, MC512);
-                pack_a_rows(A + static_cast<std::size_t>(ic) * lda + pc,
-                             lda, mc, kc, A_packed);
-
-                for (int jr = 0; jr < nc; jr += NR512) {
-                    int nr = std::min(nc - jr, NR512);
-                    const float* B_block = B_packed +
-                        static_cast<std::size_t>(jr / NR512) * kc * NR512;
-                    for (int ir = 0; ir < mc; ir += MR512) {
-                        int mr = std::min(mc - ir, MR512);
-                        const float* A_block = A_packed +
-                            static_cast<std::size_t>(ir) * kc;
-                        float* C_block = C + static_cast<std::size_t>(ic + ir) * ldc
-                                           + jc + jr;
-                        if (mr == MR512 && nr == NR512) {
-                            inner_kernel_8x16_avx512(A_block, B_block, C_block, ldc, kc, alpha);
-                        } else {
-                            gemm_scalar_block_avx512(mr, nr, kc, A_block, B_block,
-                                                     C_block, ldc, alpha);
-                        }
-                    }
-                }
-            }
-        }
-    }
-#endif  // SIMD_ML_OPENMP
+    num_threads(get_num_threads()) if (get_num_threads() > 1)
+#endif
+    for (int jc = 0; jc < N; jc += bl.nc)
+        gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
 }
 
 }  // namespace gemm

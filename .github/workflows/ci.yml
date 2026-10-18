@@ -184,6 +184,7 @@ jobs:
       - name: Examples run (examples/)
         run: |
           python3 examples/mlp_block.py
+          python3 examples/linear_trans_b.py
           python3 examples/bench_to_json.py /tmp/example.json --sizes 128 --reps 3
 
       - name: Benchmark tables match committed JSON

@@ -28,7 +28,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 
 | Kernel | Implementation | Notes |
 |--------|---------------|-------|
-| **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 kernel (12 accumulators), unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise |
+| **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 (12 accumulators) and 12×32 AVX-512 (24 accumulators) kernels; unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise; `trans_a`/`trans_b` handled in packing |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
@@ -62,6 +62,7 @@ B = np.random.randn(256, 256).astype(np.float32)
 # GEMM
 C = sk.sgemm(A, B)                     # C = A @ B
 sk.sgemm(A, B, C, alpha=2.0, beta=0.5) # C = 2*A@B + 0.5*C  (in-place)
+y = sk.sgemm(x2d, W, trans_b=True)     # x2d @ W.T, W stored [out, in]; no copy
 
 # Activations
 y = sk.gelu(x)                          # GeLU (out-of-place)

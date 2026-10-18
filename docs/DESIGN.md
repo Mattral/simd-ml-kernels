@@ -24,7 +24,7 @@ Kernels  scalar unit   scalar_kernels.cpp                 every kernel, portable
          AVX2 units    gemm/avx2_gemm_packed.cpp           FP32 GEMM: 6×16 kernel, direct and packed
                        gemm/{f16,bf16}_gemm.cpp            FP16- / BF16-input GEMM (unpacked, see §4)
                        intrinsic_gelu.cpp, activations/    GeLU, ReLU, SiLU, softmax, LayerNorm
-         AVX-512 units gemm/avx512_gemm_packed.cpp         FP32 GEMM, 8×16 kernel
+         AVX-512 units gemm/avx512_gemm_packed.cpp         FP32 GEMM, 12×32 kernel
            │
 Shared   simd_math.hpp (fast_exp_avx2, tanh_avx2), cache_alloc.hpp (aligned allocation, prefetch)
 ```
@@ -56,7 +56,13 @@ same code runs
 
 `sgemm_avx2_prefers_direct(M, N, K)` picks direct for products up to 80³, for
 `N ≤ 16` (one panel of columns) and for `M = 1` (each element of B is used
-once, so packing it costs as much as using it). The cut-off was measured with
+once, so packing it costs as much as using it). With `trans_a` the direct
+path only swaps A's strides. With `trans_b` B has no contiguous rows of N, so
+the kernel cannot read it in place: for `M ≤ 16` a third path computes dot
+products along rows of A and B (4 rows of B at a time, 8 accumulators, masked
+K tail), otherwise B is packed. The dot path is well ahead of packing, and of
+OpenBLAS's own `transb` GEMM, for a few rows (decode-style `x @ W.T`); the
+measurement is in `choose_path`. The cut-off was measured with
 both paths on the same kernel; the numbers are in the function's comment.
 Row and column remainders use the same kernel with fewer rows (a template
 parameter, 1-6) and masked B loads and C accesses (`n < 16`), so nothing
@@ -81,9 +87,16 @@ for jc in 0..N step NC:                  (OpenMP: one jc block per thread)
 ```
 
 ```
-Bp[(j / 16)·16·kc + p·16 + (j % 16)] = B[p][j]     (zero-padded to 16 columns)
-Ap[(i / 6)·6·kc  + p·6  + (i % 6)]   = A[i][p]     (zero-padded to 6 rows)
+Bp[(j / 16)·16·kc + p·16 + (j % 16)] = op(B)(p, j)   (zero-padded to 16 columns)
+Ap[(i / 6)·6·kc  + p·6  + (i % 6)]   = op(A)(i, p)   (zero-padded to 6 rows)
 ```
+
+`op(A)(i, p)` is `A[i][p]`, or `A[p][i]` with `trans_a` (A stored K×M);
+`op(B)(p, j)` is `B[p][j]`, or `B[j][p]` with `trans_b` (B stored N×K). The
+packing routines read either layout, so a transpose never costs a copy:
+with `trans_a` the 6 values of one k-step are adjacent; with `trans_b` each
+panel column is a row of B, transposed 8×8 in registers (a scalar gather
+measured 59–86% of OpenBLAS for M = 16..96, the register transpose 94–98%).
 
 `beta` is applied to C once before the loops (`beta = 0` writes zeros and never
 reads C, so NaN in an uninitialised C does not propagate). The packing
@@ -111,9 +124,9 @@ at the top of `avx2_gemm_packed.cpp` has the sweep. `build_info()["sgemm_blockin
 and the `build` block of every benchmark JSON record the values used. On a
 hybrid CPU the first GEMM's core decides (pin benchmarks).
 
-The AVX-512 table still uses its 8×16 kernel (8 ZMM accumulators) with fixed
-blocks KC = 256, MC = 128, NC = 2048 and per-call buffers; it is replaced next
-(ROADMAP, W3).
+The AVX-512 table uses the same loops and rules with its 12×32 kernel:
+KC = 128 with a 32 KiB L1D (Skylake-SP), 192 with 48 KiB (Ice Lake, Sapphire
+Rapids).
 
 ### 2.4 Why 6×16
 
@@ -130,6 +143,17 @@ blocks KC = 256, MC = 128, NC = 2048 and per-call buffers; it is replaced next
   docs/BENCHMARKS.md has the published comparison with OpenBLAS.
 - Peak: 2 ports × 8 lanes × 2 flop = 32 flop/cycle for AVX2+FMA; BENCHMARKS.md
   reports the measured flop/cycle next to OpenBLAS on the same core.
+
+**AVX-512: 12×32, 24 ZMM accumulators** (`avx512_gemm_packed.cpp`). Two
+512-bit FMA units with 4-cycle latency need 8 accumulators; the previous 8×16
+kernel had exactly 8 and left 23 of 32 ZMM registers unused. 12 rows × 2
+vectors = 24 accumulators + 2 B vectors = 26 registers; per k-step 2 B loads
+and 12 broadcasts feed 24 FMAs (0.58 loads per FMA, 7 cycles of loads on
+2 load ports against 12 of FMAs). It is the row-major view of BLIS's
+Skylake-X SGEMM shape (32×12 column-major). 14×32 (28 accumulators) also fits;
+the row count is one constant. Correctness is checked under Intel SDE
+(`-skx`, `-spr`) and on AVX-512 CI runners; its speed is measured only on real
+AVX-512 hardware (BENCHMARKS.md, "not measured yet" until then).
 
 ### 2.5 Choosing the table
 

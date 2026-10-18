@@ -30,14 +30,18 @@ def sgemm(
     alpha: float = 1.0,
     beta: float = 0.0,
     isa: str = "",
+    *,
+    trans_a: bool = False,
+    trans_b: bool = False,
 ) -> NDArray[np.float32]:
     """
-    SIMD GEMM: C = alpha * A @ B + beta * C  (float32, in-place or allocates).
+    SIMD GEMM: C = alpha * op(A) @ op(B) + beta * C  (float32, in-place or
+    allocates); op(X) is X, or X.T with trans_a / trans_b (BLAS transa/transb).
 
     Parameters
     ----------
-    A     : ndarray[float32], shape [M, K]
-    B     : ndarray[float32], shape [K, N]
+    A     : ndarray[float32], shape [M, K] (or [K, M] with trans_a)
+    B     : ndarray[float32], shape [K, N] (or [N, K] with trans_b)
     C     : ndarray[float32], shape [M, N], optional (allocated if None)
     alpha : float scalar, default 1.0
     beta  : float scalar, default 0.0 (0 = overwrite C)
@@ -45,6 +49,9 @@ def sgemm(
             "avx2" or "avx512" run that kernel table for this call only;
             one this build or CPU cannot run raises RuntimeError
             (build_info()["isa_usable"] lists the ones that work).
+    trans_a, trans_b : bool, keyword-only, default False — use A.T / B.T as
+            stored, without a copy; x @ W.T with W [out, in] is
+            sgemm(x, W, trans_b=True).
 
     Returns
     -------
