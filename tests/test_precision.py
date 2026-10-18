@@ -156,6 +156,33 @@ class TestGEMM:
         assert_close(C, C_ref, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL,
                     label=f"GEMM [{M}×{N}×{K}]")
 
+    @pytest.mark.parametrize("fmt", ["f16", "bf16"])
+    @pytest.mark.parametrize("M,N,K", [
+        (1, 1, 1), (7, 9, 8), (1, 4096, 128), (300, 16, 300), (50, 60, 70),   # direct path
+        (64, 64, 64), (13, 33, 385), (97, 113, 769), (431, 40, 50), (256, 256, 256),
+    ])
+    def test_low_precision_vs_float64(self, fmt, M, N, K):
+        """sgemm_f16 / sgemm_bf16: both conversions to FP32 are exact, so the
+        reference is the float64 product of the converted inputs, and the
+        bound is the FP32 GEMM's: |C - C64| <= 2(K+2)u * (|A||B|), u = 2^-24."""
+        A, B = rand_matrix(M, K), rand_matrix(K, N)
+        if fmt == "f16":
+            Ah, Bh = A.astype(np.float16), B.astype(np.float16)
+            Ar, Br = Ah.astype(np.float64), Bh.astype(np.float64)
+            C = simd_ml_kernels.sgemm_f16(Ah, Bh)
+        else:
+            def to_bf16(x):   # round to nearest even
+                u = x.view(np.uint32).astype(np.uint64)
+                return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
+            Ab, Bb = to_bf16(A), to_bf16(B)
+            Ar = (Ab.astype(np.uint32) << 16).view(np.float32).astype(np.float64)
+            Br = (Bb.astype(np.uint32) << 16).view(np.float32).astype(np.float64)
+            C = simd_ml_kernels.sgemm_bf16(Ab, Bb)
+        bound = 2 * (K + 2) * 2.0 ** -24 * (np.abs(Ar) @ np.abs(Br))
+        err = np.abs(C.astype(np.float64) - Ar @ Br)
+        assert C.dtype == np.float32 and C.shape == (M, N)
+        assert (err <= bound).all(), f"{fmt} [{M}x{N}x{K}]: max err/bound {np.max(err / bound):.3g}"
+
     @pytest.mark.parametrize("trans_a,trans_b", [(False, True), (True, False), (True, True)])
     @pytest.mark.parametrize("M,N,K", [
         (1, 300, 257),    # trans_b: dot-product path (M <= 4)

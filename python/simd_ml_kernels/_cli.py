@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import os
@@ -359,6 +360,29 @@ def cmd_bench(args: argparse.Namespace) -> int:
         stats, clock = _time([fn for _, fn in impls], args.warmup, args.reps, args.min_ghz)
         for (impl, _), t in zip(impls, stats):
             show(_record(results, "sgemm", impl, (n, n, n), t, 2.0 * n ** 3, "flop", clock))
+
+    # FP16 / BF16 inputs: against our FP32 GEMM on the same values (the
+    # conversion's cost) and PyTorch's matmul on float16 / bfloat16 tensors
+    # (oneDNN; it returns float16 / bfloat16, ours float32). The square sizes
+    # are compute-bound; 1 x 4096 x 4096 (one row times a weight matrix) is
+    # bound by reading B, where 2-byte inputs halve the traffic.
+    for m, n, k in [(s, s, s) for s in args.sizes] + [(1, 4096, 4096)]:
+        a = rng.standard_normal((m, k)).astype(np.float32)
+        b = rng.standard_normal((k, n)).astype(np.float32)
+        c = np.empty((m, n), np.float32)
+        for kernel, lowp_fn, conv, tdtype in (
+                ("sgemm_f16", sk.sgemm_f16, _as_f16, "float16"),
+                ("sgemm_bf16", sk.sgemm_bf16, _as_bf16, "bfloat16")):
+            impls = [("simd_ml_kernels", functools.partial(lowp_fn, conv(a)[0], conv(b)[0], C=c)),
+                     ("simd_ml_kernels fp32", functools.partial(sk.sgemm, a, b, C=c))]
+            if torch is not None:
+                at = torch.from_numpy(a).to(getattr(torch, tdtype))
+                bt = torch.from_numpy(b).to(getattr(torch, tdtype))
+                impls.append(("torch " + torch.__version__ + " " + tdtype,
+                              functools.partial(torch.matmul, at, bt)))
+            stats, clock = _time([f for _, f in impls], args.warmup, args.reps, args.min_ghz)
+            for (impl, _), t in zip(impls, stats):
+                show(_record(results, kernel, impl, (m, n, k), t, 2.0 * m * n * k, "flop", clock))
 
     x = rng.standard_normal(args.elems).astype(np.float32)
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)

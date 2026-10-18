@@ -46,15 +46,19 @@
  */
 
 #include "avx2_gemm_packed.hpp"
+#include "bf16_gemm.hpp"
+#include "f16_gemm.hpp"
 #include "cache_alloc.hpp"
 #include "../../dispatch/cpuid.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 
-#if !defined(__AVX2__) || !defined(__FMA__)
-#  error "avx2_gemm_packed.cpp is an AVX2 unit: compile with -mavx2 -mfma (CMakeLists.txt)"
+#if !defined(__AVX2__) || !defined(__FMA__) || !defined(__F16C__)
+#  error "avx2_gemm_packed.cpp is an AVX2 unit: compile with -mavx2 -mfma -mf16c (CMakeLists.txt)"
 #endif
 #include <immintrin.h>
 #ifdef SIMD_ML_OPENMP
@@ -75,6 +79,38 @@ constexpr int NR = NR_AVX2;  // 16
 #  define SIMD_ML_ALWAYS_INLINE inline
 #endif
 
+// ─── Input element types ─────────────────────────────────────────────────────
+// The packing routines read A and B through one of these and write FP32, so
+// FP16 and BF16 inputs are converted once per packed element and the
+// micro-kernel only ever sees floats. F32 compiles to the plain loads.
+struct F32 {
+    using T = float;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept { return *p; }
+    static SIMD_ML_ALWAYS_INLINE __m256 eight(const T* p) noexcept { return _mm256_loadu_ps(p); }
+};
+/** IEEE binary16: F16C vcvtph2ps (exact; subnormals, Inf and NaN included). */
+struct F16 {
+    using T = std::uint16_t;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept { return _cvtsh_ss(*p); }
+    static SIMD_ML_ALWAYS_INLINE __m256 eight(const T* p) noexcept {
+        return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p)));
+    }
+};
+/** BF16 = the top 16 bits of an FP32: zero-extend and shift left 16 (exact). */
+struct BF16 {
+    using T = std::uint16_t;
+    static SIMD_ML_ALWAYS_INLINE float one(const T* p) noexcept {
+        const std::uint32_t bits = static_cast<std::uint32_t>(*p) << 16;
+        float f;
+        std::memcpy(&f, &bits, sizeof(f));
+        return f;
+    }
+    static SIMD_ML_ALWAYS_INLINE __m256 eight(const T* p) noexcept {
+        const __m128i h = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+        return _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16));
+    }
+};
+
 // ─── Micro-kernel ────────────────────────────────────────────────────────────
 /**
  * kernel_6x16<R, Tail, Packed> — C[0..R)[0..n) += alpha · Σ_p A(r, p) · B(p, 0..n)
@@ -85,13 +121,16 @@ constexpr int NR = NR_AVX2;  // 16
  * them as run-time values the packed path measured 77-85% of OpenBLAS instead
  * of 98% (extra address arithmetic in the k-loop). R < 6 handles the last rows
  * of M; Tail (n < 16) masks the B loads and the C accesses so nothing past
- * column n is touched.
+ * column n is touched. EB is the element type of B in place (direct path of
+ * the FP16/BF16 GEMMs): each B row segment is converted in registers when it
+ * is loaded; packed B is always FP32.
  */
-template <int R, bool Tail, bool Packed>
+template <int R, bool Tail, bool Packed, class EB = F32>
 SIMD_ML_ALWAYS_INLINE void kernel_6x16(int k, const float* __restrict__ A, std::ptrdiff_t a_rs_,
-                                       std::ptrdiff_t a_cs_, const float* __restrict__ B,
+                                       std::ptrdiff_t a_cs_, const typename EB::T* __restrict__ B,
                                        std::ptrdiff_t b_rs_, float* __restrict__ C,
                                        std::ptrdiff_t ldc, int n, float alpha) noexcept {
+    static_assert(!Packed || std::is_same_v<EB, F32>, "packed panels are FP32");
     const std::ptrdiff_t a_rs = Packed ? 1 : a_rs_;
     const std::ptrdiff_t a_cs = Packed ? MR : a_cs_;
     const std::ptrdiff_t b_rs = Packed ? NR : b_rs_;
@@ -105,9 +144,20 @@ SIMD_ML_ALWAYS_INLINE void kernel_6x16(int k, const float* __restrict__ A, std::
     }
 #pragma GCC unroll 4
     for (int p = 0; p < k; ++p) {
-        const float* b = B + p * b_rs;
-        const __m256 b0 = Tail ? _mm256_maskload_ps(b, m0) : _mm256_loadu_ps(b);
-        const __m256 b1 = Tail ? _mm256_maskload_ps(b + 8, m1) : _mm256_loadu_ps(b + 8);
+        const typename EB::T* b = B + p * b_rs;
+        __m256 b0, b1;
+        if constexpr (std::is_same_v<EB, F32>) {
+            b0 = Tail ? _mm256_maskload_ps(b, m0) : _mm256_loadu_ps(b);
+            b1 = Tail ? _mm256_maskload_ps(b + 8, m1) : _mm256_loadu_ps(b + 8);
+        } else if (Tail) {  // AVX2 has no 16-bit masked load: copy the n values
+            typename EB::T t[NR] = {};
+            std::memcpy(t, b, static_cast<std::size_t>(n) * sizeof(t[0]));
+            b0 = EB::eight(t);
+            b1 = EB::eight(t + 8);
+        } else {
+            b0 = EB::eight(b);
+            b1 = EB::eight(b + 8);
+        }
         const float* a = A + p * a_cs;
         for (int r = 0; r < R; ++r) {
             const __m256 av = _mm256_broadcast_ss(a + r * a_rs);
@@ -128,17 +178,17 @@ SIMD_ML_ALWAYS_INLINE void kernel_6x16(int k, const float* __restrict__ A, std::
     }
 }
 
-template <bool Tail, bool Packed>
+template <bool Tail, bool Packed, class EB = F32>
 void run_tile_rows(int rows, int k, const float* A, std::ptrdiff_t a_rs, std::ptrdiff_t a_cs,
-                   const float* B, std::ptrdiff_t b_rs, float* C, std::ptrdiff_t ldc, int n,
+                   const typename EB::T* B, std::ptrdiff_t b_rs, float* C, std::ptrdiff_t ldc, int n,
                    float alpha) noexcept {
     switch (rows) {
-        case 6: kernel_6x16<6, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
-        case 5: kernel_6x16<5, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
-        case 4: kernel_6x16<4, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
-        case 3: kernel_6x16<3, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
-        case 2: kernel_6x16<2, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
-        case 1: kernel_6x16<1, Tail, Packed>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 6: kernel_6x16<6, Tail, Packed, EB>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 5: kernel_6x16<5, Tail, Packed, EB>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 4: kernel_6x16<4, Tail, Packed, EB>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 3: kernel_6x16<3, Tail, Packed, EB>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 2: kernel_6x16<2, Tail, Packed, EB>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
+        case 1: kernel_6x16<1, Tail, Packed, EB>(k, A, a_rs, a_cs, B, b_rs, C, ldc, n, alpha); break;
         default: break;
     }
 }
@@ -162,23 +212,25 @@ SIMD_ML_ALWAYS_INLINE void run_tile_packed(int rows, int n, int k, const float* 
  * kernel's broadcasts read 6 consecutive floats per k-step.
  * op(A)(i, p) = A[i*lda + p], or A[p*lda + i] when trans (A stored K×M): then
  * the 6 values of one k-step are adjacent in memory and the copy is cheaper.
+ * E converts FP16/BF16 to FP32 here, once per element of the MC×KC block.
  */
-void pack_a(const float* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
+template <class E>
+void pack_a(const typename E::T* A, std::ptrdiff_t lda, bool trans, int mc, int kc, float* Ap) noexcept {
     for (int i = 0; i < mc; i += MR) {
         const int rows = std::min(MR, mc - i);
         float* dst = Ap + static_cast<std::ptrdiff_t>(i) * kc;
         if (trans) {
-            const float* src = A + i;
+            const typename E::T* src = A + i;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[p * lda + r] : 0.0f;
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? E::one(src + p * lda + r) : 0.0f;
         } else if (rows == MR) {
-            const float* src = A + i * lda;
+            const typename E::T* src = A + i * lda;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = src[r * lda + p];
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = E::one(src + r * lda + p);
         } else {
-            const float* src = A + i * lda;
+            const typename E::T* src = A + i * lda;
             for (int p = 0; p < kc; ++p)
-                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? src[r * lda + p] : 0.0f;
+                for (int r = 0; r < MR; ++r) dst[p * MR + r] = r < rows ? E::one(src + r * lda + p) : 0.0f;
         }
     }
 }
@@ -207,8 +259,11 @@ inline void transpose8x8(__m256 r[8]) noexcept {
  * Full panels are transposed 8×8 in registers (8 rows of B × 8 values of p
  * per step); with a scalar gather the transposed packed path reached 59-86%
  * of OpenBLAS for M = 16..96 against 90-104% without the transpose.
+ * E converts FP16/BF16 to FP32 in registers (8 values per vcvtph2ps, or per
+ * zero-extend + shift for BF16), once per element of the KC×NC panel.
  */
-void pack_b(const float* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
+template <class E>
+void pack_b(const typename E::T* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, float* Bp) noexcept {
     for (int j = 0; j < nc; j += NR) {
         const int cols = std::min(NR, nc - j);
         float* dst = Bp + static_cast<std::ptrdiff_t>(j) * kc;
@@ -218,25 +273,25 @@ void pack_b(const float* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, floa
                 for (; p0 + 8 <= kc; p0 += 8)
                     for (int h = 0; h < NR; h += 8) {
                         __m256 r[8];
-                        for (int q = 0; q < 8; ++q) r[q] = _mm256_loadu_ps(B + (j + h + q) * ldb + p0);
+                        for (int q = 0; q < 8; ++q) r[q] = E::eight(B + (j + h + q) * ldb + p0);
                         transpose8x8(r);
                         for (int q = 0; q < 8; ++q) _mm256_storeu_ps(dst + (p0 + q) * NR + h, r[q]);
                     }
             }
             for (int c = 0; c < NR; ++c) {   // K tail, and partial panels
-                const float* src = B + (j + c) * ldb;
-                for (int p = p0; p < kc; ++p) dst[p * NR + c] = c < cols ? src[p] : 0.0f;
+                const typename E::T* src = B + (j + c) * ldb;
+                for (int p = p0; p < kc; ++p) dst[p * NR + c] = c < cols ? E::one(src + p) : 0.0f;
             }
         } else if (cols == NR) {
-            const float* src = B + j;
+            const typename E::T* src = B + j;
             for (int p = 0; p < kc; ++p) {
-                _mm256_storeu_ps(dst + p * NR, _mm256_loadu_ps(src + p * ldb));
-                _mm256_storeu_ps(dst + p * NR + 8, _mm256_loadu_ps(src + p * ldb + 8));
+                _mm256_storeu_ps(dst + p * NR, E::eight(src + p * ldb));
+                _mm256_storeu_ps(dst + p * NR + 8, E::eight(src + p * ldb + 8));
             }
         } else {
-            const float* src = B + j;
+            const typename E::T* src = B + j;
             for (int p = 0; p < kc; ++p)
-                for (int c = 0; c < NR; ++c) dst[p * NR + c] = c < cols ? src[p * ldb + c] : 0.0f;
+                for (int c = 0; c < NR; ++c) dst[p * NR + c] = c < cols ? E::one(src + p * ldb + c) : 0.0f;
         }
     }
 }
@@ -333,17 +388,20 @@ PackBuffers& thread_buffers() {
     return buf;
 }
 
-/** Operands as the loops see them: op(A) is M×K, op(B) is K×N. */
+/** Operands as the loops see them: op(A) is M×K, op(B) is K×N, elements E::T. */
+template <class E>
 struct Operands {
-    const float* A; std::ptrdiff_t lda; bool ta;
-    const float* B; std::ptrdiff_t ldb; bool tb;
+    using T = typename E::T;
+    const T* A; std::ptrdiff_t lda; bool ta;
+    const T* B; std::ptrdiff_t ldb; bool tb;
     /** &op(A)(i, p) and &op(B)(p, j) */
-    const float* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
-    const float* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
+    const T* a_at(int i, int p) const { return ta ? A + p * lda + i : A + i * lda + p; }
+    const T* b_at(int p, int j) const { return tb ? B + j * ldb + p : B + p * ldb + j; }
 };
 
 /** Loops 2-5 for the column block op(B)[:, jc:jc+nc) (loop 1 is the caller). */
-void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands& op,
+template <class E>
+void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands<E>& op,
                        float* C, std::ptrdiff_t ldc, const Blocking& bl) {
     PackBuffers& buf = thread_buffers();
     const int kc_max = std::min(K, bl.kc);
@@ -353,10 +411,10 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
 
     for (int pc = 0; pc < K; pc += bl.kc) {                       // loop 2
         const int kc = std::min(K - pc, bl.kc);
-        pack_b(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
+        pack_b<E>(op.b_at(pc, jc), op.ldb, op.tb, kc, nc, Bp);
         for (int ic = 0; ic < M; ic += bl.mc) {                   // loop 3
             const int mc = std::min(M - ic, bl.mc);
-            pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
+            pack_a<E>(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap);
             for (int jr = 0; jr < nc; jr += NR) {                 // loop 4
                 const int n = std::min(NR, nc - jr);
                 const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
@@ -380,7 +438,8 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
  * chunk's rows of A into its own Ap. The barrier at the end of the omp for
  * keeps Bp until every chunk is done.
  */
-void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands& op,
+template <class E>
+void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands<E>& op,
                             float* C, std::ptrdiff_t ldc, const Blocking& bl, float* Bp,
                             float* Ap) noexcept {
     const int team = omp_get_num_threads(), t = omp_get_thread_num();
@@ -391,14 +450,14 @@ void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Ope
     const int b1 = std::min(nc, static_cast<int>(static_cast<long long>(t + 1) * panels / team) * NR);
     for (int pc = 0; pc < K; pc += bl.kc) {                       // loop 2
         const int kc = std::min(K - pc, bl.kc);
-        if (b1 > b0) pack_b(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
+        if (b1 > b0) pack_b<E>(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
         int packed_ic = -1;                                       // rows now in this thread's Ap
 #pragma omp barrier
 #pragma omp for schedule(dynamic, 1)
         for (int c = 0; c < chunks; ++c) {                        // loops 3 and 4, in chunks
             const int ic = c / ch.n_chunks * ch.mc, j0 = c % ch.n_chunks * ch.nc;
             const int mc = std::min(M - ic, ch.mc), j1 = std::min(nc, j0 + ch.nc);
-            if (ic != packed_ic) { pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
+            if (ic != packed_ic) { pack_a<E>(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
             for (int jr = j0; jr < j1; jr += NR) {
                 const int n = std::min(NR, nc - jr);
                 const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
@@ -417,7 +476,8 @@ void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Ope
  * cannot leave one): one shared B panel, one A block per thread, each
  * rounded up to 64 bytes so two threads never write the same cache line.
  */
-void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands& op,
+template <class E>
+void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands<E>& op,
                       float* C, std::ptrdiff_t ldc, const Blocking& bl) {
     PackBuffers& buf = thread_buffers();
     const int kc_max = std::min(K, bl.kc);
@@ -435,24 +495,105 @@ void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Opera
 }
 #endif
 
+/** One strip of <= 6 rows of the direct path: C[0..rows) += alpha · A-strip · B, B in place. */
+template <class EB>
+void direct_rows(int rows, int N, int K, float alpha, const float* Ai, std::ptrdiff_t a_rs,
+                 std::ptrdiff_t a_cs, const typename EB::T* B, std::ptrdiff_t ldb, float* Ci,
+                 std::ptrdiff_t ldc) noexcept {
+    for (int j = 0; j < N; j += NR) {
+        const int n = std::min(NR, N - j);
+        float* Cij = Ci + j;
+        if (rows == MR && n == NR)
+            kernel_6x16<MR, false, false, EB>(K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
+        else if (n == NR)
+            run_tile_rows<false, false, EB>(rows, K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
+        else
+            run_tile_rows<true, false, EB>(rows, K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
+    }
+}
+
 /** Direct path on op(A) in place (any trans_a) and B in place (no trans_b). */
 void direct(bool ta, int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
             const float* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
     const std::ptrdiff_t a_rs = ta ? 1 : lda, a_cs = ta ? lda : 1;
+    for (int i = 0; i < M; i += MR)
+        direct_rows<F32>(std::min(MR, M - i), N, K, alpha, ta ? A + i : A + i * lda, a_rs, a_cs,
+                         B, ldb, C + i * ldc, ldc);
+}
+
+/** dst[0..n) = E-converted src[0..n). */
+template <class E>
+void convert_row(const typename E::T* src, int n, float* dst) noexcept {
+    int p = 0;
+    for (; p + 8 <= n; p += 8) _mm256_storeu_ps(dst + p, E::eight(src + p));
+    for (; p < n; ++p) dst[p] = E::one(src + p);
+}
+
+/**
+ * Direct path of the FP16/BF16 GEMMs (same shapes as FP32's). Each 6-row
+ * strip of A is converted once into a 6×K float buffer. B is used by every
+ * strip: with one strip (M <= 6, e.g. M = 1) it is read in place and converted
+ * in registers, so it is read once at 2 bytes per element; with more strips
+ * it is converted once into a K×N float buffer (up to 4 MiB; larger B stays
+ * in place). Converting in the kernel for every strip ran BF16 at 65% of FP32
+ * at N = 64 (zero-extend + shift on every load; Lunar Lake P-core).
+ * Cost: with N <= 16 (one panel) and large M·K, the FP32 kernel issues one A
+ * broadcast per 2 FMAs, so converting and storing every A element first is a
+ * large share of the work: 2048×16×2048 and 4096×8×4096 run at 70-82% of the
+ * FP32 GEMM (converting in chunks of 512 along K, to keep the strip in L1D,
+ * did not change that). Single-row and few-row shapes read half the bytes of
+ * FP32 and run 1.4-2.9× faster (1×4096×4096, 6-7×4096×1024).
+ */
+template <class E>
+void direct_lowp(int M, int N, int K, float alpha, const typename E::T* A, std::ptrdiff_t lda,
+                 const typename E::T* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) {
+    PackBuffers& buf = thread_buffers();
+    float* As = buf.get_a(static_cast<std::size_t>(MR) * K);
+    const bool convert_b = M > MR && static_cast<long long>(K) * N <= (1LL << 20);
+    float* Bf = convert_b ? buf.get_b(static_cast<std::size_t>(K) * N) : nullptr;
+    if (convert_b)
+        for (int p = 0; p < K; ++p) convert_row<E>(B + p * ldb, N, Bf + static_cast<std::ptrdiff_t>(p) * N);
     for (int i = 0; i < M; i += MR) {
         const int rows = std::min(MR, M - i);
-        const float* Ai = ta ? A + i : A + i * lda;
-        for (int j = 0; j < N; j += NR) {
-            const int n = std::min(NR, N - j);
-            float* Cij = C + i * ldc + j;
-            if (rows == MR && n == NR)
-                kernel_6x16<MR, false, false>(K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
-            else if (n == NR)
-                run_tile_rows<false, false>(rows, K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
-            else
-                run_tile_rows<true, false>(rows, K, Ai, a_rs, a_cs, B + j, ldb, Cij, ldc, n, alpha);
-        }
+        for (int r = 0; r < rows; ++r) convert_row<E>(A + (i + r) * lda, K, As + r * K);
+        if (convert_b)
+            direct_rows<F32>(rows, N, K, alpha, As, K, 1, Bf, N, C + i * ldc, ldc);
+        else
+            direct_rows<E>(rows, N, K, alpha, As, K, 1, B, ldb, C + i * ldc, ldc);
     }
+}
+
+/** Loops 1-5 (C already scaled by beta, K > 0). */
+template <class E>
+void packed(int M, int N, int K, float alpha, const Operands<E>& op, float* C, std::ptrdiff_t ldc) {
+    const Blocking& bl = blocking();
+#ifdef SIMD_ML_OPENMP
+    if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
+        gemm_packed_team(threads, M, N, K, alpha, op, C, ldc, bl);
+        return;
+    }
+#endif
+    for (int jc = 0; jc < N; jc += bl.nc)                         // loop 1
+        gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
+}
+
+/**
+ * FP16/BF16 inputs, FP32 accumulation and output: the FP32 paths with the
+ * conversion moved into packing (or, on the direct path, into the A-strip
+ * buffer and the B loads). Replaces a one-accumulator loop that converted B on
+ * every use and had no cache blocking (12-17% of the FP32 GEMM at N = 256-1024
+ * on the reference laptop).
+ */
+template <class E>
+void sgemm_lowp(int M, int N, int K, float alpha, const typename E::T* A, int lda,
+                const typename E::T* B, int ldb, float beta, float* C, int ldc) {
+    if (M <= 0 || N <= 0 || K < 0) return;
+    scale_matrix_c(C, M, N, ldc, beta);
+    if (K == 0) return;
+    if (sgemm_avx2_prefers_direct(M, N, K))
+        direct_lowp<E>(M, N, K, alpha, A, lda, B, ldb, C, ldc);
+    else
+        packed<E>(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, false}, C, ldc);
 }
 
 enum class Path { direct, dot, packed };
@@ -529,16 +670,17 @@ void sgemm_packed_avx2(bool trans_a, bool trans_b, int M, int N, int K,
     }
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
-    const Blocking& bl = blocking();
-    const Operands op{A, lda, trans_a, B, ldb, trans_b};
-#ifdef SIMD_ML_OPENMP
-    if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
-        gemm_packed_team(threads, M, N, K, alpha, op, C, ldc, bl);
-        return;
-    }
-#endif
-    for (int jc = 0; jc < N; jc += bl.nc)                         // loop 1
-        gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
+    packed<F32>(M, N, K, alpha, Operands<F32>{A, lda, trans_a, B, ldb, trans_b}, C, ldc);
+}
+
+void sgemm_f16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+                    const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
+    sgemm_lowp<F16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+void sgemm_bf16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+                     const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
+    sgemm_lowp<BF16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 }  // namespace gemm

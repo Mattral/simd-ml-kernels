@@ -16,8 +16,7 @@ set(TEST_SRCS
     test_dispatch.cpp
     test_gelu.cpp
     test_gemm_packed.cpp
-    test_gemm_f16.cpp
-    test_gemm_bf16.cpp
+    test_gemm_lowp.cpp
     test_activations.cpp
     test_threads.cpp
 )
