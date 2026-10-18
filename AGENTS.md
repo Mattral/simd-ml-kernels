@@ -44,7 +44,7 @@ src/dispatch/kernels.hpp, dispatch.cpp       KernelTable per ISA, CPUID + XGETBV
 src/kernels/scalar_kernels.cpp               scalar unit: every kernel in portable C++, the scalar table
 src/kernels/kernels_{avx2,avx512}.cpp        the AVX2 / AVX-512 tables
 src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32 GEMM, AVX2: 6x16 kernel, direct (small) and 5-loop packed paths
-src/kernels/gemm/avx512_gemm_packed.cpp      FP32 GEMM, AVX-512: 8x16 kernel
+src/kernels/gemm/avx512_gemm_packed.cpp      FP32 GEMM, AVX-512: 12x32 kernel, same loops
 src/kernels/gemm/{f16,bf16}_gemm.*           FP16 / BF16-input GEMM, FP32 accumulate (AVX2)
 src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM (tests)
 src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh (AVX2)

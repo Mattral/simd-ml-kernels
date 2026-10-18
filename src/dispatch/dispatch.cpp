@@ -241,7 +241,7 @@ namespace gemm {
 void sgemm_packed(int M, int N, int K, float alpha,
                   const float* A, int lda, const float* B, int ldb,
                   float beta, float* C, int ldc) {
-    kernels().sgemm(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    kernels().sgemm(false, false, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 bool f16c_available() noexcept { return cpu_features().has_f16c; }

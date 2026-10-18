@@ -7,6 +7,12 @@ under **Changed** with a migration note.
 ## Unreleased
 
 ### Added
+- `sgemm(..., trans_a=False, trans_b=False)` (keyword-only): C = alpha·op(A)·op(B)
+  + beta·C with op(X) = X or Xᵀ, as BLAS transa/transb. A stored `[K, M]` /
+  B stored `[N, K]` are read in place: the transpose happens while packing
+  (8×8 register transposes for B), or for `trans_b` with M ≤ 16 in a
+  dot-product path, so `x @ W.T` with `W` as `torch.nn.Linear` stores it
+  needs no copy. `examples/linear_trans_b.py`.
 - `python -m simd_ml_kernels selftest`: checks every kernel against a NumPy
   float64 reference with the bounds the test suite asserts (GEMMs: elementwise
   `|C − AB| ≤ 2·K·u·(|A||B|)`, u = 2⁻²⁴), prints one line per kernel and exits 1
@@ -45,6 +51,13 @@ under **Changed** with a migration note.
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- **FP32 GEMM, AVX-512:** a 12×32 micro-kernel with 24 ZMM accumulators
+  replaces the 8×16 kernel (8 accumulators), with the AVX2 path's five loops,
+  CPUID-leaf-4 blocking and per-thread buffers. Verified under Intel SDE
+  (`-skx`, `-spr`) and on AVX-512 CI runners; its speed is measured only on
+  AVX-512 hardware (not yet).
+- C++: the `KernelTable::sgemm` entry and `sgemm_packed_avx2/avx512` take
+  `trans_a, trans_b` first; `sgemm_packed()` keeps the untransposed signature.
 - **FP32 GEMM, AVX2:** one 6×16 micro-kernel (12 YMM accumulators) replaces
   the 8×8 kernel and the one-accumulator small-matrix loop. Small products
   (up to 80³, N ≤ 16 or M = 1) run it on A and B in place; the rest go through

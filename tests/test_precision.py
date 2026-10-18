@@ -156,6 +156,35 @@ class TestGEMM:
         assert_close(C, C_ref, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL,
                     label=f"GEMM [{M}×{N}×{K}]")
 
+    @pytest.mark.parametrize("trans_a,trans_b", [(False, True), (True, False), (True, True)])
+    @pytest.mark.parametrize("M,N,K", [
+        (1, 300, 257),    # trans_b: dot-product path (M <= 4)
+        (4, 33, 1027),    # dot path, K tail
+        (5, 17, 9),       # trans_b packed, tiny
+        (64, 64, 64),
+        (97, 113, 769),   # three KC panels on a 48 KiB-L1 core
+        (200, 190, 180),
+    ])
+    def test_sgemm_transposed(self, M, N, K, trans_a, trans_b):
+        A = rand_matrix(K, M) if trans_a else rand_matrix(M, K)
+        B = rand_matrix(N, K) if trans_b else rand_matrix(K, N)
+        opA = (A.T if trans_a else A).astype(np.float64)
+        opB = (B.T if trans_b else B).astype(np.float64)
+        C = simd_ml_kernels.sgemm(A, B, trans_a=trans_a, trans_b=trans_b)
+        assert C.shape == (M, N)
+        assert_close(C, opA @ opB, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL,
+                     label=f"GEMM trans_a={trans_a} trans_b={trans_b} [{M}x{N}x{K}]")
+
+    def test_sgemm_trans_b_linear_layer_alpha_beta(self):
+        """y = 2 * x @ W.T + 0.5 * y with W stored [out, in], into a given C."""
+        x, W = rand_matrix(8, 768), rand_matrix(3072, 768)
+        y0 = rand_matrix(8, 3072)
+        y = y0.copy()
+        out = simd_ml_kernels.sgemm(x, W, y, alpha=2.0, beta=0.5, trans_b=True)
+        assert out is y or np.shares_memory(out, y)
+        ref = 2.0 * (x.astype(np.float64) @ W.T.astype(np.float64)) + 0.5 * y0
+        assert_close(y, ref, rtol=self.GEMM_TOL, atol=self.GEMM_ATOL, label="x @ W.T")
+
     def test_sgemm_allocates_output_when_C_not_provided(self):
         A = rand_matrix(32, 64)
         B = rand_matrix(64, 32)

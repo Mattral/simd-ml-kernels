@@ -78,7 +78,7 @@
 | Kernel | File | AVX2 tile | AVX-512 tile | Status |
 |---|---|---|---|---|
 | Reference (removed in W3) | `avx_matmul.cpp` | 6×16 (12 YMM) | 6×32, dual `__m512`/row (12 ZMM) | removed |
-| Primary (Python-facing) | `avx2_gemm_packed.cpp` | 6×16 (12 YMM) since W3; 8×8 before | 8×16, single `__m512`/row (8 ZMM) | ✅ |
+| Primary (Python-facing) | `avx2_gemm_packed.cpp` | 6×16 (12 YMM) since W3; 8×8 before | 12×32, two `__m512`/row (24 ZMM) since W3; 8×16 before | ✅ |
 
 **Design note on the two different AVX-512 tile shapes:** the reference
 kernel's 6×32 tile needed a genuine dual-accumulator split (two `__m512`
@@ -175,8 +175,9 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
 - **W3 — GEMM.** Done: one register-blocked 6×16 AVX2 kernel for small
   (unpacked) and large (packed) products, blocking from CPUID leaf 4,
   persistent packing buffers (N = 128 went from 24% to 95% of OpenBLAS on the
-  reference laptop; BENCHMARKS.md). Remaining: AVX-512 micro-kernel with 24–28
-  accumulators; `trans_a`/`trans_b` in packing;
+  reference laptop; BENCHMARKS.md); AVX-512 12×32 micro-kernel with 24
+  accumulators (correct under SDE; speed not measured yet); `trans_a`/`trans_b`
+  in packing. Remaining: AVX-512 measurement on real hardware;
   OpenMP on by default with a scaling table; LayerNorm single-pass vs
   two-pass. Measured on ≥ 2 CPUs.
 - **W4 — low precision that is faster than FP32.** BF16/FP16 converted at pack
