@@ -47,6 +47,31 @@ tables means every sample of that case ran at P-core clocks.
 ## Results
 
 <!-- BEGIN GENERATED: results-detail -->
+#### lnl-226v-wsl, 2026-10-18, commit `b193633ecec1`
+
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `b193633ecec1`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T06:13:12+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json`](../benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json).
+
+**FP32 GEMM, square, single thread**
+
+| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | flop/cycle (ours / OpenBLAS) | IQR ms (ours) | IQR ms (OpenBLAS) | core GHz median (min–max) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 72.2 | 82.6 | 87% | 20.2 / 23.1 | 0.047–0.070 | 0.044–0.062 | 3.57 (3.17–3.76) |
+| 256 | 91.5 | 98.2 | 93% | 26.4 / 28.3 | 0.348–0.425 | 0.338–0.367 | 3.47 (3.23–3.70) |
+| 512 | 96.0 | 96.8 | 99% | 27.7 / 27.9 | 2.676–2.914 | 2.508–2.858 | 3.47 (3.15–4.17) |
+| 1024 | 115.4 | 119.9 | 96% | 26.5 / 27.5 | 18.130–18.751 | 17.809–18.783 | 4.36 (4.14–4.46) |
+| 2048 | 123.8 | 128.1 | 97% | 27.7 / 28.6 | 136.697–141.673 | 132.085–136.115 | 4.47 (3.63–4.83) |
+
+**Activations and normalization, out-of-place, single thread**
+
+| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | IQR µs (ours) | IQR µs (PyTorch) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `gelu_exact` | 1048576 | 2.202 | 0.527 | 1.405 | 1.57× | 417.2–535.1 | 717.8–853.8 | 4.18 (3.70–4.57) |
+| `gelu_tanh` | 1048576 | 1.488 | 0.348 | 0.514 | 2.89× | 673.9–843.9 | 1951.7–2241.7 | 4.27 (3.88–4.49) |
+| `silu` | 1048576 | 2.929 | 0.677 | 1.959 | 1.50× | 320.6–462.8 | 476.9–584.4 | 4.33 (3.72–4.51) |
+| `relu` | 1048576 | 4.656 | 1.052 | 4.716 | 0.99× | 201.1–263.3 | 200.2–284.8 | 4.43 (3.86–4.61) |
+| `softmax` | 1024×1024 | 1.871 | 0.428 | 1.385 | 1.35× | 529.1–659.9 | 731.4–827.6 | 4.37 (3.91–4.64) |
+| `layer_norm` | 1024×1024 | 4.118 | 0.932 | 4.268 | 0.97× | 227.9–301.1 | 222.7–307.4 | 4.42 (4.07–4.58) |
+
 #### lnl-226v-wsl, 2026-10-18, commit `44194476d395`
 
 Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `44194476d395`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T04:57:38+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json`](../benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json).
