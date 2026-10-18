@@ -29,7 +29,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | Kernel | Implementation | Notes |
 |--------|---------------|-------|
 | **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 (12 accumulators) and 12×32 AVX-512 (24 accumulators) kernels; unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise; `trans_a`/`trans_b` handled in packing |
-| **FP16 / BF16 GEMM** (`sgemm_f16`, `sgemm_bf16`) | same files; `gemm/avx512bf16_gemm.cpp` | Inputs converted to FP32 once while packing, then the FP32 kernels; FP32 accumulation and output; `vdpbf16ps` on AVX512_BF16 CPUs (speed not measured) |
+| **FP16 / BF16 GEMM** (`sgemm_f16`, `sgemm_bf16`) | same files; `gemm/avx512bf16_gemm.cpp` | Inputs converted to FP32 once while packing, then the FP32 kernels; FP32 accumulation and output; `vdpbf16ps` path opt-in (`SIMD_ML_BF16_DOT=1`; slower than conversion where measured) |
 | **INT8 GEMM** (`sgemm_u8s8`) | `gemm/avxvnni_gemm.cpp`, `gemm/avx512vnni_gemm.cpp` | uint8 × int8 with per-column scales, FP32 output; `vpdpbusd` (AVX-VNNI, AVX512_VNNI), exact int32 sums per K block; FP32 conversion path without VNNI |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
@@ -109,58 +109,58 @@ call by call. The GHz column is the core clock measured during the case;
 cases where it fell below the P-core threshold are not shown.
 
 <!-- BEGIN GENERATED: results-summary -->
-#### cloud-xeon-emr-2vcpu, 2026-10-18, commit `9029f1566ddb`
+#### cloud-xeon-emr-2vcpu, 2026-10-18, commit `255f27755c31`
 
-Source: Intel(R) Xeon(R) Processor @ 2.10GHz, vCPU 1 (KVM guest, 2 vCPU; host core not visible); Python 3.13.16, GNU 13.3.0, commit `9029f1566ddb`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cu130; 30 interleaved reps after 5 warm-up; 2026-10-18T11:50:21+00:00; [`benchmarks/results/cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb.json`](benchmarks/results/cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb.json).
+Source: Intel(R) Xeon(R) Processor @ 2.10GHz, vCPU 1 (KVM guest, 2 vCPU; host core not visible); Python 3.13.16, GNU 13.3.0, commit `255f27755c31`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cu130; 30 interleaved reps after 5 warm-up; 2026-10-18T12:03:45+00:00; [`benchmarks/results/cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31.json`](benchmarks/results/cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31.json).
 
 **FP32 GEMM, square, single thread**
 
 | N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | core GHz median (min–max) |
 |---:|---:|---:|---:|---:|
-| 128 | 96.5 | 90.5 | 107% | 3.38 (3.29–3.46) |
-| 256 | 96.5 | 95.7 | 101% | 3.34 (3.25–3.39) |
-| 512 | 117.2 | 117.2 | 100% | 3.30 (2.60–3.45) |
-| 1024 | 129.0 | 144.7 | 89% | 3.48 (3.06–4.08) |
-| 2048 | 110.6 | 127.3 | 87% | 3.17 (2.87–3.49) |
+| 128 | 95.4 | 89.6 | 107% | 3.08 (2.90–3.22) |
+| 256 | 111.0 | 112.6 | 99% | 3.11 (2.93–3.24) |
+| 512 | 105.6 | 108.3 | 98% | 3.03 (1.13–3.20) |
+| 1024 | 101.7 | 111.8 | 91% | 3.29 (2.82–3.59) |
+| 2048 | 108.1 | 124.8 | 87% | 3.18 (3.08–3.68) |
 
 **FP16 / BF16-input GEMM, FP32 accumulation and output, single thread** (PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns float16 / bfloat16)
 
 | input | M×N×K | simd-ml-kernels GFLOP/s | our FP32 GFLOP/s | % of FP32 | PyTorch GFLOP/s | ours / PyTorch | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| FP16 | 128×128×128 | 60.3 | 67.3 | 90% | 46.3 | 1.30× | 3.13 (2.96–3.16) |
-| FP16 | 256×256×256 | 81.2 | 85.1 | 95% | 73.6 | 1.10× | 3.13 (3.10–3.15) |
-| FP16 | 512×512×512 | 84.9 | 84.3 | 101% | 95.5 | 0.89× | 3.12 (3.00–3.18) |
-| FP16 | 1024×1024×1024 | 106.9 | 107.3 | 100% | 119.9 | 0.89× | 3.14 (2.83–3.46) |
-| FP16 | 2048×2048×2048 | 108.8 | 112.5 | 97% | 125.0 | 0.87× | 3.27 (2.46–4.03) |
-| FP16 | 1×4096×4096 | 2.4 | 1.6 | 150% | 4.7 | 0.51× | 3.19 (3.14–3.87) |
-| BF16 | 128×128×128 | 50.4 | 68.7 | 73% | 81.1 | 0.62× | 3.12 (3.02–3.15) |
-| BF16 | 256×256×256 | 55.3 | 84.6 | 65% | 209.5 | 0.26× | 3.15 (2.68–3.23) |
-| BF16 | 512×512×512 | 73.9 | 108.5 | 68% | 627.4 | 0.12× | 3.19 (3.11–3.21) |
-| BF16 | 1024×1024×1024 | 64.3 | 94.2 | 68% | 666.1 | 0.10× | 3.12 (2.93–3.39) |
-| BF16 | 2048×2048×2048 | 68.2 | 107.1 | 64% | 785.1 | 0.09× | 3.25 (3.01–3.69) |
-| BF16 | 1×4096×4096 | 2.4 | 1.7 | 140% | 4.3 | 0.55× | 3.11 (2.60–3.41) |
+| FP16 | 128×128×128 | 86.3 | 94.9 | 91% | 69.0 | 1.25× | 3.15 (3.00–3.22) |
+| FP16 | 256×256×256 | 96.5 | 104.1 | 93% | 95.2 | 1.01× | 3.17 (2.90–3.22) |
+| FP16 | 512×512×512 | 110.8 | 109.6 | 101% | 123.3 | 0.90× | 3.18 (2.96–3.20) |
+| FP16 | 1024×1024×1024 | 114.9 | 114.9 | 100% | 128.6 | 0.89× | 3.17 (3.02–3.22) |
+| FP16 | 2048×2048×2048 | 104.7 | 104.9 | 100% | 117.4 | 0.89× | 3.05 (2.88–3.38) |
+| FP16 | 1×4096×4096 | 2.7 | 1.7 | 153% | 4.7 | 0.57× | 3.17 (3.05–3.33) |
+| BF16 | 128×128×128 | 100.2 | 99.9 | 100% | 139.1 | 0.72× | 3.06 (2.84–3.20) |
+| BF16 | 256×256×256 | 97.8 | 95.2 | 103% | 225.0 | 0.43× | 3.11 (2.93–3.17) |
+| BF16 | 512×512×512 | 115.0 | 110.3 | 104% | 640.5 | 0.18× | 3.13 (3.06–3.21) |
+| BF16 | 1024×1024×1024 | 112.9 | 113.9 | 99% | 805.2 | 0.14× | 3.18 (3.01–3.44) |
+| BF16 | 2048×2048×2048 | 108.7 | 109.0 | 100% | 771.3 | 0.14× | 3.21 (2.87–3.91) |
+| BF16 | 1×4096×4096 | 2.3 | 1.7 | 137% | 4.0 | 0.58× | 3.59 (2.97–3.97) |
 
 **INT8 GEMM (uint8 × per-channel int8, FP32 output), x·Wᵀ, single thread**, path `avx512_vnni` (PyTorch: `torch.ops.quantized.linear`, prepacked weights, which returns requantized uint8)
 
 | M×N×K | simd-ml-kernels GOP/s | × our FP32 | FP32-conversion path GOP/s | × our FP32 | PyTorch GOP/s | ours / PyTorch | core GHz median (min–max) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 128×128×128 | 129.3 | 1.43× | 70.6 | 0.78× | 64.2 | 2.01× | 3.31 (3.14–3.57) |
-| 256×256×256 | 189.3 | 1.97× | 80.7 | 0.84× | 162.9 | 1.16× | 3.21 (2.56–3.45) |
-| 512×512×512 | 264.2 | 2.31× | 86.5 | 0.76× | 377.1 | 0.70× | 3.34 (3.07–3.39) |
-| 1024×1024×1024 | 267.1 | 2.57× | 83.8 | 0.81× | 388.8 | 0.69× | 3.21 (3.19–4.05) |
-| 2048×2048×2048 | 292.7 | 2.75× | 75.0 | 0.70× | 443.2 | 0.66× | 3.67 (3.15–4.09) |
-| 1×4096×4096 | 1.9 | 0.33× | 3.0 | 0.51× | 17.6 | 0.11× | 3.21 (2.94–3.38) |
+| 128×128×128 | 114.2 | 1.55× | 73.1 | 0.99× | 46.4 | 2.46× | 3.14 (3.00–3.87) |
+| 256×256×256 | 198.6 | 1.99× | 78.5 | 0.79× | 157.8 | 1.26× | 3.22 (3.15–3.31) |
+| 512×512×512 | 249.4 | 2.32× | 80.7 | 0.75× | 350.1 | 0.71× | 3.23 (3.17–3.37) |
+| 1024×1024×1024 | 229.5 | 2.69× | 66.0 | 0.77× | 306.4 | 0.75× | 3.11 (2.85–3.32) |
+| 2048×2048×2048 | 291.9 | 2.83× | 69.9 | 0.68× | 435.2 | 0.67× | 3.17 (2.75–4.01) |
+| 1×4096×4096 | 2.7 | 0.38× | 4.1 | 0.57× | 20.1 | 0.13× | 3.32 (3.19–3.38) |
 
 **Activations and normalization, out-of-place, single thread**
 
 | kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|
-| `gelu_exact` | 1048576 | 1.602 | 0.513 | 1.710 | 0.94× | 3.12 (2.24–3.26) |
-| `gelu_tanh` | 1048576 | 0.892 | 0.283 | 0.392 | 2.27× | 3.15 (2.97–3.32) |
-| `silu` | 1048576 | 1.435 | 0.437 | 1.574 | 0.91× | 3.29 (3.14–3.35) |
-| `relu` | 1048576 | 2.815 | 0.850 | 2.916 | 0.97× | 3.31 (2.61–3.41) |
-| `softmax` | 1024×1024 | 1.134 | 0.333 | 1.136 | 1.00× | 3.40 (3.27–3.42) |
-| `layer_norm` | 1024×1024 | 2.329 | 0.690 | 2.194 | 1.06× | 3.38 (3.31–3.42) |
+| `gelu_exact` | 1048576 | 1.983 | 0.585 | 1.971 | 1.01× | 3.39 (3.15–3.45) |
+| `gelu_tanh` | 1048576 | 1.156 | 0.339 | 0.460 | 2.52× | 3.41 (3.30–3.50) |
+| `silu` | 1048576 | 1.712 | 0.542 | 1.704 | 1.00× | 3.16 (2.95–3.20) |
+| `relu` | 1048576 | 2.725 | 0.865 | 2.704 | 1.01× | 3.15 (3.00–3.21) |
+| `softmax` | 1024×1024 | 1.084 | 0.336 | 1.260 | 0.86× | 3.22 (3.15–3.26) |
+| `layer_norm` | 1024×1024 | 2.099 | 0.663 | 2.180 | 0.96× | 3.16 (3.04–3.30) |
 
 #### lnl-226v-wsl, 2026-10-18, commit `19aeaf83cd36`
 

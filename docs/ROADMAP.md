@@ -175,7 +175,7 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   at pack time (95–101% of the FP32 GEMM at N = 128–2048, faster where
   reading B dominates; memory savings only on AVX2, which has no 16-bit FMA;
   BENCHMARKS.md), `vdpbf16ps` behind CPUID (measured on Emerald Rapids: 64–73% of our FP32
-  GEMM, slower than the conversion path; default under review); INT8
+  GEMM, slower than the conversion path, so opt-in via `SIMD_ML_BF16_DOT=1`); INT8
   `sgemm_u8s8` with per-channel scales: AVX-VNNI 2.39–3.68× the FP32 GEMM and
   1.66–2.04× PyTorch's quantized linear at N = 128–2048, AVX512_VNNI correct
   under SDE and measured on Emerald Rapids (1.43–2.75× our FP32 GEMM,
@@ -215,5 +215,5 @@ between simd-ml-kernels and production BLAS libraries.
 | Small matrices (max(M,N,K) ≤ 128) | One FMA chain per output strip: 24% of OpenBLAS at N = 128 on the reference laptop | W3 |
 | Single-threaded default | OpenMP is a build option, off by default; the threaded GEMM (shared B panel, dynamic chunks) has no published scaling numbers yet (needs a non-hybrid 8-core CPU) | W3 |
 | INT8 GEMM: single-threaded; GEMV shapes | No threaded path; one row times a weight matrix runs at 0.46× PyTorch's quantized linear (every call packs all of B), and the FP32 conversion path (CPUs without VNNI) at 0.47× our FP32 GEMM there (DESIGN.md §4.2); AVX512_VNNI on Emerald Rapids: 0.66–0.70× PyTorch at N = 512–2048 (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | W5 (quantized GEMV), AVX-512 VNNI tile tuning |
-| BF16/FP16 GEMM: memory savings only on AVX2 | No 16-bit FMA on AVX2: about the FP32 GEMM's speed on compute-bound shapes; the single-row case is faster than our FP32 but loses to PyTorch (0.58–0.63×); narrow N ≤ 16 shapes pay for converting A (DESIGN.md §4); `vdpbf16ps` measured at 64–73% of our FP32 GEMM on Emerald Rapids, slower than the conversion path (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | W5 (GEMV); diagnose or disable `vdpbf16ps` |
+| BF16/FP16 GEMM: memory savings only on AVX2 | No 16-bit FMA on AVX2: about the FP32 GEMM's speed on compute-bound shapes; the single-row case is faster than our FP32 but loses to PyTorch (0.58–0.63×); narrow N ≤ 16 shapes pay for converting A (DESIGN.md §4); `vdpbf16ps` measured at 64–73% of our FP32 GEMM on Emerald Rapids, slower than the conversion path (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | W5 (GEMV); `vdpbf16ps` is opt-in (`SIMD_ML_BF16_DOT=1`) |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

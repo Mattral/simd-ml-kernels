@@ -32,6 +32,8 @@ Pitfalls:
 - CMake options: `SIMD_ML_OPENMP` (threaded GEMM), `BENCH_OPENBLAS` (link BLAS
   into `bench_stat`), `SIMD_ML_NATIVE` (`-march=native` everywhere; local
   benchmarks only), `SIMD_ML_ENABLE_X86=OFF` (scalar-only build).
+- `SIMD_ML_BF16_DOT=1` opts `sgemm_bf16` into the `vdpbf16ps` path (AVX512_BF16
+  CPUs; off by default, slower where measured).
 - `SIMD_ML_ISA=scalar|avx2` caps the kernel table, e.g. to benchmark AVX2 on
   an AVX-512 machine. AVX-512 without AVX-512 hardware: run under Intel SDE,
   `sde64 -skx -- python -m simd_ml_kernels selftest` (or `-nhm` for no AVX).
@@ -141,7 +143,7 @@ machine   label, cpu_model, core, pinned_cpus, caches[] (CPUID leaf 4), logical_
 build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp,
           sgemm_tile, sgemm_blocking {kc, mc, nc}, u8s8_path
 baselines numpy, blas {name, version}, torch
-env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS
+env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, SIMD_ML_ISA, SIMD_ML_BF16_DOT
 protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc
 results[] kernel, impl, shape, median_s, p25_s, p75_s, min_s, reps,
           core_ghz {median, min, max, samples, attempts, below_min_ghz},

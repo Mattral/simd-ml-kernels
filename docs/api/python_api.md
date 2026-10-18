@@ -129,6 +129,11 @@ the usable ones. To change the table for every function and the whole
 process, set the environment variable `SIMD_ML_ISA` (`scalar`, `avx2` or
 `avx512`; it caps the choice) before importing.
 
+`SIMD_ML_BF16_DOT=1` (also before the first call) lets `sgemm_bf16` use the
+`vdpbf16ps` instruction on CPUs with AVX512_BF16. It is off by default: it
+was slower than the default conversion path where measured, and it reads BF16
+subnormals as zero, so results then differ from other CPUs for tiny values.
+
 ---
 
 ## Activation Functions

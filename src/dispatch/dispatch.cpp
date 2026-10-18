@@ -261,6 +261,23 @@ bool f16c_available() noexcept { return cpu_features().has_f16c; }
 
 bool bf16_avx512bf16_available() noexcept { return cpu_features().has_avx512bf16; }
 
+// The vdpbf16ps path is opt-in (SIMD_ML_BF16_DOT=1): on Emerald Rapids it ran
+// at 64-73% of the FP32 GEMM, below the conversion path (DESIGN.md §4.1).
+// -1 = environment not read yet; set_bf16_dot (tests) overrides it.
+static std::atomic<int> g_bf16_dot{-1};
+
+bool bf16_dot_enabled() noexcept {
+    int v = g_bf16_dot.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char* env = std::getenv("SIMD_ML_BF16_DOT");
+        v = (env != nullptr && std::strcmp(env, "1") == 0) ? 1 : 0;
+        g_bf16_dot.store(v, std::memory_order_relaxed);
+    }
+    return v == 1 && cpu_features().has_avx512bf16;
+}
+
+void set_bf16_dot(bool on) noexcept { g_bf16_dot.store(on ? 1 : 0, std::memory_order_relaxed); }
+
 bool avx_vnni_available() noexcept { return cpu_features().has_avx_vnni; }
 
 bool avx512vnni_available() noexcept { return cpu_features().has_avx512vnni; }

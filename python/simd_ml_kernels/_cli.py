@@ -267,6 +267,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
 BENCH_SCHEMA = "simd-ml-kernels-bench/1"
 THREAD_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+# Variables that change which kernel runs; recorded with the thread ones.
+KERNEL_ENV = ("SIMD_ML_ISA", "SIMD_ML_BF16_DOT")
 
 
 def _pinned_cpus() -> list[int] | None:
@@ -523,7 +525,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
             "build": info_dict()["build"],
             "baselines": {"numpy": np.__version__, "blas": _blas_info(),
                           "torch": None if torch is None else torch.__version__},
-            "env": {k: os.environ.get(k) for k in THREAD_ENV},
+            "env": {k: os.environ.get(k) for k in THREAD_ENV + KERNEL_ENV},
             "protocol": {"warmup": args.warmup, "reps": args.reps,
                          "statistic": "median; p25/p75 = interquartile range",
                          "interleaved": "implementations of a case alternate call by call",

@@ -236,10 +236,10 @@ static bool test_nan(const Fmt& f) {
 
 // Whether the AVX-512 table's BF16 GEMM takes the vdpbf16ps path for this
 // shape (avx512bf16_gemm.cpp; built by every compiler CI and the dev builds
-// use): AVX512_BF16 hardware (or SDE -spr), a packed shape, one thread.
+// use): opted in, AVX512_BF16 hardware (or SDE -spr), a packed shape, one thread.
 static bool uses_vdpbf16ps(const Fmt& f, int M, int N, int K) {
 #if SIMD_ML_X86_AVAILABLE   // sgemm_avx2_prefers_direct is in the AVX2 unit
-    return f.fn == kBF16.fn && T->isa == simd_ml::Isa::avx512 && simd_ml::gemm::bf16_avx512bf16_available() &&
+    return f.fn == kBF16.fn && T->isa == simd_ml::Isa::avx512 && simd_ml::gemm::bf16_dot_enabled() &&
            !simd_ml::gemm::sgemm_avx2_prefers_direct(M, N, K) &&
            simd_ml::gemm::gemm_threads(M, N, K, simd_ml::gemm::MR512, simd_ml::gemm::NR512) == 1;
 #else
@@ -308,6 +308,26 @@ int run_lowp_gemm_tests() {
         });
     }
     simd_ml::gemm::set_num_threads(saved_threads);
+    // The vdpbf16ps path is opt-in (SIMD_ML_BF16_DOT=1), so the loop above
+    // covers it only when the environment enables it. Run the BF16 suite on the
+    // AVX-512 table once more with it forced on (AVX512_BF16 or SDE -spr).
+    if (simd_ml::gemm::bf16_avx512bf16_available()) {
+        const bool saved_dot = simd_ml::gemm::bf16_dot_enabled();
+        simd_ml::gemm::set_bf16_dot(true);
+        simd_ml::gemm::set_num_threads(1);
+        printf(" vdpbf16ps path (forced on):\n");
+        all_pass &= for_each_kernel_table([](const simd_ml::KernelTable& t) {
+            if (t.isa != simd_ml::Isa::avx512) return true;
+            T = &t;
+            bool ok = test_shapes(kBF16);
+            ok &= test_degenerate(kBF16);
+            ok &= test_nan(kBF16);
+            ok &= test_subnormals(kBF16);
+            return ok;
+        });
+        simd_ml::gemm::set_bf16_dot(saved_dot);
+        simd_ml::gemm::set_num_threads(saved_threads);
+    }
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;
 }
