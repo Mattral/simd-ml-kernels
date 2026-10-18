@@ -1,18 +1,23 @@
 name: Wheels
 
-# Builds wheels with cibuildwheel, installs each in a clean environment and
-# runs selftest (pyproject.toml [tool.cibuildwheel]). Wheels are kept as
-# workflow artifacts only: there is no publish step. (Running a wheel under
-# Intel SDE is a local check: Intel's server refuses CI downloads.)
+# Builds wheels with cibuildwheel and an sdist, installs each in a clean
+# environment and runs selftest (pyproject.toml [tool.cibuildwheel]). On pull
+# requests the files are kept as workflow artifacts only; publish.yml calls this
+# workflow and uploads the same files. (Running a wheel under Intel SDE is a
+# local check: Intel's server refuses CI downloads.)
 on:
   pull_request:
     branches: [main]
     paths: ["CMakeLists.txt", "pyproject.toml", "src/**", "python/**", ".github/workflows/wheels.yml"]
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-wheels-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -30,3 +35,27 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the sdist
+        run: pipx run build --sdist
+      # The sdist must build on its own: a fresh venv, the build requirements
+      # from PyPI, the runner's C++ compiler, no checkout on the path.
+      - name: Install the sdist in a clean venv and run selftest
+        run: |
+          python -m venv /tmp/sdist-venv
+          /tmp/sdist-venv/bin/pip install dist/*.tar.gz
+          cd /tmp
+          /tmp/sdist-venv/bin/python -m simd_ml_kernels selftest
+          /tmp/sdist-venv/bin/python -m simd_ml_kernels info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz

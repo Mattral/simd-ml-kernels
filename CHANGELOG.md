@@ -4,7 +4,7 @@ All notable user-visible changes. The project follows semantic versioning;
 before 1.0, minor versions may contain breaking changes, which are listed
 under **Changed** with a migration note.
 
-## Unreleased
+## 0.3.0rc1 — 2026-10-18
 
 ### Added
 - **`sgemm_u8s8(A, B, a_scale, a_zero_point, b_scales, C=None, *, trans_b=False)`**:

@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
-project(simd_ml_kernels VERSION 0.2.0 LANGUAGES CXX)
+project(simd_ml_kernels VERSION 0.3.0 LANGUAGES CXX)
+# CMake's VERSION is numeric only; the PEP 440 pre-release suffix of
+# pyproject.toml's version goes here ("" for a release). build_info()["version"]
+# is "${PROJECT_VERSION}${SIMD_ML_PRERELEASE}" and must equal the package version.
+set(SIMD_ML_PRERELEASE "rc1")
 
 # Must be included before any use of CMAKE_INSTALL_INCLUDEDIR / LIBDIR / etc.
 # (used in target_include_directories() below and in the install() rules further down).
@@ -223,7 +227,7 @@ if(pybind11_FOUND)
         set(_simd_ml_git "unknown")
     endif()
     target_compile_definitions(simd_ml_kernels_core PRIVATE
-        SIMD_ML_VERSION="${PROJECT_VERSION}"
+        SIMD_ML_VERSION="${PROJECT_VERSION}${SIMD_ML_PRERELEASE}"
         SIMD_ML_GIT_COMMIT="${_simd_ml_git}"
         SIMD_ML_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
         # private bindings that call AVX2-unit functions directly exist only
