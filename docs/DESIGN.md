@@ -328,8 +328,9 @@ A broadcast per 2 FMAs, so converting A first is a large share of the work
 (dev timing: 70–82% of the FP32 GEMM at 2048×16×2048 and 4096×8×4096; not in
 the JSON).
 
-**`vdpbf16ps` (AVX512_BF16).** On CPUs with AVX512_BF16 (CPUID leaf 7.1 EAX
-bit 5: Cooper Lake, Sapphire Rapids and later, Zen 4 and later), the AVX-512
+**`vdpbf16ps` (AVX512_BF16), opt-in.** On CPUs with AVX512_BF16 (CPUID leaf
+7.1 EAX bit 5: Cooper Lake, Sapphire Rapids and later, Zen 4 and later) and
+with `SIMD_ML_BF16_DOT=1` in the environment (read once), the AVX-512
 table's `sgemm_bf16` runs packed single-threaded products through
 `avx512bf16_gemm.cpp`: the 12×32 tile with K taken in pairs, A broadcast as
 one 32-bit pair per row, B packed as 32 columns × 2 BF16 per k-pair (two ZMM
@@ -342,8 +343,13 @@ OpenMP thread uses the threaded conversion path. Correct under SDE `-spr`.
 Measured on an Emerald Rapids cloud VM (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`):
 this path runs at 64–73% of our FP32 GEMM on square N = 128–2048 (the
 conversion path is at 90–101% of FP32 for FP16 in the same run), so on that
-CPU it is slower than the path it replaces. Not yet diagnosed; the choice of
-default is open (ROADMAP).
+CPU it is slower than the path it replaces. It is therefore off by default,
+which also keeps BF16 results identical on every CPU. Not diagnosed, and not a
+priority: in the same run PyTorch's BF16 `matmul` reached about 250
+flop/cycle, above the AVX-512 ceiling of 128 BF16 flop/cycle (two `vdpbf16ps`
+per cycle × 16 lanes × 2 products; 64 for FP32 FMA). That rate implies AMX
+tiles (presumably through oneDNN; not checked), which this library does not
+use, so the BF16 work that pays here is the memory-bound single-row case (W5).
 
 ### 4.2 INT8 GEMM (`sgemm_u8s8`)
 

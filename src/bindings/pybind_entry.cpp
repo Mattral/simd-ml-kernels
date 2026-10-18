@@ -971,9 +971,11 @@ u = 2^-24, for the BF16 values. The AVX2 and AVX-512 tables convert once per
 element while packing A and B and run the FP32 micro-kernel: about the FP32
 GEMM's speed on compute-bound shapes, faster where reading B dominates
 (one or a few rows of A), half the memory for A and B (docs/BENCHMARKS.md).
-On CPUs with AVX512_BF16 (bf16_avx512bf16_available()), packed
-single-threaded products use vdpbf16ps instead; that instruction reads BF16
-subnormals (|x| < 2^-126) as zero and flushes subnormal results.
+Results are the same on every CPU. On CPUs with AVX512_BF16
+(bf16_avx512bf16_available()), setting SIMD_ML_BF16_DOT=1 before the first
+call makes packed single-threaded products use vdpbf16ps instead; that
+instruction reads BF16 subnormals (|x| < 2^-126) as zero and flushes subnormal
+results, and it ran slower than the default where measured.
 
 Input formats accepted
 ----------------------

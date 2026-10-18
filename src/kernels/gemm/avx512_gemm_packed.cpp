@@ -386,8 +386,9 @@ void sgemm_u8s8_avx512(bool trans_b, int M, int N, int K, const std::uint8_t* A,
     sgemm_u8s8_avx2(trans_b, M, N, K, A, lda, a_zero_point, B, ldb, a_scale, b_scales, C, ldc);
 }
 
-// With AVX512_BF16 (CPUID, checked once by dispatch.cpp) and one thread,
-// packed shapes use vdpbf16ps (avx512bf16_gemm.cpp); speed not measured.
+// Packed shapes convert at pack time and run the FP32 kernel. vdpbf16ps
+// (avx512bf16_gemm.cpp) is opt-in, SIMD_ML_BF16_DOT=1 with AVX512_BF16 and one
+// thread: on Emerald Rapids it ran at 64-73% of this path (DESIGN.md §4.1).
 void sgemm_bf16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                        const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
@@ -396,7 +397,7 @@ void sgemm_bf16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A,
         return;
     }
 #ifdef SIMD_ML_HAVE_AVX512BF16
-    if (bf16_avx512bf16_available() && gemm_threads(M, N, K, MR, NR) == 1) {
+    if (bf16_dot_enabled() && gemm_threads(M, N, K, MR, NR) == 1) {
         sgemm_bf16_avx512bf16(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }

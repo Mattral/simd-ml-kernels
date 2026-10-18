@@ -280,11 +280,9 @@ investigated.
 
 ## What is not measured yet
 
-- AVX-512 performance: neither the laptop (Lunar Lake) nor the workstation
-  (i9-9900, Coffee Lake) has AVX-512. This includes the BF16 `vdpbf16ps` path
-  (AVX512_BF16), which is checked for correctness under Intel SDE only.
+- AVX-512 on bare metal: the only AVX-512 results are from a 2-vCPU cloud VM
+  (`cloud-xeon-emr-2vcpu`), where clocks and neighbours are not controlled.
 - FP16/BF16 GEMM with more than one thread.
-- INT8 GEMM with AVX512_VNNI (checked under SDE `-icx` / `-spr` only).
 - Multi-threaded GEMM scaling (W3).
 - The workstation (i9-9900).
 - Fraction of theoretical peak: the per-cycle numbers above are measured, but

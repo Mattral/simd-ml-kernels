@@ -71,9 +71,12 @@ under **Changed** with a migration note.
   row times a 4096×4096 matrix (B is half the bytes); FP16 1.41–1.46× and BF16
   0.97–1.16× PyTorch's float16 / bfloat16 `matmul`; the single-row case loses
   to PyTorch (0.58–0.63×). docs/DESIGN.md §4, docs/BENCHMARKS.md. Same API and
-  error bound; on CPUs with AVX512_BF16 the AVX-512 table runs packed
-  single-threaded BF16 products with `vdpbf16ps`, which reads BF16 subnormal
-  inputs as zero (speed not measured).
+  error bound and the same results on every CPU, AVX512_BF16 ones included.
+- **`vdpbf16ps` BF16 path is opt-in** (`SIMD_ML_BF16_DOT=1`, AVX512_BF16
+  CPUs, one thread). Measured on an Emerald Rapids VM it ran at 64–73% of our
+  FP32 GEMM, slower than the conversion path, so it is no longer the default
+  there. When enabled it reads BF16 subnormal inputs as zero and flushes
+  subnormal results. docs/DESIGN.md §4.1.
 - `bench`: FP16/BF16 GEMM cases (against our FP32 GEMM and PyTorch), and on
   Linux glibc malloc thresholds are fixed (`protocol.malloc`), so allocating
   outputs costs the same in every case (docs/BENCHMARKS.md, "Allocation").
