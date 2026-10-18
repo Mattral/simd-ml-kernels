@@ -25,7 +25,7 @@ jobs:
       - name: Install the package
         run: pip3 install . --no-build-isolation
 
-      - name: Run benchmark (shared runner: for trend inspection only, never for claims)
+      - name: "Run benchmark (shared runner: for trend inspection only, never for claims)"
         env:
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
