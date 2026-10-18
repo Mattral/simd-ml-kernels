@@ -8,7 +8,7 @@
  */
 
 #include "f16_gemm.hpp"
-#include "avx2_gemm_packed.hpp"  // for NR = 8 constant
+#include "avx2_gemm_packed.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -20,6 +20,8 @@
 
 namespace simd_ml {
 namespace gemm {
+
+static constexpr int kCols = 8;  // one YMM of output columns per step
 
 // ─── sgemm_f16_avx2 implementation ───────────────────────────────────────────
 void sgemm_f16_avx2(int M, int N, int K,
@@ -68,9 +70,9 @@ void sgemm_f16_avx2(int M, int N, int K,
         const uint16_t* a_row = A + static_cast<std::size_t>(i) * lda;
         float*          c_row = C + static_cast<std::size_t>(i) * ldc;
 
-        // ── Vectorised NR=8 columns per iteration ─────────────────────────────
+        // ── Vectorised kCols=8 columns per iteration ─────────────────────────────
         int j = 0;
-        for (; j + NR <= N; j += NR) {
+        for (; j + kCols <= N; j += kCols) {
             __m256 acc = _mm256_setzero_ps();
             for (int p = 0; p < K; ++p) {
                 // Convert A[i][p] from FP16 → FP32 and broadcast to all 8 lanes.
@@ -97,7 +99,7 @@ void sgemm_f16_avx2(int M, int N, int K,
             _mm256_storeu_ps(c_row + j, _mm256_add_ps(cv, acc));
         }
 
-        // ── Scalar tail for N % NR remaining columns ──────────────────────────
+        // ── Scalar tail for N % kCols remaining columns ──────────────────────────
         for (; j < N; ++j) {
             float sum = 0.0f;
             for (int p = 0; p < K; ++p) {

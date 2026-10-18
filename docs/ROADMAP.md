@@ -19,12 +19,12 @@
 ## v0.3 — True GEMM Microkernel ✅
 - [✅] B panel packing (`pack_b_panel`)
 - [✅] A panel packing (`pack_a_panel`)
-- [✅] AVX2 8×8 micro-kernel with 8 YMM accumulators (`inner_kernel_8x8`)
+- [✅] AVX2 8×8 micro-kernel with 8 YMM accumulators (`inner_kernel_8x8`). Replaced in W3 by 6×16 (12 accumulators), chosen by measurement (DESIGN.md §2.4).
 - [✅] 4× K-loop unrolling in micro-kernel + software prefetch
 - [✅] Cache-derived tile constants with L1/L2 derivation comments
 - [✅] BLIS-style 5-loop structure (jc / pc / ic / jr / ir)
 - [✅] Panel packing buffers allocated once per GEMM call (outside k-loop)
-- [✅] Second GEMM implementation (`avx_matmul.cpp` — 6×16 register block)
+- [✅] Second GEMM implementation (`avx_matmul.cpp` — 6×16 register block). Removed in W3: its shape now runs in the one packed GEMM.
 
 ---
 
@@ -77,8 +77,8 @@
 
 | Kernel | File | AVX2 tile | AVX-512 tile | Status |
 |---|---|---|---|---|
-| Reference | `avx_matmul.cpp` | 6×16 (12 YMM) | 6×32, dual `__m512`/row (12 ZMM) | ✅ |
-| Primary (Python-facing) | `avx2_gemm_packed.cpp` | 8×8 (8 YMM) | 8×16, single `__m512`/row (8 ZMM) | ✅ |
+| Reference (removed in W3) | `avx_matmul.cpp` | 6×16 (12 YMM) | 6×32, dual `__m512`/row (12 ZMM) | removed |
+| Primary (Python-facing) | `avx2_gemm_packed.cpp` | 6×16 (12 YMM) since W3; 8×8 before | 8×16, single `__m512`/row (8 ZMM) | ✅ |
 
 **Design note on the two different AVX-512 tile shapes:** the reference
 kernel's 6×32 tile needed a genuine dual-accumulator split (two `__m512`
@@ -172,9 +172,11 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   from CPUID + XGETBV, resolved once; a scalar path for every kernel;
   `-ffast-math` only where tests show it is safe; FTZ/DAZ test; AVX-512
   correctness under Intel SDE; wheels built with cibuildwheel (not published).
-- **W3 — GEMM.** Small-matrix register-blocked kernel (N ≤ 128 is 24% of
-  OpenBLAS on the reference laptop); AVX-512 micro-kernel with 24–28
-  accumulators; blocking from CPUID leaf 4; `trans_a`/`trans_b` in packing;
+- **W3 — GEMM.** Done: one register-blocked 6×16 AVX2 kernel for small
+  (unpacked) and large (packed) products, blocking from CPUID leaf 4,
+  persistent packing buffers (N = 128 went from 24% to 95% of OpenBLAS on the
+  reference laptop; BENCHMARKS.md). Remaining: AVX-512 micro-kernel with 24–28
+  accumulators; `trans_a`/`trans_b` in packing;
   OpenMP on by default with a scaling table; LayerNorm single-pass vs
   two-pass. Measured on ≥ 2 CPUs.
 - **W4 — low precision that is faster than FP32.** BF16/FP16 converted at pack

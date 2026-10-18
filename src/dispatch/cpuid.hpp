@@ -62,5 +62,23 @@ struct CacheLevel {
 /** detect_caches — empty on non-x86 or CPUs without these leaves. */
 std::vector<CacheLevel> detect_caches();
 
+/** GEMM block sizes for an MR×NR micro-kernel (see gemm_blocking). */
+struct GemmBlocking {
+    int kc, mc, nc;
+    unsigned l1d_kib, l2_kib, llc_kib;  ///< the caches they were derived from (0: unknown)
+};
+
+/**
+ * gemm_blocking — KC, MC, NC for an MR×NR FP32 micro-kernel from the caches of
+ * the calling core (detect_caches; Goto/BLIS rules, Low et al. 2016):
+ *   KC = L1D / 2 / (NR·4)    a KC×NR B micro-panel fills half of L1D
+ *   MC = L2 / 4 / (KC·4)     the packed MC×KC A block fills a quarter of L2
+ *   NC = LLC / 2 / (KC·4)    the packed KC×NC B panel fills half of the LLC
+ * rounded down to multiples of 8, MR and NR and clamped to [64, 1024],
+ * [MR, 2048], [NR, 8192]. Unknown caches: 32 KiB L1D, 256 KiB L2, 8 MiB LLC.
+ * Measurements behind the fractions: avx2_gemm_packed.cpp header.
+ */
+GemmBlocking gemm_blocking(int mr, int nr) noexcept;
+
 }  // namespace dispatch
 }  // namespace simd_ml

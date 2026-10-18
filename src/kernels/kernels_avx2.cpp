@@ -18,7 +18,8 @@ namespace simd_ml {
 
 const KernelTable& kernel_table_avx2() noexcept {
     static const KernelTable t = {
-        Isa::avx2, "avx2", SIMD_ML_UNIT_FLAGS, "8x8 (8 YMM accumulators)",
+        Isa::avx2, "avx2", SIMD_ML_UNIT_FLAGS, "6x16 (12 YMM accumulators)",
+        &gemm::sgemm_blocking_avx2,
         &gemm::sgemm_packed_avx2, &gemm::sgemm_f16_avx2, &gemm::sgemm_bf16_avx2,
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,

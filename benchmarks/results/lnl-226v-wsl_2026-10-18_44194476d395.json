@@ -1,0 +1,596 @@
+{
+ "schema": "simd-ml-kernels-bench/1",
+ "machine": {
+  "label": "lnl-226v-wsl",
+  "cpu_model": "Intel(R) Core(TM) Ultra 5 226V",
+  "core": "WSL2 vCPU 2 (P-core by measured clock, see protocol)",
+  "pinned_cpus": [
+   2
+  ],
+  "caches": [
+   {
+    "level": 1,
+    "type": "D",
+    "size_kib": 48,
+    "ways": 12,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 1,
+    "type": "I",
+    "size_kib": 64,
+    "ways": 16,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 2,
+    "type": "U",
+    "size_kib": 2560,
+    "ways": 10,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 3,
+    "type": "U",
+    "size_kib": 8192,
+    "ways": 8,
+    "line_bytes": 64,
+    "max_sharing_cpus": 8
+   }
+  ],
+  "logical_cpus": 8,
+  "os": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "note": "AC power; Windows power scheme Balanced, power mode Best performance; WSL2 Ubuntu 24.04"
+ },
+ "build": {
+  "version": "0.2.0",
+  "git_commit": "44194476d395",
+  "compiler": "GNU 13.3.0",
+  "kernel_flags": "-O3 -DNDEBUG -Wall -Wextra -Wshadow -Wno-unused-parameter -mavx2 -mfma -mf16c -ffast-math -fno-finite-math-only",
+  "isa_compiled": "scalar avx2 avx512",
+  "openmp": false,
+  "sgemm_tile": "6x16 (12 YMM accumulators)",
+  "sgemm_blocking": {
+   "kc": 384,
+   "mc": 426,
+   "nc": 2720
+  }
+ },
+ "baselines": {
+  "numpy": "2.5.4",
+  "blas": {
+   "name": "scipy-openblas",
+   "version": "0.3.34.106.0"
+  },
+  "torch": "2.14.1+cpu"
+ },
+ "env": {
+  "OPENBLAS_NUM_THREADS": "1",
+  "OMP_NUM_THREADS": "1",
+  "MKL_NUM_THREADS": "1"
+ },
+ "protocol": {
+  "warmup": 5,
+  "reps": 30,
+  "statistic": "median; p25/p75 = interquartile range",
+  "interleaved": "implementations of a case alternate call by call",
+  "clock": "core GHz sampled on the same thread (5 ms dependent add-reg-reg chain, 1 cycle/add) before, every 5 rounds and after each case; per-cycle rates use the median",
+  "min_ghz": 3.6
+ },
+ "command": "python -m simd_ml_kernels bench --json benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json --label lnl-226v-wsl --min-ghz 3.6 --core WSL2 vCPU 2 (P-core by measured clock, see protocol) --note AC power; Windows power scheme Balanced, power mode Best performance; WSL2 Ubuntu 24.04",
+ "python": "3.12.3",
+ "timestamp_utc": "2026-10-18T04:57:38+00:00",
+ "results": [
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.34e-05,
+   "p25_s": 4.0884500000000005e-05,
+   "p75_s": 5.034075e-05,
+   "min_s": 3.629e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.251130855984707,
+    "min": 3.9931844328100796,
+    "max": 4.484899538250343,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 96.64294930875577,
+   "flop_per_cycle": 22.733468477617578
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    128,
+    128,
+    128
+   ],
+   "median_s": 4.14015e-05,
+   "p25_s": 3.841975e-05,
+   "p75_s": 4.9056750000000004e-05,
+   "min_s": 3.4273e-05,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.251130855984707,
+    "min": 3.9931844328100796,
+    "max": 4.484899538250343,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 101.30802024081254,
+   "flop_per_cycle": 23.83084023353267
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.00026773650000000003,
+   "p25_s": 0.00026224825,
+   "p75_s": 0.00031096975,
+   "min_s": 0.00025747000000000004,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.378542012782962,
+    "min": 4.160379870418035,
+    "max": 4.55198295262593,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 125.32632644409708,
+   "flop_per_cycle": 28.62284433453244
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    256,
+    256,
+    256
+   ],
+   "median_s": 0.000272163,
+   "p25_s": 0.00026082475000000003,
+   "p75_s": 0.00028993625,
+   "min_s": 0.000253702,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.378542012782962,
+    "min": 4.160379870418035,
+    "max": 4.55198295262593,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 123.28800020575906,
+   "flop_per_cycle": 28.157318085752088
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.002351727,
+   "p25_s": 0.0022439670000000004,
+   "p75_s": 0.0025197905000000002,
+   "min_s": 0.002106925,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.168088786907905,
+    "min": 3.663709281968901,
+    "max": 4.603715082979087,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 114.14396994208938,
+   "flop_per_cycle": 27.38520597272762
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    512,
+    512,
+    512
+   ],
+   "median_s": 0.0021703055,
+   "p25_s": 0.00210375925,
+   "p75_s": 0.0023208975000000003,
+   "min_s": 0.002054373,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.168088786907905,
+    "min": 3.663709281968901,
+    "max": 4.603715082979087,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gflops": 123.68556223997037,
+   "flop_per_cycle": 29.6744067996993
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.0188209735,
+   "p25_s": 0.01845845325,
+   "p75_s": 0.019132325500000002,
+   "min_s": 0.017794545000000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.0836177729266945,
+    "min": 3.9175757727712033,
+    "max": 4.580981596802713,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 114.10056169517479,
+   "flop_per_cycle": 27.941048364426106
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    1024,
+    1024,
+    1024
+   ],
+   "median_s": 0.018224236500000005,
+   "p25_s": 0.01790229025,
+   "p75_s": 0.018791637250000003,
+   "min_s": 0.017247767,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.0836177729266945,
+    "min": 3.9175757727712033,
+    "max": 4.580981596802713,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gflops": 117.83668676599974,
+   "flop_per_cycle": 28.855954038408246
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.15120078050000002,
+   "p25_s": 0.14972987225,
+   "p75_s": 0.15250458325000002,
+   "min_s": 0.14685050900000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.35610852312915,
+    "min": 2.7776681039776405,
+    "max": 4.5329682782879885,
+    "samples": 8,
+    "attempts": 3,
+    "below_min_ghz": true
+   },
+   "gflops": 113.62288691360293,
+   "flop_per_cycle": 26.08357581320851
+  },
+  {
+   "kernel": "sgemm",
+   "impl": "numpy/scipy-openblas",
+   "shape": [
+    2048,
+    2048,
+    2048
+   ],
+   "median_s": 0.1435005285,
+   "p25_s": 0.142752615,
+   "p75_s": 0.14507612225000002,
+   "min_s": 0.140236109,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.35610852312915,
+    "min": 2.7776681039776405,
+    "max": 4.5329682782879885,
+    "samples": 8,
+    "attempts": 3,
+    "below_min_ghz": true
+   },
+   "gflops": 119.71990182600616,
+   "flop_per_cycle": 27.483222970764523
+  },
+  {
+   "kernel": "gelu_exact",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.001191022,
+   "p25_s": 0.0005396805,
+   "p75_s": 0.00151447475,
+   "min_s": 0.00043867600000000004,
+   "reps": 30,
+   "core_ghz": {
+    "median": 3.632354008127006,
+    "min": 3.286132232027998,
+    "max": 3.7114673989587184,
+    "samples": 8,
+    "attempts": 3,
+    "below_min_ghz": true
+   },
+   "gelem_per_s": 0.8804001941190005,
+   "elem_per_cycle": 0.2423773101821019
+  },
+  {
+   "kernel": "gelu_exact",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.0020706785,
+   "p25_s": 0.00202287775,
+   "p75_s": 0.00218539925,
+   "min_s": 0.0019552740000000003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 3.632354008127006,
+    "min": 3.286132232027998,
+    "max": 3.7114673989587184,
+    "samples": 8,
+    "attempts": 3,
+    "below_min_ghz": true
+   },
+   "gelem_per_s": 0.5063924699078104,
+   "elem_per_cycle": 0.1394116511702359
+  },
+  {
+   "kernel": "gelu_tanh",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.000747726,
+   "p25_s": 0.0006583170000000001,
+   "p75_s": 0.000823863,
+   "min_s": 0.000591136,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.049803635323326,
+    "min": 3.4219023039288,
+    "max": 4.411607591724516,
+    "samples": 8,
+    "attempts": 3,
+    "below_min_ghz": true
+   },
+   "gelem_per_s": 1.4023532684432534,
+   "elem_per_cycle": 0.346276855552107
+  },
+  {
+   "kernel": "gelu_tanh",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.0026775375000000004,
+   "p25_s": 0.0024412532500000003,
+   "p75_s": 0.0028426750000000002,
+   "min_s": 0.0022770060000000003,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.049803635323326,
+    "min": 3.4219023039288,
+    "max": 4.411607591724516,
+    "samples": 8,
+    "attempts": 3,
+    "below_min_ghz": true
+   },
+   "gelem_per_s": 0.3916195384751847,
+   "elem_per_cycle": 0.09670087089146454
+  },
+  {
+   "kernel": "silu",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.0005870045000000001,
+   "p25_s": 0.000511177,
+   "p75_s": 0.0006379530000000001,
+   "min_s": 0.000454935,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.2953597446888985,
+    "min": 3.955431776910484,
+    "max": 4.503034359914224,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.7863167999563885,
+   "elem_per_cycle": 0.41587129044665544
+  },
+  {
+   "kernel": "silu",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.001010232,
+   "p25_s": 0.00092833125,
+   "p75_s": 0.00107366275,
+   "min_s": 0.00085495,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.2953597446888985,
+    "min": 3.955431776910484,
+    "max": 4.503034359914224,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.0379556379128754,
+   "elem_per_cycle": 0.241645799096637
+  },
+  {
+   "kernel": "relu",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.00027187,
+   "p25_s": 0.00022651025,
+   "p75_s": 0.00030312350000000004,
+   "min_s": 0.000198123,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.153929305142224,
+    "min": 3.8273065693612245,
+    "max": 4.610067080317742,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 3.8569021959024536,
+   "elem_per_cycle": 0.9284949050837058
+  },
+  {
+   "kernel": "relu",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1048576
+   ],
+   "median_s": 0.00034948250000000003,
+   "p25_s": 0.000305713,
+   "p75_s": 0.00039915750000000004,
+   "min_s": 0.000277099,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.153929305142224,
+    "min": 3.8273065693612245,
+    "max": 4.610067080317742,
+    "samples": 8,
+    "attempts": 1,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 3.000367686507908,
+   "elem_per_cycle": 0.7222962804864537
+  },
+  {
+   "kernel": "softmax",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.0006027335,
+   "p25_s": 0.0005357210000000001,
+   "p75_s": 0.0007301845000000001,
+   "min_s": 0.0005037980000000001,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.220590549238008,
+    "min": 3.753011544856093,
+    "max": 4.522801210694891,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.7397008794102204,
+   "elem_per_cycle": 0.41219371059917403
+  },
+  {
+   "kernel": "softmax",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.0008216460000000001,
+   "p25_s": 0.0007752120000000001,
+   "p75_s": 0.0009510990000000001,
+   "min_s": 0.000727888,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.220590549238008,
+    "min": 3.753011544856093,
+    "max": 4.522801210694891,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 1.2761895025351548,
+   "elem_per_cycle": 0.30237225991172256
+  },
+  {
+   "kernel": "layer_norm",
+   "impl": "simd_ml_kernels",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.00041762850000000003,
+   "p25_s": 0.00034630425,
+   "p75_s": 0.00048642375,
+   "min_s": 0.00031412700000000004,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.351726363427881,
+    "min": 3.8851223706705897,
+    "max": 4.59288562017435,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 2.5107865004423786,
+   "elem_per_cycle": 0.57696332231345
+  },
+  {
+   "kernel": "layer_norm",
+   "impl": "torch 2.14.1+cpu",
+   "shape": [
+    1024,
+    1024
+   ],
+   "median_s": 0.00033132800000000004,
+   "p25_s": 0.00029509625000000004,
+   "p75_s": 0.00037847425000000004,
+   "min_s": 0.00024260700000000002,
+   "reps": 30,
+   "core_ghz": {
+    "median": 4.351726363427881,
+    "min": 3.8851223706705897,
+    "max": 4.59288562017435,
+    "samples": 8,
+    "attempts": 2,
+    "below_min_ghz": false
+   },
+   "gelem_per_s": 3.16476723971412,
+   "elem_per_cycle": 0.7272440809493392
+  }
+ ]
+}

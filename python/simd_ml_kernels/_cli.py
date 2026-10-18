@@ -54,7 +54,8 @@ def info_dict() -> dict:
     return {
         "package": {"version": sk.__version__, "path": os.path.dirname(sk.__file__)},
         "build": {k: b[k] for k in ("version", "git_commit", "compiler", "kernel_flags",
-                                     "isa_compiled", "openmp")},
+                                     "isa_compiled", "openmp", "sgemm_tile",
+                                     "sgemm_blocking")},
         "cpu": {
             "model": cpu_model(),
             "logical_cpus": os.cpu_count(),

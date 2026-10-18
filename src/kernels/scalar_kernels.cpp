@@ -176,9 +176,11 @@ void gelu_forward_scalar(const float* input, float* output, std::size_t n) {
 
 namespace simd_ml {
 
+static void sgemm_blocking_scalar(int* kc, int* mc, int* nc) { *kc = *mc = *nc = 0; }
+
 const KernelTable& kernel_table_scalar() noexcept {
     static const KernelTable t = {
-        Isa::scalar, "scalar", SIMD_ML_UNIT_FLAGS, "row x 1 (no blocking)",
+        Isa::scalar, "scalar", SIMD_ML_UNIT_FLAGS, "row x 1 (no blocking)", &sgemm_blocking_scalar,
         &sgemm_scalar, &sgemm_f16_scalar, &sgemm_bf16_scalar,
         &gelu_forward_scalar, &gelu_tanh_scalar,
         &relu_scalar, &silu_scalar, &softmax_row_scalar, &layer_norm_scalar,

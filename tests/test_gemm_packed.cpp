@@ -1,21 +1,23 @@
 /**
- * test_gemm_packed.cpp — Correctness tests for avx2_gemm_packed (8×8 micro-kernel).
+ * test_gemm_packed.cpp — FP32 GEMM (KernelTable::sgemm) of every table the CPU
+ * supports, against a float64 reference.
  *
- * Tests KernelTable::sgemm of every table the CPU supports (scalar, AVX2 8x8,
- * AVX-512 8x16) against the scalar triple-loop reference (naive_sgemm) across:
- *   - Square sizes (1, 7, 8, 9, 16, 127, 128, 129, 256, 512, 1024)
- *   - Non-square / non-power-of-two sizes (edge/tail handling)
- *   - Alpha/beta scaling paths
- *   - beta=0 overwrite correctness (C must not accumulate prior garbage)
+ * Bound, elementwise (as in selftest): |C − C64| ≤ γ·(|α|·(|A||B|)ij + |β|·|C0ij|),
+ * γ = 2·(K+2)·u, u = 2^-24, where C64 is α·AB + β·C0 in double.
  *
- * Tolerance: 1e-4 absolute. For larger K the error can reach ~K×ε_mach;
- * the 1e-4 cap is generous enough to cover K=1024 (worst case ~1024×1.2e-7 ≈ 1.2e-4).
+ * Shapes are chosen from the table's own tile (6×16 on AVX2) and block sizes
+ * (sgemm_blocking: KC/MC/NC derived from this CPU's caches), so every edge is
+ * crossed by one: M, N around tile multiples; K, M, N just past KC, MC, NC.
+ * Strided cases pad A, B and C with NaN: a read of A/B padding or a write to
+ * C padding shows up as NaN in C or as a changed sentinel.
  */
 
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
+#include <vector>
 #include "../src/kernels/gemm/avx2_gemm_packed.hpp"
 #include "../src/kernels/gemm/naive_gemm.hpp"
 #include "../src/kernels/cache_alloc.hpp"
@@ -24,95 +26,156 @@
 // The table the test functions below call into (set by the runner).
 static const simd_ml::KernelTable* T = nullptr;
 
-static void fill_random(float* buf, int n, unsigned seed = 42) {
+using GemmFn = void (*)(int, int, int, float, const float*, int, const float*, int, float,
+                        float*, int);
+
+static void fill_random(float* buf, std::size_t n, unsigned seed) {
     unsigned s = seed;
-    for (int i = 0; i < n; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
         s = s * 1664525u + 1013904223u;
-        buf[i] = (float)(int(s >> 16) % 200 - 100) * 0.01f;
+        buf[i] = (float)(int(s >> 16) % 2000 - 1000) * 1e-3f;
     }
 }
 
-static bool test_sgemm_packed(int M, int N, int K,
-                               float alpha = 1.0f, float beta = 0.0f,
-                               unsigned seed_c = 0) {
-    auto A     = make_aligned_array<float>(static_cast<std::size_t>(M) * K);
-    auto B     = make_aligned_array<float>(static_cast<std::size_t>(K) * N);
-    auto C_ref = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
-    auto C_got = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
+struct Case {
+    int M, N, K;
+    float alpha = 1.0f, beta = 0.0f;
+    int pad_a = 0, pad_b = 0, pad_c = 0;  // extra floats per row (lda = K + pad_a, ...)
+    int offset = 0;                       // floats added to every base pointer (unaligned)
+};
 
-    fill_random(A.get(), M * K, 1);
-    fill_random(B.get(), K * N, 2);
-    if (seed_c != 0) {
-        fill_random(C_ref.get(), M * N, seed_c);
-        std::copy(C_ref.get(), C_ref.get() + M * N, C_got.get());
-    } else {
-        std::fill(C_ref.get(), C_ref.get() + M * N, 0.0f);
-        std::fill(C_got.get(), C_got.get() + M * N, 0.0f);
-    }
+// Runs fn on the case; returns the worst |err| / bound (pass: <= 1) or 1e30 if
+// a padding sentinel of C changed.
+static double run_case(GemmFn fn, const Case& c) {
+    const int lda = c.K + c.pad_a, ldb = c.N + c.pad_b, ldc = c.N + c.pad_c;
+    const float nan = std::nanf("");
+    std::vector<float> A(c.offset + (std::size_t)c.M * lda + 1, nan),
+        B(c.offset + (std::size_t)c.K * ldb + 1, nan), C(c.offset + (std::size_t)c.M * ldc + 16, nan);
+    float* a = A.data() + c.offset; float* b = B.data() + c.offset; float* cc = C.data() + c.offset;
+    std::vector<float> tmp((std::size_t)std::max(1, c.M * std::max(c.K, c.N)));
+    fill_random(tmp.data(), (std::size_t)c.M * c.K, 1);
+    for (int i = 0; i < c.M; ++i) std::copy_n(&tmp[(std::size_t)i * c.K], c.K, a + (std::size_t)i * lda);
+    std::vector<float> tb((std::size_t)c.K * c.N);
+    fill_random(tb.data(), tb.size(), 2);
+    for (int p = 0; p < c.K; ++p) std::copy_n(&tb[(std::size_t)p * c.N], c.N, b + (std::size_t)p * ldb);
+    std::vector<float> c0((std::size_t)c.M * c.N);
+    fill_random(c0.data(), c0.size(), 3);
+    if (c.beta == 0.0f) std::fill(c0.begin(), c0.end(), nan);   // beta = 0 must not read C
+    for (int i = 0; i < c.M; ++i) std::copy_n(&c0[(std::size_t)i * c.N], c.N, cc + (std::size_t)i * ldc);
 
-    // Reference: naive GEMM (alpha/beta handled inline)
-    {
-        auto AB = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
-        naive_sgemm(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, AB.get(), N);
-        for (int i = 0; i < M * N; ++i)
-            C_ref[i] = alpha * AB[i] + beta * C_ref[i];
-    }
+    fn(c.M, c.N, c.K, c.alpha, a, lda, b, ldb, c.beta, cc, ldc);
 
-    T->sgemm(M, N, K, alpha, A.get(), K, B.get(), N, beta, C_got.get(), N);
+    const double gamma = 2.0 * (c.K + 2) * std::ldexp(1.0, -24);
+    double worst = 0.0;
+    for (int i = 0; i < c.M; ++i)
+        for (int j = 0; j < c.N; ++j) {
+            double ref = 0.0, mag = 0.0;
+            for (int p = 0; p < c.K; ++p) {
+                const double x = (double)a[(std::size_t)i * lda + p] * b[(std::size_t)p * ldb + j];
+                ref += x; mag += std::fabs(x);
+            }
+            const double cin = c.beta == 0.0f ? 0.0 : c0[(std::size_t)i * c.N + j];
+            ref = c.alpha * ref + c.beta * cin;
+            const double bound = gamma * (std::fabs(c.alpha) * mag + std::fabs(c.beta * cin)) + 1e-30;
+            const double got = cc[(std::size_t)i * ldc + j];
+            const double r = std::isnan(got) ? 1e30 : std::fabs(got - ref) / bound;
+            worst = std::max(worst, r);
+        }
+    // Padding of C (columns N..ldc of every row, and past the last row) is untouched.
+    for (int i = 0; i < c.M; ++i)
+        for (int j = c.N; j < ldc; ++j)
+            if (!std::isnan(cc[(std::size_t)i * ldc + j])) return 1e30;
+    for (int j = 0; j < 16; ++j)
+        if (!std::isnan(cc[(std::size_t)c.M * ldc + j])) return 1e30;
+    return worst;
+}
 
-    float max_err = 0.0f;
-    int   worst   = -1;
-    for (int i = 0; i < M * N; ++i) {
-        float e = std::fabs(C_got[i] - C_ref[i]);
-        if (e > max_err) { max_err = e; worst = i; }
-    }
-
-    bool pass = (max_err < 1e-4f);
-    if (alpha == 1.0f && beta == 0.0f) {
-        printf("  [%4d×%4d×%4d]  max_abs=%.2e  %s\n",
-               M, N, K, max_err, pass ? "PASS" : "FAIL");
-    } else {
-        printf("  [%4d×%4d×%4d] α=%.1f β=%.1f  max_abs=%.2e  %s\n",
-               M, N, K, alpha, beta, max_err, pass ? "PASS" : "FAIL");
-    }
-    if (!pass && worst >= 0) {
-        printf("    worst at [%d,%d]: got=%.6f  ref=%.6f\n",
-               worst / N, worst % N, C_got[worst], C_ref[worst]);
-    }
+static bool check(GemmFn fn, const char* what, const Case& c) {
+    const double w = run_case(fn, c);
+    const bool pass = w <= 1.0;
+    printf("  %-7s %5dx%5dx%5d a=%.1f b=%.1f pad=%d/%d/%d off=%d  err/bound=%-8.3g %s\n", what,
+           c.M, c.N, c.K, c.alpha, c.beta, c.pad_a, c.pad_b, c.pad_c, c.offset, w,
+           pass ? "PASS" : "FAIL");
     return pass;
 }
 
-static bool test_beta_zero_overwrites_poison() {
-    // beta=0 must completely overwrite C, not accumulate into garbage
-    const int N = 32;
-    auto A = make_aligned_array<float>(N * N);
-    auto B = make_aligned_array<float>(N * N);
-    auto C = make_aligned_array<float>(N * N);
-    fill_random(A.get(), N * N, 20);
-    fill_random(B.get(), N * N, 21);
-    std::fill(C.get(), C.get() + N * N, 1e30f);  // poison
+static bool test_table_gemm() {
+    int kc = 0, mc = 0, nc = 0;
+    T->sgemm_blocking(&kc, &mc, &nc);
+    printf(" %s: tile %s, blocking KC=%d MC=%d NC=%d\n", T->name, T->sgemm_tile, kc, mc, nc);
+    bool ok = true;
+    const GemmFn fn = T->sgemm;
 
-    T->sgemm(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C.get(), N);
+    printf(" Square sizes:\n");
+    for (int s : {1, 2, 5, 6, 7, 8, 15, 16, 17, 31, 64, 127, 128, 129, 161, 255, 256, 512})
+        ok &= check(fn, "square", {s, s, s});
 
-    auto C_ref = make_aligned_array<float>(N * N);
-    naive_sgemm(N, N, N, 1.0f, A.get(), N, B.get(), N, 0.0f, C_ref.get(), N);
+    printf(" Every row/column tail of the 6x16 tile (direct and packed sizes):\n");
+    for (int M : {1, 5, 6, 7, 11, 12, 13})
+        for (int N : {1, 8, 15, 16, 17, 33})
+            ok &= check(fn, "tails", {M, N, 37});
+    for (int M : {175, 181})
+        for (int N : {161, 175})
+            ok &= check(fn, "tails", {M, N, 177});
 
-    float max_err = 0.0f;
-    for (int i = 0; i < N * N; ++i)
-        max_err = std::max(max_err, std::fabs(C[i] - C_ref[i]));
+    if (kc > 0) {
+        printf(" Block boundaries (KC=%d, MC=%d, NC=%d):\n", kc, mc, nc);
+        for (int K : {kc - 1, kc, kc + 1, 2 * kc + 3})
+            ok &= check(fn, "kc", {97, 113, K});
+        for (int M : {mc - 1, mc, mc + 1, mc + 7})
+            ok &= check(fn, "mc", {M, 33, 41});
+        ok &= check(fn, "nc", {13, nc + 17, 23});
+        ok &= check(fn, "nc", {29, 2 * nc + 1, 19});
+    }
 
-    bool pass = (max_err < 1e-4f);
-    printf("  beta=0 overwrites poison    max_abs=%.2e  %s\n", max_err, pass ? "PASS" : "FAIL");
-    return pass;
+    printf(" Skinny and wide:\n");
+    ok &= check(fn, "skinny", {1, 4096, 300});
+    ok &= check(fn, "skinny", {300, 1, 300});
+    ok &= check(fn, "skinny", {300, 300, 1});
+
+    printf(" alpha/beta (beta = 0 with C = NaN must overwrite):\n");
+    for (float alpha : {1.0f, 2.5f, -0.5f})
+        for (float beta : {0.0f, 1.0f, 0.3f}) {
+            ok &= check(fn, "ab", {33, 41, 27, alpha, beta});
+            ok &= check(fn, "ab", {200, 190, 180, alpha, beta});
+        }
+
+    printf(" Strides (NaN padding) and unaligned pointers:\n");
+    for (int off : {0, 1}) {
+        ok &= check(fn, "stride", {23, 37, 29, 1.0f, 0.5f, 3, 5, 7, off});
+        ok &= check(fn, "stride", {190, 210, 230, 1.0f, 0.0f, 1, 16, 9, off});
+    }
+    return ok;
+}
+
+// The direct (unpacked) AVX2 path on its own, including shapes the dispatcher
+// sends to the packed path, so both paths are checked on the same shapes.
+static bool test_direct_avx2() {
+#if !SIMD_ML_X86_AVAILABLE
+    printf(" sgemm_direct_avx2: SKIP (no x86 units in this build)\n");
+    return true;
+#else
+    if (!simd_ml::kernels_for(simd_ml::Isa::avx2)) {
+        printf(" sgemm_direct_avx2: SKIP (CPU has no AVX2)\n");
+        return true;
+    }
+    printf(" sgemm_direct_avx2 (called directly):\n");
+    const GemmFn fn = &simd_ml::gemm::sgemm_direct_avx2;
+    bool ok = true;
+    for (const Case& c : {Case{7, 17, 300}, Case{257, 129, 65}, Case{64, 64, 64, 2.0f, 0.5f},
+                          Case{37, 53, 41, 1.0f, 0.0f, 2, 3, 5, 1}})
+        ok &= check(fn, "direct", c);
+    return ok;
+#endif
 }
 
 // K == 0 (BLAS semantics): A·B is an empty sum, so C = beta·C; beta == 0
-// must overwrite C even if it holds NaN. Covers the direct path (M, N <= 128)
-// and the packed path (M > 128), plus the scalar reference naive_sgemm.
+// must overwrite C even if it holds NaN. Direct-path and packed-path shapes,
+// plus the scalar reference naive_sgemm.
 static bool test_k_zero_applies_beta() {
     bool all_pass = true;
     for (int M : {7, 300}) {
-        const int N = 9;
+        const int N = (M == 7) ? 9 : 400;
         for (float beta : {0.0f, 0.5f}) {
             for (int impl = 0; impl < 2; ++impl) {
                 auto C = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
@@ -136,146 +199,16 @@ static bool test_k_zero_applies_beta() {
     return all_pass;
 }
 
-/**
- * test_gemm_packed_avx512_full_coverage — Forces 100% of the output through
- * the full-block micro-kernel path, with ZERO edge/tail blocks possible,
- * regardless of which ISA sgemm_packed's runtime dispatch selects.
- *
- * MR512 == MR (both 8), so M only needs to be a multiple of 8 to guarantee
- * full row coverage on either path. N must be a common multiple of NR=8
- * (AVX2) and NR512=16 (AVX-512) so that whichever kernel actually runs,
- * every output column comes from a full-width micro-kernel call — none can
- * be silently "saved" by the scalar edge-block fallback masking a bug in
- * the wide kernel.
- *
- * Unlike avx_matmul.cpp's 6×32 kernel, inner_kernel_8x16_avx512 has no
- * dual-accumulator split (one ZMM spans the full NR512=16 width), so there
- * is no "second half never written" failure mode possible by construction.
- * The residual risk this test targets is dispatch wiring: wrong buffer
- * sizing, wrong packed-block indexing, or routing to the wrong kernel/stride
- * combination — any of which would produce either wrong values or an
- * out-of-bounds access (also why this path is additionally verified under
- * AddressSanitizer — see .github/workflows/ci.yml sanitizers job).
- */
-static bool test_gemm_packed_avx512_full_coverage() {
-    const int M = 80;    // = 10 * MR(8) = 10 * MR512(8): zero remainder rows, either ISA
-    const int N = 160;   // = 20 * NR(8) = 10 * NR512(16): zero remainder cols, either ISA
-    const int K = 97;    // arbitrary, not a multiple of anything convenient
-
-    auto A     = make_aligned_array<float>(static_cast<std::size_t>(M) * K);
-    auto B     = make_aligned_array<float>(static_cast<std::size_t>(K) * N);
-    auto C_ref = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
-    auto C_got = make_aligned_array<float>(static_cast<std::size_t>(M) * N);
-
-    fill_random(A.get(), M * K, /*seed=*/33);
-    fill_random(B.get(), K * N, /*seed=*/44);
-    std::fill(C_ref.get(), C_ref.get() + M * N, 0.0f);
-    std::fill(C_got.get(), C_got.get() + M * N, 0.0f);
-
-    naive_sgemm(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_ref.get(), N);
-    T->sgemm(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_got.get(), N);
-
-    float max_err = 0.0f;
-    for (int i = 0; i < M * N; ++i)
-        max_err = std::max(max_err, std::fabs(C_got[i] - C_ref[i]));
-
-    bool pass = (max_err < 1e-4f);
-    printf("  AVX-512 full-coverage [%dx%dx%d]  isa=%s  max_abs=%.2e  %s\n",
-           M, N, K,
-           T->sgemm_tile,
-           max_err, pass ? "PASS" : "FAIL");
-    return pass;
-}
-
-static bool test_small_gemm_direct_path() {
-    // ── Small sizes (<= SMALL_GEMM_THRESHOLD): the AVX2/AVX-512 tables run the
-    // unpacked sgemm_direct_avx2 path here; the scalar table its only path.
-    bool all_pass = true;
-    struct Case { int M, N, K; float alpha, beta; const char* label; };
-    const Case cases[] = {
-        {  1,   8,   1, 1.0f, 0.0f, "1×8×1 (tiny)"},
-        {  8,   8,   8, 1.0f, 0.0f, "8×8×8 (one full tile)"},
-        {  7,   9,  11, 1.0f, 0.0f, "7×9×11 (all tails)"},
-        { 16,  16,  16, 1.0f, 0.0f, "16×16×16"},
-        { 64,  64,  64, 1.0f, 0.0f, "64×64×64 (key regression)"},
-        {128, 128, 128, 1.0f, 0.0f, "128×128×128 (at threshold)"},
-        { 64,  32,  48, 2.5f, 0.5f, "64×32×48 α=2.5 β=0.5"},
-        { 33,  41,  27, 0.5f, 1.0f, "33×41×27 α=0.5 β=1.0"},
-    };
-    for (const auto& c : cases) {
-        auto A     = make_aligned_array<float>(static_cast<std::size_t>(c.M) * c.K);
-        auto B     = make_aligned_array<float>(static_cast<std::size_t>(c.K) * c.N);
-        auto C_ref = make_aligned_array<float>(static_cast<std::size_t>(c.M) * c.N);
-        auto C_got = make_aligned_array<float>(static_cast<std::size_t>(c.M) * c.N);
-
-        fill_random(A.get(),     c.M * c.K, 11);
-        fill_random(B.get(),     c.K * c.N, 22);
-        fill_random(C_ref.get(), c.M * c.N, 33);
-        std::copy(C_ref.get(), C_ref.get() + c.M * c.N, C_got.get());
-
-        naive_sgemm(c.M, c.N, c.K,
-                    c.alpha, A.get(), c.K, B.get(), c.N,
-                    c.beta,  C_ref.get(), c.N);
-
-        T->sgemm(c.M, c.N, c.K,
-                 c.alpha, A.get(), c.K, B.get(), c.N,
-                 c.beta,  C_got.get(), c.N);
-
-        float max_err = 0.0f;
-        for (int i = 0; i < c.M * c.N; ++i)
-            max_err = std::max(max_err, std::fabs(C_got[i] - C_ref[i]));
-
-        bool pass = (max_err < 1e-4f);
-        printf("  direct %-30s  max_abs=%.2e  %s\n",
-               c.label, max_err, pass ? "PASS" : "FAIL");
-        all_pass &= pass;
-    }
-
-    // ── Dispatch check: sgemm_packed on small inputs must match naive ────────
-    // If the dispatch is broken (direct path not reached), the packed path
-    // can still produce numerically correct results for these sizes — so this
-    // is a dispatch-neutral correctness check, not a strict dispatch test.
-    printf("  dispatch (sgemm_packed on small N via existing test suite):\n");
-    for (int s : {8, 16, 32, 64, 128})
-        all_pass &= test_sgemm_packed(s, s, s);
-
-    return all_pass;
-}
-
 int run_gemm_packed_tests() {
-    printf("\n── Packed GEMM Correctness Tests ──\n");
-    const bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
+    printf("\n── FP32 GEMM Correctness Tests ──\n");
+    bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
         T = &t;
-        bool ok = true;
-
-        printf(" Standard sizes (α=1, β=0):\n");
-        for (int s : {1, 7, 8, 9, 16, 127, 128, 129, 256, 512, 1024})
-            ok &= test_sgemm_packed(s, s, s);
-
-        printf(" Non-square edge cases:\n");
-        ok &= test_sgemm_packed(1,   4096, 4096);
-        ok &= test_sgemm_packed(13,  31,   37);
-        ok &= test_sgemm_packed(32,  7,    17);
-
-        printf(" Alpha/beta scaling:\n");
-        ok &= test_sgemm_packed(32, 32, 32, 2.5f, 0.3f, /*seed_c=*/99);
-        ok &= test_sgemm_packed(64, 64, 64, 0.5f, 1.0f, /*seed_c=*/77);
-
-        printf(" Edge: beta=0 must overwrite poisoned C:\n");
-        ok &= test_beta_zero_overwrites_poison();
-
+        bool ok = test_table_gemm();
         printf(" Edge: K=0 gives C = beta*C:\n");
         ok &= test_k_zero_applies_beta();
-
-        printf(" AVX-512 dual-kernel dispatch regression guard:\n");
-        ok &= test_gemm_packed_avx512_full_coverage();
-
-        printf(" Small-matrix direct path (SMALL_GEMM_THRESHOLD=%d, v0.9):\n",
-               simd_ml::gemm::SMALL_GEMM_THRESHOLD);
-        ok &= test_small_gemm_direct_path();
         return ok;
     });
-
+    all_pass &= test_direct_avx2();
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;
 }
