@@ -14,7 +14,7 @@ environments are never mixed in one table.
 | Pinning | The caller pins the process to one logical CPU (`taskset -c N`, or `start /affinity` on Windows); the CPU set is recorded. `--core` records which core that is. |
 | Repetitions | ≥ 5 warm-up and ≥ 30 timed calls per case. The implementations of a case (ours and the baseline) alternate call by call, so clock and thermal drift during the run affects both alike. |
 | Statistic | Median; the interquartile range (p25–p75) is in the detailed tables. |
-| Clock | The core clock is sampled on the benchmark thread (5 ms chain of dependent register-register integer adds, 1 add/cycle) before each case, after every 5 timed rounds and after the case; per-cycle rates use the median sample, and the tables show the min–max. One sample after the case was not enough: in one run it read 3.07 GHz for a case that would then have reached 37.8 flop/cycle, above the 32 flop/cycle an AVX2 core with two 256-bit FMA pipes can execute. With `--min-ghz`, a case with any sample below that value is repeated (up to 3 attempts). An add-*immediate* chain is not used: Golden Cove-class cores fold it in the renamer (it measured 22 "GHz"). On the Lunar Lake laptop the add chain agrees with a 3-cycle `imul` chain within 2% on a P-core (4.35 vs 4.37–4.43 GHz). |
+| Clock | The core clock is sampled on the benchmark thread (5 ms chain of dependent register-register integer adds, 1 add/cycle) before each case, after every 5 timed rounds and after the case; per-cycle rates use the median sample, and the tables show the min–max. One sample after the case was not enough: in one run it read 3.07 GHz for a case that would then have reached 37.8 flop/cycle, above the 32 flop/cycle an AVX2 core with two 256-bit FMA pipes can execute. With `--min-ghz`, a case with any sample below that value is repeated (up to 3 attempts). A case that is still below it after the last attempt (`below_min_ghz` in the JSON) is left out of the tables here and in the README; a "Not shown" line under the table names it with its clock, and its numbers stay only in the JSON. An add-*immediate* chain is not used: Golden Cove-class cores fold it in the renamer (it measured 22 "GHz"). On the Lunar Lake laptop the add chain agrees with a 3-cycle `imul` chain within 2% on a P-core (4.35 vs 4.37–4.43 GHz). |
 | Baselines | Same process, same inputs. GEMM: NumPy `matmul` (OpenBLAS), writing into a preallocated C, as `sgemm` does. Activations: PyTorch CPU `torch.nn.functional` (oneDNN where it applies); out-of-place for both libraries, so both include allocating the output. |
 | Metadata | CPU model, core label, pinned CPUs, caches of that core (CPUID leaf 4), OS, compiler, kernel flags, git commit, NumPy/BLAS/PyTorch versions, thread env vars, command, UTC timestamp. |
 | Files | `benchmarks/results/<label>_<date>_<commit>.json`; schema `simd-ml-kernels-bench/1` (see `python/simd_ml_kernels/_cli.py`, `cmd_bench`). |
@@ -41,12 +41,38 @@ Inside WSL2, `taskset` pins a virtual CPU, and Windows decides which physical
 core runs it. The measured clock identifies the core type: natively, the
 add-chain clock is 4.3–4.4 GHz on a P-core and at most 3.45 GHz on an E-core.
 The laptop runs use `--min-ghz 3.6`, so a case is repeated if any of its clock
-samples suggests it was moved to an E-core; a minimum above 3.6 GHz in the
-tables means every sample of that case ran at P-core clocks.
+samples suggests it was moved to an E-core, and a case that still fails after 3
+attempts is not shown. Every case in the tables therefore has a minimum
+clock sample of at least 3.6 GHz.
 
 ## Results
 
 <!-- BEGIN GENERATED: results-detail -->
+#### lnl-226v-wsl, 2026-10-18, commit `b193633ecec1`
+
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `b193633ecec1`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T06:28:22+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json`](../benchmarks/results/lnl-226v-wsl_2026-10-18_b193633ecec1.json).
+
+**FP32 GEMM, square, single thread**
+
+| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | flop/cycle (ours / OpenBLAS) | IQR ms (ours) | IQR ms (OpenBLAS) | core GHz median (min–max) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 96.0 | 103.2 | 93% | 22.3 / 24.0 | 0.042–0.048 | 0.035–0.044 | 4.30 (3.93–4.47) |
+| 256 | 112.0 | 118.1 | 95% | 25.5 / 26.9 | 0.280–0.327 | 0.265–0.324 | 4.40 (3.75–4.63) |
+| 512 | 115.1 | 121.7 | 95% | 27.2 / 28.7 | 2.196–2.548 | 2.134–2.448 | 4.24 (3.93–4.49) |
+| 1024 | 115.9 | 117.4 | 99% | 27.9 / 28.3 | 18.247–19.004 | 17.834–18.774 | 4.15 (3.87–4.47) |
+| 2048 | 115.0 | 122.9 | 94% | 26.2 / 28.0 | 147.054–151.364 | 138.699–141.546 | 4.39 (4.19–4.69) |
+
+**Activations and normalization, out-of-place, single thread**
+
+| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | IQR µs (ours) | IQR µs (PyTorch) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `gelu_exact` | 1048576 | 2.651 | 0.631 | 1.612 | 1.64× | 338.4–468.7 | 594.8–716.2 | 4.20 (3.83–4.68) |
+| `gelu_tanh` | 1048576 | 1.615 | 0.381 | 0.549 | 2.94× | 603.5–800.4 | 1835.0–2016.4 | 4.24 (4.06–4.66) |
+| `silu` | 1048576 | 2.904 | 0.705 | 2.146 | 1.35× | 334.4–446.4 | 463.7–560.8 | 4.12 (3.77–4.39) |
+| `relu` | 1048576 | 4.423 | 1.075 | 3.976 | 1.11× | 214.2–288.9 | 234.0–296.6 | 4.12 (3.67–4.31) |
+| `softmax` | 1024×1024 | 1.588 | 0.377 | 1.314 | 1.21× | 541.0–799.9 | 735.0–893.8 | 4.21 (3.71–4.41) |
+| `layer_norm` | 1024×1024 | 3.923 | 1.018 | 4.200 | 0.93× | 244.2–301.8 | 234.0–324.7 | 3.85 (3.63–4.32) |
+
 #### lnl-226v-wsl, 2026-10-18, commit `44194476d395`
 
 Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `44194476d395`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T04:57:38+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json`](../benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json).
@@ -59,18 +85,17 @@ Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, s
 | 256 | 125.3 | 123.3 | 102% | 28.6 / 28.2 | 0.262–0.311 | 0.261–0.290 | 4.38 (4.16–4.55) |
 | 512 | 114.1 | 123.7 | 92% | 27.4 / 29.7 | 2.244–2.520 | 2.104–2.321 | 4.17 (3.66–4.60) |
 | 1024 | 114.1 | 117.8 | 97% | 27.9 / 28.9 | 18.458–19.132 | 17.902–18.792 | 4.08 (3.92–4.58) |
-| 2048 | 113.6 | 119.7 | 95% | 26.1 / 27.5 | 149.730–152.505 | 142.753–145.076 | 4.36 (2.78–4.53) |
+Not shown: N = 2048 (median 4.36, min 2.78 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 **Activations and normalization, out-of-place, single thread**
 
 | kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | IQR µs (ours) | IQR µs (PyTorch) | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `gelu_exact` | 1048576 | 0.880 | 0.242 | 0.506 | 1.74× | 539.7–1514.5 | 2022.9–2185.4 | 3.63 (3.29–3.71) |
-| `gelu_tanh` | 1048576 | 1.402 | 0.346 | 0.392 | 3.58× | 658.3–823.9 | 2441.3–2842.7 | 4.05 (3.42–4.41) |
 | `silu` | 1048576 | 1.786 | 0.416 | 1.038 | 1.72× | 511.2–638.0 | 928.3–1073.7 | 4.30 (3.96–4.50) |
 | `relu` | 1048576 | 3.857 | 0.928 | 3.000 | 1.29× | 226.5–303.1 | 305.7–399.2 | 4.15 (3.83–4.61) |
 | `softmax` | 1024×1024 | 1.740 | 0.412 | 1.276 | 1.36× | 535.7–730.2 | 775.2–951.1 | 4.22 (3.75–4.52) |
 | `layer_norm` | 1024×1024 | 2.511 | 0.577 | 3.165 | 0.79× | 346.3–486.4 | 295.1–378.5 | 4.35 (3.89–4.59) |
+Not shown: `gelu_exact` 1048576 (median 3.63, min 3.29 GHz, 3 attempts), `gelu_tanh` 1048576 (median 4.05, min 3.42 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 #### lnl-226v-wsl, 2026-10-17, commit `7a698867be89`
 

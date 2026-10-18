@@ -59,18 +59,40 @@ def _clk(r: dict) -> str:
     return f"{c['median']:.2f} ({c['min']:.2f}–{c['max']:.2f})"
 
 
+def _throttled(*rs: dict | None) -> bool:
+    """A case whose clock samples stayed below --min-ghz in every attempt
+    (the core was throttled, or WSL2 moved the vCPU to an E-core): its
+    numbers stay in the JSON but are not published in a table."""
+    return any(r is not None and r["core_ghz"].get("below_min_ghz") for r in rs)
+
+
+def _excluded_note(doc: dict, cases: list[tuple[str, dict]]) -> str:
+    if not cases:
+        return ""
+    min_ghz = doc["protocol"].get("min_ghz")
+    items = ", ".join(f"{name} (median {r['core_ghz']['median']:.2f}, min {r['core_ghz']['min']:.2f} GHz, "
+                      f"{r['core_ghz']['attempts']} attempts)" for name, r in cases)
+    return (f"\nNot shown: {items}. A clock sample stayed below the {min_ghz} GHz P-core threshold "
+            f"(`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.")
+
+
 def gemm_table(doc: dict, detail: bool) -> str:
     rows = ["| N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS |"
-            + (" flop/cycle (ours / OpenBLAS) | IQR ms (ours) | IQR ms (OpenBLAS) | core GHz median (min–max) |" if detail else ""),
-            "|---:|---:|---:|---:|" + ("---:|---:|---:|---:|" if detail else "")]
+            + (" flop/cycle (ours / OpenBLAS) | IQR ms (ours) | IQR ms (OpenBLAS) |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "") + "---:|"]
+    excluded = []
     for shape, o, b in sorted(_pairs(doc, "sgemm")):
+        if _throttled(o, b):
+            excluded.append((f"N = {shape[0]}", o))
+            continue
         line = f"| {shape[0]} | {o['gflops']:.1f} | {b['gflops']:.1f} | {100 * o['gflops'] / b['gflops']:.0f}% |"
         if detail:
             line += (f" {o['flop_per_cycle']:.1f} / {b['flop_per_cycle']:.1f} |"
                      f" {o['p25_s'] * 1e3:.3f}–{o['p75_s'] * 1e3:.3f} |"
-                     f" {b['p25_s'] * 1e3:.3f}–{b['p75_s'] * 1e3:.3f} | {_clk(o)} |")
-        rows.append(line)
-    return "\n".join(rows)
+                     f" {b['p25_s'] * 1e3:.3f}–{b['p75_s'] * 1e3:.3f} |")
+        rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded)
 
 
 ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm"]
@@ -78,21 +100,25 @@ ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm"]
 
 def act_table(doc: dict, detail: bool) -> str:
     rows = ["| kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch |"
-            + (" IQR µs (ours) | IQR µs (PyTorch) | core GHz median (min–max) |" if detail else ""),
-            "|---|---|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "")]
+            + (" IQR µs (ours) | IQR µs (PyTorch) |" if detail else "") + " core GHz median (min–max) |",
+            "|---|---|---:|---:|---:|---:|" + ("---:|---:|" if detail else "") + "---:|"]
+    excluded = []
     for k in ACT_ORDER:
         for shape, o, b in _pairs(doc, k):
             if o is None:
                 continue
             shp = "×".join(str(s) for s in shape)
+            if _throttled(o, b):
+                excluded.append((f"`{k}` {shp}", o))
+                continue
             tb = f"{b['gelem_per_s']:.3f}" if b else "not measured"
             ratio = f"{o['gelem_per_s'] / b['gelem_per_s']:.2f}×" if b else "—"
             line = f"| `{k}` | {shp} | {o['gelem_per_s']:.3f} | {o['elem_per_cycle']:.3f} | {tb} | {ratio} |"
             if detail:
                 bi = f"{b['p25_s'] * 1e6:.1f}–{b['p75_s'] * 1e6:.1f}" if b else "—"
-                line += f" {o['p25_s'] * 1e6:.1f}–{o['p75_s'] * 1e6:.1f} | {bi} | {_clk(o)} |"
-            rows.append(line)
-    return "\n".join(rows)
+                line += f" {o['p25_s'] * 1e6:.1f}–{o['p75_s'] * 1e6:.1f} | {bi} |"
+            rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded)
 
 
 def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool) -> str:
