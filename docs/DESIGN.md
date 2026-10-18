@@ -284,7 +284,9 @@ does in PyTorch.
 
 ---
 
-## 4. FP16- and BF16-input GEMM
+## 4. Low-precision GEMM
+
+### 4.1 FP16- and BF16-input GEMM
 
 `sgemm_f16` and `sgemm_bf16` take 2-byte inputs, accumulate in FP32 and write
 FP32. Both conversions to FP32 are exact (F16C `vcvtph2ps`; BF16 is the top
@@ -338,6 +340,63 @@ subnormal results flushed, unlike the conversion path; the tests expect that
 on this path. Small products keep the AVX2 direct path, and more than one
 OpenMP thread uses the threaded conversion path. Correct under SDE `-spr`;
 speed not measured (no machine here has AVX512_BF16).
+
+### 4.2 INT8 GEMM (`sgemm_u8s8`)
+
+`C[i, j] = a_scale · b_scales[j] · Σ_k (A[i, k] − zp) · op(B)[k, j]` with A
+uint8 (activations: one scale and zero point per tensor), B int8 (weights:
+symmetric, one scale per output column), float32 out: PyTorch's quantized
+linear without the requantization of the output. `trans_b` takes B as
+`torch.nn.Linear` stores it ([N, K]).
+
+**VNNI.** `vpdpbusd` multiplies 4 consecutive uint8 of one operand by 4 int8
+of the other and adds the 4 products to an int32 lane: 32 multiply-adds per
+YMM instruction (64 per ZMM), against 8 (16) for `vfmadd231ps`, on the same
+two ports. The kernels keep the FP32 tiles (6×16 with 12 YMM accumulators for
+AVX-VNNI, `avxvnni_gemm.cpp`; 12×32 with 24 ZMM accumulators for
+AVX512_VNNI, `avx512vnni_gemm.cpp`) with K taken in quads. A micro-panels
+hold one 32-bit word (4 k values) per row and quad, broadcast to every lane;
+B micro-panels hold one word per column and quad (4 B rows interleaved with
+`vpunpck{l,h}bw/wd`, or 8×8 word transposes for `trans_b`), followed by the
+panel's column sums, computed with `vpdpbusd` against all-ones bytes. The
+zero point is subtracted at the end of each K block: Σ (a − zp)·b = Σ a·b −
+zp·Σ b. Within a block the int32 sums are exact (|Σ| ≤ KC·255·128 < 2³¹ for
+KC ≤ 65793); KC is four times the FP32 KC (one byte per element, so the
+KC×16 B micro-panel takes the same half of L1D), at most 4096. Each block's
+sum is converted to FP32, scaled by `a_scale·b_scales[j]` and added to C, so
+the only roundings are per block.
+
+**Without VNNI** (Haswell to Coffee Lake, Skylake-SP): `vpmaddubsw` would
+saturate its int16 pair sums (2·255·127 > 32767), so the AVX2 table
+converts instead: A − zp and B become FP32 while packing (exact), the FP32
+kernel computes the sums, and the columns are scaled at the end. That path
+is a memory saving (1-byte operands), not a speed-up.
+
+**Scalar table:** exact int64 sums. Error bound on every path:
+`|C − C_exact| ≤ 2·(K+2)·u·|a_scale·b_scales[j]|·Σ_k |A − zp|·|op(B)|`, tested
+against an exact int64 reference (not float64 BLAS: under SDE `-skx`,
+OpenBLAS's float64 matmul of these integers was wrong).
+
+`build_info()["u8s8_path"]` says which path runs: `avx512_vnni` (AVX-512
+table and AVX512_VNNI), `avx_vnni`, `fp32_convert` or `scalar`. All paths are
+single-threaded.
+
+Measured (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_19aeaf83cd36`; `avx_vnni`,
+x·Wᵀ with W stored [N, K]):
+
+- Square N = 128–2048: 235–416 GOP/s, 2.39–3.68× our FP32 GEMM (3.50–3.68× from
+  N = 512 up) and 1.66–2.04× PyTorch's `quantized.linear` (x86 engine,
+  prepacked weights). 98.0 and 97.5 operations per cycle (2 per
+  multiply-add) at N = 1024 and 2048; the core's `vpdpbusd` throughput, and
+  so the fraction of peak, is not measured.
+- The FP32 conversion path (what a CPU without VNNI runs) at 0.95–1.03× our
+  FP32 GEMM: memory savings at FP32 speed, no gain in time.
+- 1×4096×4096 (one row times a weight matrix): 1.15× our FP32 (its
+  dot-product path, §2.1) but **0.46× PyTorch**; the conversion path is
+  **0.47× our FP32** there. Every call packs all of B (and, for the
+  conversion path, writes it as FP32), which costs as much as using it once.
+  A GEMV that reads quantized weights in place, with the dequantization fused
+  into the dot product, is W5.
 
 ---
 
