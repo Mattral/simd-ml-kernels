@@ -299,7 +299,7 @@ void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptr
 struct Blocking { int kc, mc, nc; };
 
 const Blocking& blocking() noexcept {
-    static const Blocking b = [] {
+    static const Blocking b = []() noexcept {
         const dispatch::GemmBlocking g = dispatch::gemm_blocking(MR, NR);
         return Blocking{g.kc, g.mc, g.nc};
     }();
@@ -433,7 +433,7 @@ bool sgemm_avx2_prefers_direct(int M, int N, int K) noexcept {
 
 void sgemm_direct_avx2(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
                        const float* A, int lda, const float* B, int ldb, float beta,
-                       float* C, int ldc) noexcept {
+                       float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;

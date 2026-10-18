@@ -157,7 +157,7 @@ void pack_b(const float* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, floa
 struct Blocking { int kc, mc, nc; };
 
 const Blocking& blocking() noexcept {
-    static const Blocking b = [] {
+    static const Blocking b = []() noexcept {
         const dispatch::GemmBlocking g = dispatch::gemm_blocking(MR, NR);
         return Blocking{g.kc, g.mc, g.nc};
     }();
@@ -238,11 +238,11 @@ void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K,
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
     const Blocking& bl = blocking();
+    const Operands op{A, lda, trans_a, B, ldb, trans_b};
 #ifdef SIMD_ML_OPENMP
 #pragma omp parallel for schedule(dynamic, 1) \
     num_threads(get_num_threads()) if (get_num_threads() > 1)
 #endif
-    const Operands op{A, lda, trans_a, B, ldb, trans_b};
     for (int jc = 0; jc < N; jc += bl.nc)
         gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);
 }

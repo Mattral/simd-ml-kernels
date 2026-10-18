@@ -32,7 +32,7 @@ void sgemm_direct_avx2(bool trans_a, bool trans_b, int M, int N, int K,
                        const float* A, int lda,
                        const float* B, int ldb,
                        float beta,
-                       float* C, int ldc) noexcept;
+                       float* C, int ldc);
 
 /** Whether sgemm_packed_avx2 takes the direct path for this shape. */
 bool sgemm_avx2_prefers_direct(int M, int N, int K) noexcept;
