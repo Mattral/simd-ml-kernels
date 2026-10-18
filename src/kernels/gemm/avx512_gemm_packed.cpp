@@ -43,6 +43,9 @@
 #  error "avx512_gemm_packed.cpp is an AVX-512 unit: compile with -mavx512f (CMakeLists.txt)"
 #endif
 #include <immintrin.h>
+#ifdef SIMD_ML_OPENMP
+#  include <omp.h>
+#endif
 
 namespace simd_ml {
 namespace gemm {
@@ -215,6 +218,57 @@ void gemm_column_block(int M, int jc, int nc, int K, float alpha, const Operands
     }
 }
 
+#ifdef SIMD_ML_OPENMP
+/** Loops 2-5 of one column block on every thread of a team (as in the AVX2 unit). */
+void gemm_column_block_team(int M, int jc, int nc, int K, float alpha, const Operands& op,
+                            float* C, std::ptrdiff_t ldc, const Blocking& bl, float* Bp,
+                            float* Ap) noexcept {
+    const int team = omp_get_num_threads(), t = omp_get_thread_num();
+    const GemmChunks ch = gemm_chunks(team, M, nc, MR, NR, bl.mc);
+    const int chunks = ch.m_chunks * ch.n_chunks;
+    const int panels = (nc + NR - 1) / NR;
+    const int b0 = static_cast<int>(static_cast<long long>(t) * panels / team) * NR;
+    const int b1 = std::min(nc, static_cast<int>(static_cast<long long>(t + 1) * panels / team) * NR);
+    for (int pc = 0; pc < K; pc += bl.kc) {
+        const int kc = std::min(K - pc, bl.kc);
+        if (b1 > b0) pack_b(op.b_at(pc, jc + b0), op.ldb, op.tb, kc, b1 - b0, Bp + static_cast<std::ptrdiff_t>(b0) * kc);
+        int packed_ic = -1;
+#pragma omp barrier
+#pragma omp for schedule(dynamic, 1)
+        for (int c = 0; c < chunks; ++c) {
+            const int ic = c / ch.n_chunks * ch.mc, j0 = c % ch.n_chunks * ch.nc;
+            const int mc = std::min(M - ic, ch.mc), j1 = std::min(nc, j0 + ch.nc);
+            if (ic != packed_ic) { pack_a(op.a_at(ic, pc), op.lda, op.ta, mc, kc, Ap); packed_ic = ic; }
+            for (int jr = j0; jr < j1; jr += NR) {
+                const int n = std::min(NR, nc - jr);
+                const float* Bm = Bp + static_cast<std::ptrdiff_t>(jr) * kc;
+                for (int ir = 0; ir < mc; ir += MR)
+                    run_tile(std::min(MR, mc - ir), n, kc, Ap + static_cast<std::ptrdiff_t>(ir) * kc,
+                             Bm, C + (ic + ir) * ldc + jc + jr, ldc, alpha);
+            }
+        }
+    }
+}
+
+/** Loops 1-5 on `threads` threads; buffers allocated before the region (as in the AVX2 unit). */
+void gemm_packed_team(int threads, int M, int N, int K, float alpha, const Operands& op,
+                      float* C, std::ptrdiff_t ldc, const Blocking& bl) {
+    PackBuffers& buf = thread_buffers();
+    const int kc_max = std::min(K, bl.kc);
+    const std::size_t nc_max = static_cast<std::size_t>(std::min(N, bl.nc) + NR - 1) / NR * NR;
+    const std::size_t mc_max = static_cast<std::size_t>(std::min(M, bl.mc) + MR - 1) / MR * MR;
+    const std::size_t a_slice = (kc_max * mc_max + 15) / 16 * 16;
+    float* Bp = buf.get_b(kc_max * nc_max);
+    float* Ap = buf.get_a(a_slice * threads);
+#pragma omp parallel num_threads(threads)
+    {
+        float* Ap_t = Ap + a_slice * omp_get_thread_num();
+        for (int jc = 0; jc < N; jc += bl.nc)
+            gemm_column_block_team(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl, Bp, Ap_t);
+    }
+}
+#endif
+
 }  // namespace
 
 void sgemm_blocking_avx512(int* kc, int* mc, int* nc) noexcept {
@@ -240,8 +294,10 @@ void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K,
     const Blocking& bl = blocking();
     const Operands op{A, lda, trans_a, B, ldb, trans_b};
 #ifdef SIMD_ML_OPENMP
-#pragma omp parallel for schedule(dynamic, 1) \
-    num_threads(get_num_threads()) if (get_num_threads() > 1)
+    if (const int threads = gemm_threads(M, N, K, MR, NR); threads > 1) {
+        gemm_packed_team(threads, M, N, K, alpha, op, C, ldc, bl);
+        return;
+    }
 #endif
     for (int jc = 0; jc < N; jc += bl.nc)
         gemm_column_block(M, jc, std::min(N - jc, bl.nc), K, alpha, op, C, ldc, bl);

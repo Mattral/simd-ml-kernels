@@ -19,7 +19,7 @@
 ## v0.3 — True GEMM Microkernel ✅
 - [✅] B panel packing (`pack_b_panel`)
 - [✅] A panel packing (`pack_a_panel`)
-- [✅] AVX2 8×8 micro-kernel with 8 YMM accumulators (`inner_kernel_8x8`). Replaced in W3 by 6×16 (12 accumulators), chosen by measurement (DESIGN.md §2.4).
+- [✅] AVX2 8×8 micro-kernel with 8 YMM accumulators (`inner_kernel_8x8`). Replaced in W3 by 6×16 (12 accumulators), chosen by measurement (DESIGN.md §2.5).
 - [✅] 4× K-loop unrolling in micro-kernel + software prefetch
 - [✅] Cache-derived tile constants with L1/L2 derivation comments
 - [✅] BLIS-style 5-loop structure (jc / pc / ic / jr / ir)
@@ -214,6 +214,6 @@ between simd-ml-kernels and production BLAS libraries.
 |---|---|---|
 | Fixed tile sizes (MC/KC/NC) | Chosen for Skylake-class caches; not derived from the running CPU | W3 |
 | Small matrices (max(M,N,K) ≤ 128) | One FMA chain per output strip: 24% of OpenBLAS at N = 128 on the reference laptop | W3 |
-| Single-threaded default | OpenMP is a build option, off by default; no scaling measurements | W3 |
+| Single-threaded default | OpenMP is a build option, off by default; the threaded GEMM (shared B panel, dynamic chunks) has no published scaling numbers yet (needs a non-hybrid 8-core CPU) | W3 |
 | BF16/FP16 GEMM unpacked and unblocked | They convert B on every use and have no cache blocking; speed not measured with the current protocol | W4 |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

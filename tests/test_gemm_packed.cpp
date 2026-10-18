@@ -235,13 +235,27 @@ static bool test_k_zero_applies_beta() {
 
 int run_gemm_packed_tests() {
     printf("\n── FP32 GEMM Correctness Tests ──\n");
-    bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
-        T = &t;
-        bool ok = test_table_gemm();
-        printf(" Edge: K=0 gives C = beta*C:\n");
-        ok &= test_k_zero_applies_beta();
-        return ok;
-    });
+    // With OpenMP, the whole suite runs at 1, 2 and 4 threads (products too
+    // small to pay for threads stay on 1: gemm_threads).
+#ifdef SIMD_ML_OPENMP
+    const int thread_counts[] = {1, 2, 4};
+#else
+    const int thread_counts[] = {1};
+#endif
+    const int saved_threads = simd_ml::gemm::get_num_threads();
+    bool all_pass = true;
+    for (int threads : thread_counts) {
+        simd_ml::gemm::set_num_threads(threads);
+        printf(" Threads: %d\n", threads);
+        all_pass &= for_each_kernel_table([](const simd_ml::KernelTable& t) {
+            T = &t;
+            bool ok = test_table_gemm();
+            printf(" Edge: K=0 gives C = beta*C:\n");
+            ok &= test_k_zero_applies_beta();
+            return ok;
+        });
+    }
+    simd_ml::gemm::set_num_threads(saved_threads);
     all_pass &= test_direct_avx2();
     printf("  Overall: %s\n", all_pass ? "ALL PASS" : "SOME FAILURES");
     return all_pass ? 0 : 1;

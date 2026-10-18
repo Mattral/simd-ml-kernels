@@ -189,11 +189,18 @@ y = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
 
 ### `set_num_threads(n: int) → None`
 
-Set the number of OpenMP threads used by `sgemm`. No-op when built without `-DSIMD_ML_OPENMP`.
+Set the most OpenMP threads one `sgemm` call uses. Until it is called, the
+count is OpenMP's default: `OMP_NUM_THREADS`, else one per logical CPU. Small
+products (each thread needs a few MFLOP of work), the unpacked small-matrix
+paths, and calls made inside an OpenMP parallel region use fewer threads or
+one. The result is bitwise the same for every thread count. Other OpenMP code
+in the process keeps its own thread count. Built without `-DSIMD_ML_OPENMP`
+(the default; `build_info()["openmp"]` is `False`), GEMM is single-threaded
+and `n > 1` emits a `RuntimeWarning`.
 
 ### `get_num_threads() → int`
 
-Return the current OpenMP thread count (always 1 without OpenMP).
+Return the most threads one `sgemm` call uses (always 1 without OpenMP).
 
 ---
 

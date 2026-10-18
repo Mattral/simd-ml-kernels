@@ -76,10 +76,10 @@ buffers.
 ### 2.2 Goto/BLIS 5 loops
 
 ```
-for jc in 0..N step NC:                  (OpenMP: one jc block per thread)
+for jc in 0..N step NC:
   for pc in 0..K step KC:
     pack_b(B[pc:pc+KC, jc:jc+NC])        → 16-column micro-panels, KC×16 each
-    for ic in 0..M step MC:
+    for ic in 0..M step MC:              (OpenMP: loops 3-4 in chunks, §2.4)
       pack_a(A[ic:ic+MC, pc:pc+KC])      → 6-row micro-panels, k-major
       for jr in 0..NC step 16:
         for ir in 0..MC step 6:
@@ -128,7 +128,48 @@ The AVX-512 table uses the same loops and rules with its 12×32 kernel:
 KC = 128 with a 32 KiB L1D (Skylake-SP), 192 with 48 KiB (Ice Lake, Sapphire
 Rapids).
 
-### 2.4 Why 6×16
+### 2.4 Threads (OpenMP builds)
+
+OpenMP is a build option (`-DSIMD_ML_OPENMP=ON`), off by default; whether to
+turn it on by default waits for a scaling table on a non-hybrid 8-core CPU.
+In an OpenMP build one packed GEMM call uses up to `get_num_threads()`
+threads: `OMP_NUM_THREADS` (else one per logical CPU) until
+`set_num_threads(n)` is called. The small-product paths (direct, dot) stay
+single-threaded.
+
+All threads of a call work on the same NC-wide column block, one block after
+the other. For each KC panel they pack the KC×NC B panel together (each a
+contiguous run of micro-panels; one shared copy, sized for the last-level
+cache) and meet at a barrier. The block is then cut into chunks
+(`gemm_chunks`): about 4 per thread, along M (mc rows, a multiple of MR, at
+most MC), and also along N (at least 128 columns) when M has fewer than 2
+MR-row micro-panels per thread. Chunks are handed out with
+`schedule(dynamic, 1)`: on a hybrid CPU a P-core takes more chunks than an
+E-core instead of waiting for it at the next barrier. Each thread packs the
+rows of A of its chunk into its own buffer; the implicit barrier at the end
+of the chunk loop keeps the B panel until every chunk is done.
+
+- **Result independent of the thread count.** Each element of C is computed by
+  one thread with the same kernel and the same order over K as with one
+  thread, so 1, 2, 3, 4 and 8 threads give bitwise-equal results (tested).
+- **Small products stay on fewer threads.** `gemm_threads` gives each thread
+  at least 2 MFLOP (about 20 µs at 100 GFLOP/s); below that, waking threads
+  and the two barriers per KC panel cost more than they save.
+- **No nested teams.** A call made inside an enclosing OpenMP parallel region
+  runs on one thread; each calling thread has its own buffers, so concurrent
+  calls are safe (tested).
+- **Buffers.** The calling thread's buffers are grown before the parallel
+  region (an exception cannot cross it): one B panel and one A block per
+  thread, each rounded to 64 bytes. `set_num_threads` does not call
+  `omp_set_num_threads`, so the host program's own OpenMP regions are not
+  affected.
+
+The constants (2 MFLOP per thread, 4 chunks per thread) were chosen from dev
+runs on the hybrid Lunar Lake laptop under WSL2 (the comments in
+`dispatch.cpp` give them); scaling is not published until it is measured on
+the i9-9900 workstation.
+
+### 2.5 Why 6×16
 
 - **Latency × ports:** 2 FMAs per cycle with 4-cycle latency (5 on Haswell)
   need at least 8 independent accumulators. 6×16 has 12, so a late load does
@@ -155,7 +196,7 @@ the row count is one constant. Correctness is checked under Intel SDE
 (`-skx`, `-spr`) and on AVX-512 CI runners; its speed is measured only on real
 AVX-512 hardware (BENCHMARKS.md, "not measured yet" until then).
 
-### 2.5 Choosing the table
+### 2.6 Choosing the table
 
 The AVX2 and AVX-512 tables (§6) each have their own `sgemm`
 (`sgemm_packed_avx2`, `sgemm_packed_avx512`); both send small products to the
@@ -368,8 +409,8 @@ For readers of older revisions: the merged-away files stated that GeLU's tanh
 is a rational polynomial (it is exp-based, §3.1); that the B panel KC × NC is
 8 KiB and L2-resident (it is 2 MiB; the 8 KiB block is the KC × NR micro-panel,
 §2.3); that the 8×8 kernel's peak is 16 flop/cycle and its FMA chain 12 cycles
-(32 flop/cycle and 4 cycles, §2.4); that the prefetch distance is 64 bytes (128,
-§2.4); that `sgemm` went through a dispatch registry (until the per-ISA tables,
+(32 flop/cycle and 4 cycles, §2.5); that the prefetch distance is 64 bytes (128,
+§2.5); that `sgemm` went through a dispatch registry (until the per-ISA tables,
 §6, the binding called the AVX2 GEMM directly); and that the C++ precision
 tests ran kernels built without `-ffast-math` (they linked the fast-math
 objects).

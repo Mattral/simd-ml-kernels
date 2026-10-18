@@ -233,6 +233,46 @@ class TestGEMM:
             simd_ml_kernels.sgemm(A[::2], B)   # strided = not C-contiguous
 
 
+class TestGEMMThreads:
+    """sgemm with 1, 2 and 4 threads (2 and 4 only in OpenMP builds): within the
+    float64 bound, and bitwise equal to the 1-thread result (each element of C
+    is computed by one thread, in the same order)."""
+
+    @pytest.fixture(autouse=True)
+    def restore_threads(self):
+        saved = simd_ml_kernels.get_num_threads()
+        yield
+        simd_ml_kernels.set_num_threads(saved)
+
+    @pytest.mark.parametrize("threads", [1, 2, 4])
+    @pytest.mark.parametrize("M,N,K,trans_a,trans_b", [
+        (512, 512, 512, False, False),
+        (13, 3000, 200, False, False),    # few rows: chunks cut along N too
+        (1000, 37, 300, False, False),    # few columns, M crosses MC
+        (97, 113, 769, False, False),     # three KC panels on a 48 KiB-L1 core
+        (300, 5500, 23, False, False),    # N > NC = 2720 on an 8 MiB-L3 core: two column blocks
+        (190, 210, 230, True, False),
+        (190, 210, 230, False, True),
+        (190, 210, 230, True, True),
+        (64, 1024, 1024, False, True),    # x @ W.T, batch 64
+    ])
+    def test_sgemm_threads(self, M, N, K, trans_a, trans_b, threads):
+        if threads > 1 and not simd_ml_kernels.build_info()["openmp"]:
+            pytest.skip("built without OpenMP")
+        A = rand_matrix(K, M) if trans_a else rand_matrix(M, K)
+        B = rand_matrix(N, K) if trans_b else rand_matrix(K, N)
+        simd_ml_kernels.set_num_threads(1)
+        C1 = simd_ml_kernels.sgemm(A, B, trans_a=trans_a, trans_b=trans_b)
+        simd_ml_kernels.set_num_threads(threads)
+        C = simd_ml_kernels.sgemm(A, B, trans_a=trans_a, trans_b=trans_b)
+        opA = (A.T if trans_a else A).astype(np.float64)
+        opB = (B.T if trans_b else B).astype(np.float64)
+        assert_close(C, opA @ opB, rtol=TestGEMM.GEMM_TOL, atol=TestGEMM.GEMM_ATOL,
+                     label=f"GEMM {threads} threads [{M}x{N}x{K}] ta={trans_a} tb={trans_b}")
+        assert np.array_equal(C.view(np.uint32), C1.view(np.uint32)), \
+            f"{threads} threads differ from 1 thread"
+
+
 # ─── GeLU Tests ──────────────────────────────────────────────────────────────
 
 class TestGeLU:

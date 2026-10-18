@@ -843,12 +843,16 @@ np.ndarray[float32] same shape as x.
 
     m.def("set_num_threads", &py_set_num_threads,
           py::arg("n"),
-          "Set the number of OpenMP threads used by GEMM. In a build without OpenMP\n"
-          "(build_info()['openmp'] is False) GEMM is single-threaded and n > 1 emits\n"
-          "a RuntimeWarning instead of being silently ignored.");
+          "Set the most OpenMP threads one sgemm call uses (default: OpenMP's own,\n"
+          "i.e. OMP_NUM_THREADS, else one per logical CPU). Products too small to\n"
+          "gain from threads, and calls made inside an OpenMP parallel region, use\n"
+          "fewer or one; the result is bitwise the same for any thread count. Does\n"
+          "not change the thread count of other OpenMP code in the process. In a\n"
+          "build without OpenMP (build_info()['openmp'] is False) GEMM is\n"
+          "single-threaded and n > 1 emits a RuntimeWarning.");
 
     m.def("get_num_threads", &py_get_num_threads,
-          "Return the current OpenMP thread count used by GEMM.");
+          "Return the most OpenMP threads one sgemm call uses (1 without OpenMP).");
 
     m.def("build_info", &build_info,
           "Return build details: version, commit, compiler, the kernel tables compiled\n"

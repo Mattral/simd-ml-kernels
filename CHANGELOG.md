@@ -51,6 +51,17 @@ under **Changed** with a migration note.
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- **Threaded FP32 GEMM (OpenMP builds, `-DSIMD_ML_OPENMP=ON`; still off by
+  default).** All threads of a call share one packed B panel per column block
+  and take chunks of rows (and, for small M, columns) with a dynamic
+  schedule, each packing its own rows of A; before, only whole NC-wide column
+  blocks were split, so any N <= NC (2720 on the reference laptop) ran on one
+  thread. Results are bitwise the same for every thread count. Products below
+  about 2 MFLOP per thread use fewer threads; calls inside an OpenMP parallel
+  region use one. The default thread count is OpenMP's (`OMP_NUM_THREADS`,
+  else one per logical CPU) instead of 1, and `set_num_threads` no longer
+  changes the thread count of the host program's own OpenMP regions.
+  docs/DESIGN.md §2.4. Scaling is not measured yet.
 - **FP32 GEMM, AVX-512:** a 12×32 micro-kernel with 24 ZMM accumulators
   replaces the 8×16 kernel (8 accumulators), with the AVX2 path's five loops,
   CPUID-leaf-4 blocking and per-thread buffers. Verified under Intel SDE
