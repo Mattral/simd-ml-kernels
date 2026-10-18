@@ -33,7 +33,7 @@ will be removed in 0.5.0. See [CHANGELOG.md](CHANGELOG.md).
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
-| **LayerNorm** | `activations/layer_norm_avx2.cpp` | 3-pass, double accumulation, optional γ/β |
+| **LayerNorm** | `activations/layer_norm_avx2.cpp` | Two-pass statistics (float lanes, flushed to double), then normalize; optional γ/β; error ≤ 1e-5 + 1e-4·\|ref\| for \|mean\| ≤ 30·std |
 
 Every kernel has a scalar, an AVX2 and (GEMM only) an AVX-512 version, each
 compiled separately with its own flags; the one to use is chosen at run time

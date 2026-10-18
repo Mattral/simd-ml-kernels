@@ -177,9 +177,10 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   persistent packing buffers (N = 128 went from 24% to 95% of OpenBLAS on the
   reference laptop; BENCHMARKS.md); AVX-512 12×32 micro-kernel with 24
   accumulators (correct under SDE; speed not measured yet); `trans_a`/`trans_b`
-  in packing. Remaining: AVX-512 measurement on real hardware;
-  OpenMP on by default with a scaling table; LayerNorm single-pass vs
-  two-pass. Measured on ≥ 2 CPUs.
+  in packing; LayerNorm two-pass kept (single-pass Welford measured slower
+  for rows up to 1024 and less accurate). Remaining: AVX-512 measurement on
+  real hardware; OpenMP on by default with a scaling table. Measured on
+  ≥ 2 CPUs.
 - **W4 — low precision that is faster than FP32.** BF16/FP16 converted at pack
   time; `vdpbf16ps` and VNNI INT8 where available.
 - **W5 — CPU LLM decode kernels.** Quantized GEMV with fused dequantization,

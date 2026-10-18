@@ -519,6 +519,22 @@ class TestLayerNorm:
         assert_close(out, ref, rtol=self.LN_TOL, atol=self.LN_ATOL,
                     label=f"LayerNorm n={n} gamma={use_gamma} beta={use_beta}")
 
+    @pytest.mark.parametrize("n", [1027, 65536])
+    @pytest.mark.parametrize("mean,std,outlier", [
+        (30.0, 1.0, False), (-3e4, 1e3, False), (0.3, 1e-2, False), (0.0, 1.0, True)])
+    def test_layer_norm_conditioning(self, n, mean, std, outlier):
+        """The documented bound holds for |mean| <= 30*std, at row lengths where
+        float partial sums would drift, and with x[0] far from the mean (the
+        statistics pass sums x - x[0])."""
+        x = (mean + std * RNG.standard_normal((2, n))).astype(np.float32)
+        if outlier:
+            x[:, 0] = 1e3
+        gamma = RNG.uniform(0.0, 2.0, n).astype(np.float32)
+        beta = RNG.uniform(-1.0, 1.0, n).astype(np.float32)
+        assert_close(simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta),
+                     layer_norm_numpy(x, gamma, beta), rtol=self.LN_TOL, atol=self.LN_ATOL,
+                     label=f"LayerNorm n={n} mean={mean} std={std} outlier={outlier}")
+
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
     def test_layer_norm_vs_pytorch(self):
         n     = 256

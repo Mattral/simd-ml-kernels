@@ -221,12 +221,25 @@ compiler may delete `isnan`/`isinf` tests (§5).
 
 ### 3.5 LayerNorm (`layer_norm_avx2.cpp`)
 
-Three passes: mean (float → double, summed in double), variance of `x − mean`
-(squared in float, summed in double), then `(x − mean)·inv_std` with optional
-γ and β. Summing in double keeps the mean exact enough for inputs with a large
-offset (tests use mean 50, std 100). LayerNorm is 0.82× PyTorch on the
-reference laptop (BENCHMARKS.md); a single-pass (Welford) or fused two-pass
-version is part of W3.
+Two passes for the statistics and one to normalize: pass 1 sums `x − x[0]`,
+pass 2 sums `(x − μ)²`, pass 3 writes `(x − μ)·inv_std` with optional γ and β.
+Each statistics pass keeps four independent 8-float accumulators and adds
+them into a double every 1024 elements, so float rounding grows with 32 terms
+per lane rather than with the row length, and shifting by `x[0]` keeps the
+summed values near the spread of the row rather than its offset.
+
+This replaced a kernel that summed in double through one dependent add chain
+per pass (latency-bound). A single-pass Welford variant (per-lane updates,
+Chan merge) was measured against it and against two-pass: it was no faster
+than the old kernel for rows up to 1024 elements (its per-element update costs
+more than reading an L1-resident row twice) and less accurate on long rows
+(float lane state). The comment at the top of the file has the numbers;
+BENCHMARKS.md has the published comparison with PyTorch.
+
+Accuracy: `|err| ≤ 1e-5 + 1e-4·|ref|` for rows with `|mean| ≤ 30·std`
+(tests: up to 65536 elements, and a first element far from the mean). Beyond
+that, rounding the mean to float32 dominates (about `6e-8·|mean|/std`), as it
+does in PyTorch.
 
 ---
 
