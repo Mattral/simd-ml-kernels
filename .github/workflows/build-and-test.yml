@@ -96,10 +96,13 @@ jobs:
       # ctest ran the C++ GEMM suite at 1, 2 and 4 threads and the bitwise
       # 1-vs-2/3/4/8-thread checks. The Python tests then run on an OpenMP
       # install: TestGEMMThreads (1, 2, 4 threads) and the OMP_NUM_THREADS default.
+      # SKBUILD_CMAKE_DEFINE, not pip's -C: Ubuntu 22.04's pip 22.0 has no -C.
       - name: Install the package with OpenMP
+        env:
+          SKBUILD_CMAKE_DEFINE: SIMD_ML_OPENMP=ON
         run: |
           pip3 install scikit-build-core
-          pip3 install . --no-build-isolation -q -C cmake.define.SIMD_ML_OPENMP=ON
+          pip3 install . --no-build-isolation -q
           python3 -c "import simd_ml_kernels as s; i = s.build_info(); assert i['openmp'], i; print('threads', s.get_num_threads())"
 
       - name: Self-test and Python tests (OpenMP build)
