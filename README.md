@@ -105,30 +105,30 @@ thread; the baseline runs in the same process on the same inputs, interleaved
 call by call.
 
 <!-- BEGIN GENERATED: results-summary -->
-#### lnl-226v-wsl
+#### lnl-226v-wsl, 2026-10-18, commit `44194476d395`
 
-Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `7a698867be89`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-17T04:53:44+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-17_7a698867be89.json`](benchmarks/results/lnl-226v-wsl_2026-10-17_7a698867be89.json).
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `44194476d395`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-18T04:57:38+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json`](benchmarks/results/lnl-226v-wsl_2026-10-18_44194476d395.json).
 
 **FP32 GEMM, square, single thread**
 
 | N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS |
 |---:|---:|---:|---:|
-| 128 | 24.4 | 103.5 | 24% |
-| 256 | 90.7 | 120.5 | 75% |
-| 512 | 100.4 | 114.1 | 88% |
-| 1024 | 98.9 | 116.8 | 85% |
-| 2048 | 97.7 | 118.3 | 83% |
+| 128 | 96.6 | 101.3 | 95% |
+| 256 | 125.3 | 123.3 | 102% |
+| 512 | 114.1 | 123.7 | 92% |
+| 1024 | 114.1 | 117.8 | 97% |
+| 2048 | 113.6 | 119.7 | 95% |
 
 **Activations and normalization, out-of-place, single thread**
 
 | kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch |
 |---|---|---:|---:|---:|---:|
-| `gelu_exact` | 1048576 | 2.414 | 0.563 | 1.571 | 1.54× |
-| `gelu_tanh` | 1048576 | 1.443 | 0.341 | 0.523 | 2.76× |
-| `silu` | 1048576 | 1.739 | 0.405 | 1.800 | 0.97× |
-| `relu` | 1048576 | 4.485 | 1.063 | 4.194 | 1.07× |
-| `softmax` | 1024×1024 | 1.729 | 0.393 | 1.347 | 1.28× |
-| `layer_norm` | 1024×1024 | 3.184 | 0.740 | 3.905 | 0.82× |
+| `gelu_exact` | 1048576 | 0.880 | 0.242 | 0.506 | 1.74× |
+| `gelu_tanh` | 1048576 | 1.402 | 0.346 | 0.392 | 3.58× |
+| `silu` | 1048576 | 1.786 | 0.416 | 1.038 | 1.72× |
+| `relu` | 1048576 | 3.857 | 0.928 | 3.000 | 1.29× |
+| `softmax` | 1024×1024 | 1.740 | 0.412 | 1.276 | 1.36× |
+| `layer_norm` | 1024×1024 | 2.511 | 0.577 | 3.165 | 0.79× |
 <!-- END GENERATED: results-summary -->
 
 Run it on your hardware:
