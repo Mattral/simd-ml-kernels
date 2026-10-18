@@ -172,6 +172,45 @@ static bool test_layer_norm(int n, bool use_gamma, bool use_beta, unsigned seed 
 }
 
 // ─── Test runner ─────────────────────────────────────────────────────────────
+// Rows the documented bound covers (|mean| <= 30*std) at lengths where float
+// lane sums would drift (65536), and a first element far from the mean (pass 1
+// sums x - x[0]). Same bound as test_layer_norm: 1e-5 + 1e-4*|ref| vs double.
+static bool test_layer_norm_conditioning() {
+    bool all = true;
+    struct R { float mean, stdv; bool outlier_first; const char* what; };
+    for (int n : {1027, 4096, 65536})
+        for (R r : {R{30.0f, 1.0f, false, "mean 30 std 1"}, R{-3e4f, 1e3f, false, "mean -3e4 std 1e3"},
+                    R{0.3f, 1e-2f, false, "mean 0.3 std 1e-2"}, R{0.0f, 1.0f, true, "x[0] = 1e3"}}) {
+            auto inp = make_aligned_array<float>(n), out = make_aligned_array<float>(n);
+            auto gamma = make_aligned_array<float>(n), beta = make_aligned_array<float>(n);
+            unsigned s = 12345u + static_cast<unsigned>(n);
+            auto unif = [&s]() { s = s * 1664525u + 1013904223u; return (s >> 8) * (1.0f / 16777216.0f); };
+            for (int i = 0; i < n; ++i) {
+                const float z = (unif() + unif() + unif() + unif() - 2.0f) * 1.7320508f;  // ~N(0,1)
+                inp[i] = r.mean + r.stdv * z;
+                gamma[i] = 1.0f + 2.0f * (unif() - 0.5f);
+                beta[i] = 2.0f * (unif() - 0.5f);
+            }
+            if (r.outlier_first) inp[0] = 1e3f;
+            T->layer_norm_row(inp.get(), out.get(), n, gamma.get(), beta.get(), 1e-5f);
+            double mu = 0.0;
+            for (int i = 0; i < n; ++i) mu += inp[i];
+            mu /= n;
+            double var = 0.0;
+            for (int i = 0; i < n; ++i) var += (inp[i] - mu) * (inp[i] - mu);
+            const double is = 1.0 / std::sqrt(var / n + 1e-5);
+            double worst = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const double ref = (inp[i] - mu) * is * gamma[i] + beta[i];
+                worst = std::max(worst, std::abs(out[i] - ref) / (1e-5 + 1e-4 * std::abs(ref)));
+            }
+            const bool pass = worst <= 1.0;
+            printf("  LayerNorm n=%-6d %-18s err/bound=%.3f  %s\n", n, r.what, worst, pass ? "PASS" : "FAIL");
+            all &= pass;
+        }
+    return all;
+}
+
 int run_activation_tests() {
     printf("\n── Activation Correctness Tests ──\n");
     const bool all_pass = for_each_kernel_table([](const simd_ml::KernelTable& t) {
@@ -198,6 +237,7 @@ int run_activation_tests() {
             for (bool use_gamma : {false, true})
                 for (bool use_beta : {false, true})
                     ok &= test_layer_norm(n, use_gamma, use_beta);
+        ok &= test_layer_norm_conditioning();
         return ok;
     });
 

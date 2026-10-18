@@ -175,8 +175,8 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
 - **W3 — GEMM.** Small-matrix register-blocked kernel (N ≤ 128 is 24% of
   OpenBLAS on the reference laptop); AVX-512 micro-kernel with 24–28
   accumulators; blocking from CPUID leaf 4; `trans_a`/`trans_b` in packing;
-  OpenMP on by default with a scaling table; LayerNorm single-pass vs
-  two-pass. Measured on ≥ 2 CPUs.
+  OpenMP on by default with a scaling table. LayerNorm: two-pass kept
+  (single-pass Welford measured slower for rows up to 1024 and less accurate). Measured on ≥ 2 CPUs.
 - **W4 — low precision that is faster than FP32.** BF16/FP16 converted at pack
   time; `vdpbf16ps` and VNNI INT8 where available.
 - **W5 — CPU LLM decode kernels.** Quantized GEMV with fused dequantization,

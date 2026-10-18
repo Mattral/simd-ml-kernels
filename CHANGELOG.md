@@ -45,6 +45,12 @@ under **Changed** with a migration note.
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- `layer_norm` (AVX2 and AVX-512 tables): two-pass statistics with four
+  float accumulators per pass, flushed to double every 1024 elements, and the
+  mean pass shifted by the row's first element, instead of one dependent
+  double-precision add chain per pass; single-pass Welford was measured and
+  was not faster for rows up to 1024 elements. Error bound documented and
+  tested: `1e-5 + 1e-4·|ref|` for rows with `|mean| ≤ 30·std`.
 - **Renamed to simd-ml-kernels.** Repository and PyPI distribution:
   `simd-ml-kernels` (was `SIMD-Microkernels-for-ML-Workloads` / `simd-ml-microkernels`);
   import: `simd_ml_kernels` (was `simd_kernels`); the "IntrinsicML" name is

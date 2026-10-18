@@ -159,6 +159,8 @@ output = (x - mean) / sqrt(var + eps) * gamma + beta
 
 `gamma` and `beta` are optional learnable affine parameters with shape matching the last dimension of `x`.
 
+Error vs float64: `|err| ≤ 1e-5 + 1e-4·|ref|` (asserted by the tests and `selftest`) for rows with `|mean| ≤ 30·std`, any row length. Rounding the row mean to float32 costs about `6e-8·|mean|/std` in units of the normalized output, so rows whose mean is many standard deviations from zero exceed that bound; PyTorch's LayerNorm does too (measured 166–1684× the bound at `|mean|/std` = 10⁴–10⁵; this kernel 47–1061×).
+
 ```python
 x     = np.random.randn(16, 768).astype(np.float32)
 gamma = np.ones(768,  dtype=np.float32)   # scale
