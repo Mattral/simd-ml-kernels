@@ -286,14 +286,58 @@ does in PyTorch.
 
 ## 4. FP16- and BF16-input GEMM
 
-`sgemm_f16` (F16C `vcvtph2ps`) and `sgemm_bf16` (BF16 → FP32 is exact:
-zero-extend to 32 bits and shift left by 16) compute in FP32 and write FP32.
-Both use the unpacked, unblocked structure of §2.1 for every size, converting
-each B element every time it is used, with one accumulator per output strip
-and no cache blocking. Their speed is not in BENCHMARKS.md yet (not measured
-with the current protocol). Replacing them with conversion at pack time
-followed by the FP32 micro-kernel (and
-`vdpbf16ps` / VNNI paths where the hardware has them) is W4.
+`sgemm_f16` and `sgemm_bf16` take 2-byte inputs, accumulate in FP32 and write
+FP32. Both conversions to FP32 are exact (F16C `vcvtph2ps`; BF16 is the top
+half of an FP32, so zero-extend and shift left by 16), so the result is the
+FP32 GEMM of the converted inputs, with the same error bound.
+
+**Conversion at pack time.** The AVX2 and AVX-512 units run the FP32 paths of
+§2 with the conversion moved into packing: `pack_a` / `pack_b` and the loops
+are templates over the input element type, and each element is converted
+once, when it is copied into its micro-panel (8 values per `vcvtph2ps` or
+per zero-extend + shift, 16 on AVX-512). The micro-kernels are the FP32 ones,
+unchanged; the FP32 instantiation is the same code as before. The direct path
+(the FP32 shapes of §2.1) converts each 6-row strip of A into a small buffer
+and B either in registers (one strip: M ≤ 6, so a single row reads B once at
+2 bytes per element) or once into a buffer (more strips).
+
+The previous kernels converted every B element on every use, with one
+accumulator per output strip and no cache blocking: 12–17% of the FP32 GEMM
+at N = 256–1024 on the reference laptop (dev measurement, not in a JSON).
+Measured now (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_045918e51839`):
+
+- Square N = 128–2048: FP16 at 95–100% and BF16 at 99–101% of our FP32 GEMM;
+  FP16 1.41–1.46× PyTorch's float16 `matmul`; BF16 0.97–1.16× PyTorch's
+  bfloat16 `matmul` (it is slightly ahead at N = 1024 and 2048).
+- 1×4096×4096 (one row times a weight matrix, bound by reading B): FP16 at
+  180% and BF16 at 162% of our FP32 GEMM, because B is half the bytes; both
+  lose to PyTorch (0.63× and 0.58×). The single-row path walks B in 16-column
+  strips down all of K for FP32 too; a GEMV that streams rows of B is W5.
+
+Memory: A and B are stored at 2 bytes per element instead of 4. The packing
+buffers are FP32 and the same size as for the FP32 GEMM (per thread, at most
+(MC+6)·KC + KC·(NC+16) floats, §2.2), so the saving is in the operands, not in
+the working set. On compute-bound shapes there is no speed gain on this
+hardware (AVX2 has no 16-bit FMA): FP16/BF16 here are memory savings at about
+the FP32 speed, and faster only where reading B dominates.
+
+Cost on narrow products: with N ≤ 16 and large M·K the FP32 kernel issues one
+A broadcast per 2 FMAs, so converting A first is a large share of the work
+(dev timing: 70–82% of the FP32 GEMM at 2048×16×2048 and 4096×8×4096; not in
+the JSON).
+
+**`vdpbf16ps` (AVX512_BF16).** On CPUs with AVX512_BF16 (CPUID leaf 7.1 EAX
+bit 5: Cooper Lake, Sapphire Rapids and later, Zen 4 and later), the AVX-512
+table's `sgemm_bf16` runs packed single-threaded products through
+`avx512bf16_gemm.cpp`: the 12×32 tile with K taken in pairs, A broadcast as
+one 32-bit pair per row, B packed as 32 columns × 2 BF16 per k-pair (two ZMM
+vectors). Each `vdpbf16ps` adds two exact BF16 products per FP32 lane, each
+add rounded to nearest even, so the error bound is unchanged. The instruction
+ignores MXCSR: BF16 subnormal inputs (|x| < 2⁻¹²⁶) are read as zero and
+subnormal results flushed, unlike the conversion path; the tests expect that
+on this path. Small products keep the AVX2 direct path, and more than one
+OpenMP thread uses the threaded conversion path. Correct under SDE `-spr`;
+speed not measured (no machine here has AVX512_BF16).
 
 ---
 

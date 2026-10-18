@@ -51,6 +51,21 @@ under **Changed** with a migration note.
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- **`sgemm_f16` / `sgemm_bf16` run the FP32 GEMM paths.** FP16/BF16 inputs
+  are converted to FP32 once while packing A and B (or, for small products,
+  per 6-row strip of A, and B in registers or once), and the 6×16 / 12×32 FP32
+  micro-kernels run unchanged. Before, B was converted on every use with one
+  accumulator per output strip and no cache blocking. Measured on the reference
+  laptop: 95–101% of the FP32 GEMM at N = 128–2048, 1.6–1.8× it for a single
+  row times a 4096×4096 matrix (B is half the bytes); FP16 1.41–1.46× and BF16
+  0.97–1.16× PyTorch's float16 / bfloat16 `matmul`; the single-row case loses
+  to PyTorch (0.58–0.63×). docs/DESIGN.md §4, docs/BENCHMARKS.md. Same API and
+  error bound; on CPUs with AVX512_BF16 the AVX-512 table runs packed
+  single-threaded BF16 products with `vdpbf16ps`, which reads BF16 subnormal
+  inputs as zero (speed not measured).
+- `bench`: FP16/BF16 GEMM cases (against our FP32 GEMM and PyTorch), and on
+  Linux glibc malloc thresholds are fixed (`protocol.malloc`), so allocating
+  outputs costs the same in every case (docs/BENCHMARKS.md, "Allocation").
 - **Threaded FP32 GEMM (OpenMP builds, `-DSIMD_ML_OPENMP=ON`; still off by
   default).** All threads of a call share one packed B panel per column block
   and take chunks of rows (and, for small M, columns) with a dynamic
