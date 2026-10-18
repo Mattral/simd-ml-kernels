@@ -122,7 +122,7 @@ static bool test_table_gemm() {
     for (int s : {1, 2, 5, 6, 7, 8, 15, 16, 17, 31, 64, 127, 128, 129, 161, 255, 256, 512})
         ok &= check(fn, "square", {s, s, s});
 
-    printf(" Every row/column tail of the 6x16 tile (direct and packed sizes):\n");
+    printf(" Row/column tails of the micro-tile (6x16 AVX2, 12x32 AVX-512; direct and packed sizes):\n");
     for (int M : {1, 5, 6, 7, 11, 12, 13})
         for (int N : {1, 8, 15, 16, 17, 33})
             ok &= check(fn, "tails", {M, N, 37});
