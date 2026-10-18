@@ -13,8 +13,10 @@ under **Changed** with a migration note.
   calls are unchanged.
 - Decode GEMV: with `trans_b` and at most 8 rows of A, `sgemm`, `sgemm_f16`
   and `sgemm_bf16` stream the rows of B in place (FP16/BF16 converted in
-  registers, no packing) on the scalar, AVX2 and AVX-512 tables.
-  docs/DESIGN.md §2.7.
+  registers, no packing) on the scalar, AVX2 and AVX-512 tables. Measured on
+  the reference laptop's P-core: FP16/BF16 at 90–99% of the single-core read
+  bandwidth and 1.78–1.92× PyTorch's `F.linear`; FP32 at 97–99%, 1.03–1.05×
+  PyTorch. AVX-512: correct under SDE, speed not measured. docs/DESIGN.md §2.7.
 - `python -m simd_ml_kernels bench`: memory-bandwidth roofs (a read-only
   stream and the STREAM triad, arrays of at least 4× the last-level cache,
   single core; `machine.stream_read_gbs`, `machine.stream_triad_gbs`) and

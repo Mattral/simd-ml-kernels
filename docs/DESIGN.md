@@ -265,8 +265,20 @@ move that cut-off; batched decode is not a target of this work yet.
 
 The AVX-512 table runs the same structure with ZMM registers (row counts
 chosen on the AVX2 core); its speed is measured only on AVX-512 hardware
-(BENCHMARKS.md). The scalar table computes the same dot products, one
-accumulator per element.
+(BENCHMARKS.md; pending a cloud run). The scalar table computes the same dot
+products, one accumulator per element.
+
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_ecc219baa1f2`, one
+P-core; roofs 31.8 GB/s read stream, 29.6 GB/s triad), at 1×4096×4096,
+1×4096×11008 and 1×2048×8192:
+
+- FP32: 31.1–31.4 GB/s, 97–99% of the read stream; 1.03–1.05× PyTorch's
+  `F.linear` and 1.00–1.20× OpenBLAS's sgemv. All three read at about the
+  roof, so FP32 has little left to gain on one core.
+- FP16 and BF16: 28.7–31.4 GB/s, 90–99% of the read stream; 1.78–1.92×
+  PyTorch's `F.linear` on the same 16-bit weights, which reads at 15.5–17.5
+  GB/s (49–55% of the read stream). Half the bytes of FP32 at about the same
+  GB/s, so close to half the time of our FP32 GEMV.
 
 ---
 
@@ -375,10 +387,13 @@ Measured now (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_045918e51839`):
 - Square N = 128–2048: FP16 at 95–100% and BF16 at 99–101% of our FP32 GEMM;
   FP16 1.41–1.46× PyTorch's float16 `matmul`; BF16 0.97–1.16× PyTorch's
   bfloat16 `matmul` (it is slightly ahead at N = 1024 and 2048).
-- 1×4096×4096 (one row times a weight matrix, bound by reading B): FP16 at
-  180% and BF16 at 162% of our FP32 GEMM, because B is half the bytes; both
-  lose to PyTorch (0.63× and 0.58×). The single-row path walks B in 16-column
-  strips down all of K for FP32 too; a GEMV that streams rows of B is W5.
+- 1×4096×4096 with B stored [K, N] (bound by reading B): FP16 at 180% and
+  BF16 at 162% of our FP32 GEMM, because B is half the bytes; both lose to
+  PyTorch (0.63× and 0.58×; 0.62× for FP16 again in
+  `lnl-226v-wsl_2026-10-18_ecc219baa1f2`). That path walks B in 16-column
+  strips down all of K. With the weights stored [N, K] (`trans_b=True`, the
+  `torch.nn.Linear` layout a model uses) the decode GEMV of §2.7 reads at
+  90–99% of the read stream, 1.78–1.92× PyTorch's `F.linear`.
 
 Memory: A and B are stored at 2 bytes per element instead of 4. The packing
 buffers are FP32 and the same size as for the FP32 GEMM (per thread, at most
