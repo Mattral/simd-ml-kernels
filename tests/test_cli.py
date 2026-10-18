@@ -42,3 +42,6 @@ def test_info_json_has_build_and_cpu_fields(capsys):
         assert key in d["build"]
     assert d["cpu"]["runtime_isa"] == simd_ml_kernels.detected_isa()
     assert d["package"]["version"] == simd_ml_kernels.__version__
+    # pyproject.toml's version (package metadata) and CMakeLists.txt's
+    # (compiled into build_info) are set separately; a release needs both.
+    assert d["build"]["version"] == d["package"]["version"]

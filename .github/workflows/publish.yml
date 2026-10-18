@@ -1,0 +1,59 @@
+name: Publish
+
+# Manual release: builds the wheels and the sdist with wheels.yml (each one
+# installed in a clean environment and selftested), then uploads them to
+# TestPyPI or PyPI with Trusted Publishing: PyPI trusts this workflow's OIDC
+# token for the environment named by `target`, so there is no API token and no
+# repository secret. One-time setup (owner): a trusted publisher on
+# test.pypi.org / pypi.org for workflow publish.yml with environment testpypi /
+# pypi, and GitHub environments of the same names (pypi with a required
+# reviewer).
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Package index to upload to"
+        required: true
+        type: choice
+        options: [testpypi, pypi]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/wheels.yml
+
+  publish:
+    name: Upload to ${{ inputs.target }}
+    needs: build
+    # Releases come from main only.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ inputs.target }}
+      url: ${{ inputs.target == 'pypi' && 'https://pypi.org/p/simd-ml-kernels' || 'https://test.pypi.org/p/simd-ml-kernels' }}
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing; nothing else
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List files
+        run: ls -l dist
+      - name: Upload to TestPyPI
+        if: inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+      - name: Upload to PyPI
+        if: inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
