@@ -21,10 +21,10 @@ pybind11 src/bindings/pybind_entry.cpp: dtype/shape/layout checks, GIL release, 
 Dispatch src/dispatch/: CPUID + XGETBV, one KernelTable per ISA, selection (§6)
            │
 Kernels  scalar unit   scalar_kernels.cpp                 every kernel, portable C++
-         AVX2 units    gemm/avx2_gemm_packed.cpp           FP32 GEMM: 6×16 kernel, direct and packed
-                       gemm/{f16,bf16}_gemm.cpp            FP16- / BF16-input GEMM (unpacked, see §4)
+         AVX2 units    gemm/avx2_gemm_packed.cpp           FP32/FP16/BF16 GEMM: 6×16 kernel, direct and packed (§2, §4)
                        intrinsic_gelu.cpp, activations/    GeLU, ReLU, SiLU, softmax, LayerNorm
-         AVX-512 units gemm/avx512_gemm_packed.cpp         FP32 GEMM, 12×32 kernel
+         AVX-512 units gemm/avx512_gemm_packed.cpp         FP32/FP16/BF16 GEMM, 12×32 kernel
+                       gemm/avx512bf16_gemm.cpp            BF16 GEMM with vdpbf16ps (CPUID-gated, §4)
            │
 Shared   simd_math.hpp (fast_exp_avx2, tanh_avx2), cache_alloc.hpp (aligned allocation, prefetch)
 ```
@@ -307,6 +307,7 @@ flags and nothing more (`CMakeLists.txt`, "ISA units"):
 | scalar | `-O3` (baseline x86-64: SSE2; or the target's default) | `dispatch/dispatch.cpp`, `kernels/scalar_kernels.cpp` |
 | avx2 | `-mavx2 -mfma -mf16c -ffast-math -fno-finite-math-only` | AVX2 kernels, `kernels_avx2.cpp` |
 | avx512 | `-mavx2 -mfma -mf16c -mavx512f -mavx512dq -mavx512bw -mavx512vl -ffast-math -fno-finite-math-only` | AVX-512 kernels, `kernels_avx512.cpp` |
+| avx512bf16 | the avx512 flags and `-mavx512bf16` (built if the compiler accepts it) | `gemm/avx512bf16_gemm.cpp`; no table of its own: the AVX-512 table calls it after a CPUID check (§4) |
 
 The bindings and the C++ tests are compiled like the scalar unit, so the
 extension imports and runs on any x86-64 CPU. `-DSIMD_ML_NATIVE=ON` adds
@@ -323,7 +324,8 @@ Two checks keep the units honest:
   could otherwise end up in an AVX2 copy.
 - Under Intel SDE the C++ tests and `selftest` run with an emulated CPU:
   `-nhm` (Nehalem, no AVX) uses only the scalar table, `-hsw` scalar and AVX2,
-  `-skx` / `-spr` all three. This is how the AVX-512 kernels are tested on
+  `-skx` / `-spr` all three (`-spr` also has AVX512_BF16, so it runs the
+  `vdpbf16ps` BF16 path). This is how the AVX-512 kernels are tested on
   machines without AVX-512. It is a local check before a PR, not a CI job:
   Intel's download server refuses (HTTP 403) the scripted downloads CI would
   need, and the SDE license does not allow keeping a copy in this repository.

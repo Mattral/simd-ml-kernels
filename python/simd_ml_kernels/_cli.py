@@ -325,6 +325,33 @@ def _record(results, kernel, impl, shape, t, work, unit, clock):
     return r
 
 
+def _pin_malloc() -> str | None:
+    """Fix glibc malloc's thresholds for the bench process, so allocating an
+    activation's output (out-of-place, for both libraries) costs the same in
+    every case. With glibc's dynamic defaults, the mmap threshold depends on
+    which large blocks were freed earlier in the process; after the FP16/BF16
+    GEMM cases every 4 MiB output became a fresh mmap and was page-faulted in
+    on each call: SiLU on 2^20 floats measured 0.4-0.75 Gelem/s for ours and
+    0.6 for PyTorch instead of about 3 and 2.2 (Lunar Lake, WSL2). Blocks below
+    32 MiB (glibc's maximum threshold) now come from the heap, which is never
+    trimmed, so outputs reuse warm pages. Returns what was set, or None."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        m_trim_threshold, m_top_pad, m_mmap_threshold = -1, -2, -3
+        settings = {"M_MMAP_THRESHOLD": (m_mmap_threshold, 32 << 20),
+                    "M_TRIM_THRESHOLD": (m_trim_threshold, 1 << 30),
+                    "M_TOP_PAD": (m_top_pad, 64 << 20)}
+        if all(libc.mallopt(p, v) == 1 for p, v in settings.values()):
+            return "glibc mallopt " + ", ".join(f"{k}={v}" for k, (_, v) in settings.items())
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     bad = {k: os.environ.get(k) for k in THREAD_ENV if os.environ.get(k) != "1"}
     if bad and not args.allow_threads:
@@ -339,6 +366,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     except ImportError:
         torch = None
 
+    malloc = _pin_malloc()
     rng = np.random.default_rng(0)
     results: list[dict] = []
     def show(r):
@@ -442,7 +470,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
                          "clock": "core GHz sampled on the same thread (5 ms dependent "
                                   "add-reg-reg chain, 1 cycle/add) before, every 5 rounds and "
                                   "after each case; per-cycle rates use the median",
-                         "min_ghz": args.min_ghz},
+                         "min_ghz": args.min_ghz,
+                         "malloc": malloc or "not pinned (allocator defaults)"},
             "command": " ".join(["python -m simd_ml_kernels"] + (args.argv or [])),
             "python": platform.python_version(),
             "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
