@@ -181,6 +181,10 @@ static bool test_table_gemm() {
 // The direct (unpacked) AVX2 path on its own, including shapes the dispatcher
 // sends to the packed path, so both paths are checked on the same shapes.
 static bool test_direct_avx2() {
+#if !SIMD_ML_X86_AVAILABLE
+    printf(" sgemm_direct_avx2: SKIP (no x86 units in this build)\n");
+    return true;
+#else
     if (!simd_ml::kernels_for(simd_ml::Isa::avx2)) {
         printf(" sgemm_direct_avx2: SKIP (CPU has no AVX2)\n");
         return true;
@@ -196,6 +200,7 @@ static bool test_direct_avx2() {
                 ok &= check(fn, "direct", c);
             }
     return ok;
+#endif
 }
 
 // K == 0 (BLAS semantics): A·B is an empty sum, so C = beta·C; beta == 0
