@@ -324,23 +324,51 @@ inline float hsum8(__m256 v) noexcept {
     return _mm_cvtss_f32(_mm_add_ss(t, _mm_movehdup_ps(t)));
 }
 
+/** The last n < 16 values of a row of B from b, as two FP32 vectors (zero past n). */
+template <class EB>
+SIMD_ML_ALWAYS_INLINE void load_tail16(const typename EB::T* b, int n, __m256i m0, __m256i m1,
+                                       __m256& v0, __m256& v1) noexcept {
+    if constexpr (std::is_same_v<EB, F32>) {
+        v0 = _mm256_maskload_ps(b, m0);
+        v1 = _mm256_maskload_ps(b + 8, m1);
+    } else {  // AVX2 has no 16-bit masked load: copy the n values
+        typename EB::T t[NR] = {};
+        std::memcpy(t, b, static_cast<std::size_t>(n) * sizeof(t[0]));
+        v0 = EB::eight(t);
+        v1 = EB::eight(t + 8);
+    }
+}
+
 /**
- * dot_rows<J> — C[i][j..j+J) += alpha · Σ_p A[i][p] · B[j+c][p] for J <= 4 rows
- * of B (stored N×K): x·Wᵀ for a few rows of x. Both operands are read along
- * contiguous rows, 16 floats per step into 2 accumulators per output (8 for
- * J = 4: enough to cover the FMA latency), masked loads for the K tail.
+ * dot_rows<EB, J> — C[i][j..j+J) += alpha · Σ_p a[p] · B[j+q][p] for J <= 8
+ * rows of B (stored N×K, elements EB::T): x·Wᵀ for one row x (FP32). This is
+ * the decode GEMV: each element of B is used once, so the loop is bound by
+ * reading B from DRAM and its job is to keep enough of it in flight. J rows
+ * are J sequential streams for the hardware prefetchers, 16 values per row
+ * per step; up to 4 rows have 2 accumulators each (8 for J = 4: enough to
+ * cover the 4-cycle FMA latency with room for late loads), more rows one
+ * each (16 YMM registers). FP16/BF16 rows are converted in registers (one
+ * vcvtph2ps, or zero-extend + shift, per 8 values), so B is read at 2 bytes
+ * per element. K tail: masked loads (FP32) or a copied tail.
+ * Dev runs (Lunar Lake P-core, 1×4096×4096): 31-34 GB/s for FP32 and FP16,
+ * about the 31-33 GB/s of a 4-stream read of a large array on that core
+ * (docs/DESIGN.md §2.7).
  */
-template <int J>
-SIMD_ML_ALWAYS_INLINE void dot_rows(int K, const float* __restrict__ a, const float* __restrict__ B,
+template <class EB, int J>
+SIMD_ML_ALWAYS_INLINE void dot_rows(int K, const float* __restrict__ a, const typename EB::T* __restrict__ B,
                                     std::ptrdiff_t ldb, float* __restrict__ c, float alpha) noexcept {
-    __m256 acc[J][2];
-    for (int q = 0; q < J; ++q) acc[q][0] = acc[q][1] = _mm256_setzero_ps();
+    // Up to 4 rows: 2 accumulators per row; more rows: one (16 YMM registers).
+    constexpr int U = J > 4 ? 1 : 2;
+    __m256 acc[J][U];
+    for (int q = 0; q < J; ++q)
+        for (int u = 0; u < U; ++u) acc[q][u] = _mm256_setzero_ps();
     int p = 0;
     for (; p + 16 <= K; p += 16) {
         const __m256 a0 = _mm256_loadu_ps(a + p), a1 = _mm256_loadu_ps(a + p + 8);
         for (int q = 0; q < J; ++q) {
-            acc[q][0] = _mm256_fmadd_ps(a0, _mm256_loadu_ps(B + q * ldb + p), acc[q][0]);
-            acc[q][1] = _mm256_fmadd_ps(a1, _mm256_loadu_ps(B + q * ldb + p + 8), acc[q][1]);
+            const typename EB::T* b = B + q * ldb + p;
+            acc[q][0] = _mm256_fmadd_ps(a0, EB::eight(b), acc[q][0]);
+            acc[q][U - 1] = _mm256_fmadd_ps(a1, EB::eight(b + 8), acc[q][U - 1]);
         }
     }
     if (p < K) {
@@ -349,26 +377,45 @@ SIMD_ML_ALWAYS_INLINE void dot_rows(int K, const float* __restrict__ a, const fl
         const __m256i m1 = _mm256_cmpgt_epi32(_mm256_set1_epi32(K - p - 8), lane);
         const __m256 a0 = _mm256_maskload_ps(a + p, m0), a1 = _mm256_maskload_ps(a + p + 8, m1);
         for (int q = 0; q < J; ++q) {
-            acc[q][0] = _mm256_fmadd_ps(a0, _mm256_maskload_ps(B + q * ldb + p, m0), acc[q][0]);
-            acc[q][1] = _mm256_fmadd_ps(a1, _mm256_maskload_ps(B + q * ldb + p + 8, m1), acc[q][1]);
+            __m256 b0, b1;
+            load_tail16<EB>(B + q * ldb + p, K - p, m0, m1, b0, b1);
+            acc[q][0] = _mm256_fmadd_ps(a0, b0, acc[q][0]);
+            acc[q][U - 1] = _mm256_fmadd_ps(a1, b1, acc[q][U - 1]);
         }
     }
-    for (int q = 0; q < J; ++q) c[q] += alpha * hsum8(_mm256_add_ps(acc[q][0], acc[q][1]));
+    for (int q = 0; q < J; ++q)
+        c[q] += alpha * hsum8(U == 2 ? _mm256_add_ps(acc[q][0], acc[q][U - 1]) : acc[q][0]);
 }
 
-/** C (prescaled by beta) += alpha · A · Bᵀ, B stored N×K, row by row. */
+/**
+ * C (prescaled by beta) += alpha · A · Bᵀ, A FP32, B stored N×K (EB::T), row
+ * by row: each block of R rows of B is read from memory once and reused from
+ * L1/L2 for every row of A (R·K elements: 64 KiB at K = 4096 in FP32).
+ * R = 4 rows for FP32, 8 for FP16/BF16: a 16-bit row step reads 32 bytes, half
+ * of FP32's, so 8 streams keep as many bytes in flight as 4 FP32 ones. Dev
+ * runs at 1×4096×4096 FP16 (Lunar Lake P-core, alternating builds): 4 rows
+ * 28.1-30.8 GB/s, 8 rows 31.2-33.8 GB/s, FP32 31.6-34.3 GB/s in the same runs.
+ * Software prefetch 256-1024 bytes ahead on every row changed nothing beyond
+ * run-to-run noise (±2 GB/s), so the hardware prefetchers are left to it.
+ */
+template <class EB>
 void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
-                      const float* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
-    for (int j = 0; j < N; j += 4) {          // 4 rows of B, reused for every row of A
-        const float* Bj = B + j * ldb;
+                      const typename EB::T* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
+    constexpr int R = sizeof(typename EB::T) == 2 ? 8 : 4;
+    for (int j = 0; j < N; j += R) {
+        const typename EB::T* Bj = B + j * ldb;
         for (int i = 0; i < M; ++i) {
             const float* a = A + i * lda;
             float* c = C + i * ldc + j;
-            switch (std::min(4, N - j)) {
-                case 4: dot_rows<4>(K, a, Bj, ldb, c, alpha); break;
-                case 3: dot_rows<3>(K, a, Bj, ldb, c, alpha); break;
-                case 2: dot_rows<2>(K, a, Bj, ldb, c, alpha); break;
-                default: dot_rows<1>(K, a, Bj, ldb, c, alpha); break;
+            switch (std::min(R, N - j)) {
+                case 8: if constexpr (R >= 8) dot_rows<EB, 8>(K, a, Bj, ldb, c, alpha); break;
+                case 7: if constexpr (R >= 7) dot_rows<EB, 7>(K, a, Bj, ldb, c, alpha); break;
+                case 6: if constexpr (R >= 6) dot_rows<EB, 6>(K, a, Bj, ldb, c, alpha); break;
+                case 5: if constexpr (R >= 5) dot_rows<EB, 5>(K, a, Bj, ldb, c, alpha); break;
+                case 4: dot_rows<EB, 4>(K, a, Bj, ldb, c, alpha); break;
+                case 3: dot_rows<EB, 3>(K, a, Bj, ldb, c, alpha); break;
+                case 2: dot_rows<EB, 2>(K, a, Bj, ldb, c, alpha); break;
+                default: dot_rows<EB, 1>(K, a, Bj, ldb, c, alpha); break;
             }
         }
     }
@@ -610,16 +657,31 @@ void packed(int M, int N, int K, float alpha, const Operands<EA, EB>& op, float*
  * every use and had no cache blocking (12-17% of the FP32 GEMM at N = 256-1024
  * on the reference laptop).
  */
+/**
+ * trans_b with few rows (x·Wᵀ, decode), FP16/BF16: the rows of A (at most
+ * kDotRowsMax·K values) are converted to FP32 once, then the row-streaming
+ * GEMV reads B in place and converts it in registers.
+ */
 template <class E>
-void sgemm_lowp(int M, int N, int K, float alpha, const typename E::T* A, int lda,
+void dot_lowp(int M, int N, int K, float alpha, const typename E::T* A, std::ptrdiff_t lda,
+              const typename E::T* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) {
+    float* Af = thread_buffers().get_a(static_cast<std::size_t>(M) * K);
+    for (int i = 0; i < M; ++i) convert_row<E>(A + i * lda, K, Af + static_cast<std::ptrdiff_t>(i) * K);
+    gemm_dot_trans_b<E>(M, N, K, alpha, Af, K, B, ldb, C, ldc);
+}
+
+template <class E>
+void sgemm_lowp(bool tb, int M, int N, int K, float alpha, const typename E::T* A, int lda,
                 const typename E::T* B, int ldb, float beta, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
-    if (sgemm_avx2_prefers_direct(M, N, K))
+    if (tb && M <= kDotRowsMax)
+        dot_lowp<E>(M, N, K, alpha, A, lda, B, ldb, C, ldc);
+    else if (!tb && sgemm_avx2_prefers_direct(M, N, K))
         direct_lowp<E>(M, N, K, alpha, A, lda, B, ldb, C, ldc);
     else
-        packed(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, false}, C, ldc);
+        packed(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, tb}, C, ldc);
 }
 
 enum class Path { direct, dot, packed };
@@ -631,7 +693,15 @@ Path choose_path(bool ta, bool tb, int M, int N, int K) noexcept {
     // (×4096×1024); 16×1024×1024 90/70, 24×… 78/74, 32×… 75/77, 64×… 80/84;
     // 128³ 75/89. OpenBLAS's own transb GEMM is slow for M <= 8 (6 GFLOP/s at
     // M = 1), so the dot path is well ahead there.
-    if (tb) return (!ta && M <= 16) ? Path::dot : Path::packed;
+    // Each row of A re-reads the current R-row block of B from cache, with 2
+    // loads per FMA, so past a few rows packing wins. GFLOP/s dot / packed at
+    // N = 4096 (dev runs, same core), K = 4096: FP32 M=8 34.0/32.8, M=12
+    // 33.8/46.1; FP16 M=8 56/41, 12 57/56, 16 60/63; BF16 12 58/56, 16 58/61.
+    // K = 1024: FP32 M=8 51/33, 12 52/47, 16 51/54; FP16 8 52/39, 12 49/57;
+    // BF16 8 47/44, 12 48/54. At M = 1 the dot path is 3-5x faster. M <= 8
+    // (kDotRowsMax) wins or ties in every case; above it the most packing
+    // gives up is 9% (FP32, 12×1024×1024).
+    if (tb) return (!ta && M <= kDotRowsMax) ? Path::dot : Path::packed;
     return sgemm_avx2_prefers_direct(M, N, K) ? Path::direct : Path::packed;
 }
 
@@ -674,7 +744,7 @@ void sgemm_direct_avx2(bool trans_a, bool trans_b, int M, int N, int K, float al
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
     if (trans_b && !trans_a)
-        gemm_dot_trans_b(M, N, K, alpha, A, lda, B, ldb, C, ldc);
+        gemm_dot_trans_b<F32>(M, N, K, alpha, A, lda, B, ldb, C, ldc);
     else if (!trans_b)
         direct(trans_a, M, N, K, alpha, A, lda, B, ldb, C, ldc);
     else  // both transposed: packing handles it
@@ -699,14 +769,14 @@ void sgemm_packed_avx2(bool trans_a, bool trans_b, int M, int N, int K,
     packed(M, N, K, alpha, Operands<F32>{A, lda, trans_a, B, ldb, trans_b}, C, ldc);
 }
 
-void sgemm_f16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+void sgemm_f16_avx2(bool trans_b, int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                     const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
-    sgemm_lowp<F16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    sgemm_lowp<F16>(trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
-void sgemm_bf16_avx2(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+void sgemm_bf16_avx2(bool trans_b, int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                      const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
-    sgemm_lowp<BF16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    sgemm_lowp<BF16>(trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 /**

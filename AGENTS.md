@@ -29,6 +29,7 @@ Pitfalls:
 - `build_info()["git_commit"]` is taken at CMake configure time (`-dirty`:
   local changes); benchmark only from a clean, fresh configure.
 - The tests import the *installed* package: `pip install .` after C++ changes.
+- ASan binaries can segfault before `main` on WSL2 (ASLR); run them under `setarch -R`.
 - CMake options: `SIMD_ML_OPENMP` (threaded GEMM), `BENCH_OPENBLAS` (link BLAS
   into `bench_stat`), `SIMD_ML_NATIVE` (`-march=native` everywhere; local
   benchmarks only), `SIMD_ML_ENABLE_X86=OFF` (scalar-only build).
@@ -139,15 +140,17 @@ Code and repository
 
 ```
 schema, command, python, timestamp_utc
-machine   label, cpu_model, core, pinned_cpus, caches[] (CPUID leaf 4), logical_cpus, os, note
+machine   label, cpu_model, core, pinned_cpus, caches[] (CPUID leaf 4), logical_cpus, os, note,
+          stream_{read,triad}_gbs, stream_{read,triad}_allcore_gbs (null: no OpenMP or one CPU)
 build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp,
           sgemm_tile, sgemm_blocking {kc, mc, nc}, u8s8_path
 baselines numpy, blas {name, version}, torch
 env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, SIMD_ML_ISA, SIMD_ML_BF16_DOT
-protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc
+protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc, stream, gemv
 results[] kernel, impl, shape, median_s, p25_s, p75_s, min_s, reps,
           core_ghz {median, min, max, samples, attempts, below_min_ghz},
-          gflops + flop_per_cycle (GEMM) | gelem_per_s + elem_per_cycle (elementwise)
+          gflops + flop_per_cycle (GEMM; GEMV also bytes, gb_per_s, pct_stream_{read,triad},
+          weight_copies) | gelem_per_s + elem_per_cycle (elementwise) | gb_per_s (stream_*)
 ```
 
 Files are named `benchmarks/results/<label>_<YYYY-MM-DD>_<commit>.json`, one

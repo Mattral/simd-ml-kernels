@@ -48,6 +48,12 @@
 #include <chrono>
 #include <limits>
 #include <cstdint>
+#if defined(__SSE2__)
+#  include <emmintrin.h>   // baseline on x86-64: _stream_read's accumulators
+#endif
+#ifdef SIMD_ML_OPENMP
+#  include <omp.h>
+#endif
 #include "../dispatch/cpuid.hpp"
 
 #include "../kernels/activations/activations.hpp"
@@ -472,6 +478,118 @@ static double py_measure_core_ghz(double seconds) {
 #endif
 }
 
+/**
+ * _stream_triad — a[i] = b[i] + s·c[i] over float32 arrays (McCalpin's STREAM
+ * triad), the bandwidth roof that the GEMV results are reported against.
+ *
+ * A plain loop compiled with the baseline flags, as STREAM is: the arrays are
+ * sized far beyond the last-level cache by the caller, so the loop is bound
+ * by DRAM, not by instruction width (SSE2 moves 32 bytes of loads and 16 of
+ * stores per 4 elements, far more per cycle than one core's DRAM share).
+ * threads > 1 splits the loop over that many OpenMP threads (static
+ * schedule) in OpenMP builds; without OpenMP it raises.
+ */
+static void py_stream_triad(py::array_t<float, py::array::c_style> a,
+                            py::array_t<float, py::array::c_style> b,
+                            py::array_t<float, py::array::c_style> c, float s,
+                            int threads) {
+    if (a.ndim() != 1 || b.ndim() != 1 || c.ndim() != 1 || a.size() != b.size() || a.size() != c.size())
+        throw ArgumentError("_stream_triad: a, b and c must be 1-D float32 arrays of the same size");
+    float* __restrict__ pa = a.mutable_data();
+    const float* __restrict__ pb = b.data();
+    const float* __restrict__ pc = c.data();
+    const std::ptrdiff_t n = static_cast<std::ptrdiff_t>(a.size());
+    if (threads > 1) {
+#ifdef SIMD_ML_OPENMP
+        py::gil_scoped_release release;
+#pragma omp parallel for num_threads(threads) schedule(static)
+        for (std::ptrdiff_t i = 0; i < n; ++i) pa[i] = pb[i] + s * pc[i];
+        return;
+#else
+        throw std::runtime_error("_stream_triad(threads > 1) needs an OpenMP build");
+#endif
+    }
+    py::gil_scoped_release release;
+    for (std::ptrdiff_t i = 0; i < n; ++i) pa[i] = pb[i] + s * pc[i];
+}
+
+/**
+ * Sum of p[0..n), read as S equal parts walked side by side (S sequential
+ * streams, like a GEMV's rows of W). 8 independent accumulators per step
+ * (8/S consecutive vectors per stream), so the loop is bound by loads, not by
+ * add latency: one dependent addps chain (4-cycle latency) would cap it at 4
+ * bytes per cycle.
+ */
+template <int S>
+static double stream_read_sum(const float* p, std::ptrdiff_t n) noexcept {
+    constexpr int V = 8 / S;                        // vectors per stream per step
+    const std::ptrdiff_t part = n / S / (4 * V) * (4 * V);
+    double total = 0.0;
+#if defined(__SSE2__)
+    __m128 acc[8];
+    for (auto& v : acc) v = _mm_setzero_ps();
+    for (std::ptrdiff_t i = 0; i < part; i += 4 * V)
+        for (int s = 0; s < S; ++s)
+            for (int v = 0; v < V; ++v)
+                acc[s * V + v] = _mm_add_ps(acc[s * V + v], _mm_loadu_ps(p + s * part + i + 4 * v));
+    for (int k = 1; k < 8; ++k) acc[0] = _mm_add_ps(acc[0], acc[k]);
+    float lanes[4];
+    _mm_storeu_ps(lanes, acc[0]);
+    total = static_cast<double>(lanes[0]) + lanes[1] + lanes[2] + lanes[3];
+#else
+    float acc[8] = {};
+    for (std::ptrdiff_t i = 0; i < part; i += 4 * V)
+        for (int s = 0; s < S; ++s)
+            for (int k = 0; k < 4 * V; ++k) acc[(s * 4 * V + k) % 8] += p[s * part + i + k];
+    for (float v : acc) total += v;
+#endif
+    for (std::ptrdiff_t i = S * part; i < n; ++i) total += p[i];   // tail
+    return total;
+}
+
+static double stream_read_sum(const float* p, std::ptrdiff_t n, int streams) {
+    switch (streams) {
+        case 1: return stream_read_sum<1>(p, n);
+        case 2: return stream_read_sum<2>(p, n);
+        case 4: return stream_read_sum<4>(p, n);
+        case 8: return stream_read_sum<8>(p, n);
+        default: throw ArgumentError("_stream_read: streams must be 1, 2, 4 or 8");
+    }
+}
+
+/**
+ * _stream_read — sum of a float32 array: a read-only stream (4 bytes per
+ * element, nothing written), the roof for kernels that only read their big
+ * operand, such as a GEMV's weights. The triad also writes, and its counted
+ * 12 bytes/element leave out the read-for-ownership of every stored line, so
+ * a read-only kernel can exceed 100% of it. streams: how many parts of the
+ * array are read side by side (1, 2, 4, 8). threads > 1: OpenMP builds only.
+ */
+static double py_stream_read(py::array_t<float, py::array::c_style> a, int threads, int streams) {
+    if (a.ndim() != 1) throw ArgumentError("_stream_read: a must be a 1-D float32 array");
+    if (streams != 1 && streams != 2 && streams != 4 && streams != 8)
+        throw ArgumentError("_stream_read: streams must be 1, 2, 4 or 8");
+    const float* p = a.data();
+    const std::ptrdiff_t n = static_cast<std::ptrdiff_t>(a.size());
+    if (threads > 1) {
+#ifdef SIMD_ML_OPENMP
+        py::gil_scoped_release release;
+        double total = 0.0;
+#pragma omp parallel num_threads(threads) reduction(+ : total)
+        {
+            const std::ptrdiff_t t = omp_get_thread_num(), nt = omp_get_num_threads();
+            const std::ptrdiff_t lo = n * t / nt, hi = n * (t + 1) / nt;
+            total += stream_read_sum(p + lo, hi - lo, streams);
+        }
+        return total;
+#else
+        throw std::runtime_error("_stream_read(threads > 1) needs an OpenMP build");
+#endif
+    }
+    py::gil_scoped_release release;
+    return stream_read_sum(p, n, streams);
+}
+
 static py::list py_cpu_caches() {
     py::list out;
     for (const auto& c : simd_ml::dispatch::detect_caches()) {
@@ -503,11 +621,30 @@ static bool py_is_aligned(py::array arr) {
  * A and B must be numpy arrays with dtype=np.float16. C (output) is float32
  * to avoid overflow in intermediate sums.
  */
+/**
+ * M, N, K and ldb of a 2-byte-input GEMM; B is [K, N], or [N, K] with
+ * trans_b. Raises ArgumentError on a shape mismatch.
+ */
+struct LowpShape { int M, N, K, ldb; };
+static LowpShape lowp_shape(const py::array& A, const py::array& B, bool trans_b) {
+    const int M = static_cast<int>(A.shape(0));
+    const int K = static_cast<int>(A.shape(1));
+    const int N = static_cast<int>(B.shape(trans_b ? 0 : 1));
+    const int K_b = static_cast<int>(B.shape(trans_b ? 1 : 0));
+    if (K_b != K)
+        throw ArgumentError(
+            "Shape mismatch: A is [" + std::to_string(M) + "×" + std::to_string(K) + "] but " +
+            (trans_b ? "B.T" : "B") + " is [" + std::to_string(K_b) + "×" + std::to_string(N) +
+            "] (B is [" + std::to_string(B.shape(0)) + "×" + std::to_string(B.shape(1)) + "])");
+    return {M, N, K, static_cast<int>(B.shape(1))};
+}
+
 static py::array_t<float> py_sgemm_f16(py::array A,
                                          py::array B,
                                          float alpha   = 1.0f,
                                          float beta    = 0.0f,
-                                         py::object C  = py::none()) {
+                                         py::object C  = py::none(),
+                                         bool trans_b  = false) {
     // Validate A and B: must be float16 (kind='f', itemsize=2) and C-contiguous
     auto check_f16 = [](const py::array& arr, const char* name) {
         if (arr.dtype().kind() != 'f' || arr.dtype().itemsize() != 2) {
@@ -526,16 +663,7 @@ static py::array_t<float> py_sgemm_f16(py::array A,
     if (A.ndim() != 2) throw ArgumentError("A must be 2-D");
     if (B.ndim() != 2) throw ArgumentError("B must be 2-D");
 
-    int M = static_cast<int>(A.shape(0));
-    int K = static_cast<int>(A.shape(1));
-    int N = static_cast<int>(B.shape(1));
-
-    if (B.shape(0) != static_cast<py::ssize_t>(K)) {
-        throw ArgumentError(
-            "Shape mismatch: A is [" + std::to_string(M) + "×" +
-            std::to_string(K) + "] but B is [" +
-            std::to_string(B.shape(0)) + "×" + std::to_string(N) + "]");
-    }
+    const auto [M, N, K, ldb] = lowp_shape(A, B, trans_b);
 
     // Allocate or validate float32 C output
     py::array_t<float> C_out;
@@ -555,7 +683,7 @@ static py::array_t<float> py_sgemm_f16(py::array A,
 
     {
         py::gil_scoped_release release;
-        simd_ml::kernels().sgemm_f16(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
+        simd_ml::kernels().sgemm_f16(trans_b, M, N, K, alpha, A_ptr, K, B_ptr, ldb, beta, C_ptr, N);
     }
     return C_out;
 }
@@ -578,7 +706,8 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
                                           py::array B,
                                           float alpha  = 1.0f,
                                           float beta   = 0.0f,
-                                          py::object C = py::none()) {
+                                          py::object C = py::none(),
+                                          bool trans_b = false) {
     // Accepted: uint16 arrays holding BF16 bit patterns, and ml_dtypes.bfloat16
     // arrays (NumPy itself has no bfloat16 dtype; ml_dtypes registers one with
     // kind 'V' and name "bfloat16"). float16 is rejected: it is IEEE binary16
@@ -605,15 +734,7 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
     check_contiguous(A, "A");
     check_contiguous(B, "B");
 
-    int M = static_cast<int>(A.shape(0));
-    int K = static_cast<int>(A.shape(1));
-    int N = static_cast<int>(B.shape(1));
-
-    if (B.shape(0) != static_cast<py::ssize_t>(K))
-        throw ArgumentError(
-            "Shape mismatch: A is [" + std::to_string(M) + "×" +
-            std::to_string(K) + "] but B is [" +
-            std::to_string(B.shape(0)) + "×" + std::to_string(N) + "]");
+    const auto [M, N, K, ldb] = lowp_shape(A, B, trans_b);
 
     // Allocate or validate FP32 C output
     py::array_t<float> C_out;
@@ -633,7 +754,7 @@ static py::array_t<float> py_sgemm_bf16(py::array A,
 
     {
         py::gil_scoped_release release;
-        simd_ml::kernels().sgemm_bf16(M, N, K, alpha, A_ptr, K, B_ptr, N, beta, C_ptr, N);
+        simd_ml::kernels().sgemm_bf16(trans_b, M, N, K, alpha, A_ptr, K, B_ptr, ldb, beta, C_ptr, N);
     }
     return C_out;
 }
@@ -829,7 +950,7 @@ isa   : str, default "" (the kernels chosen for this CPU, detected_isa()).
 trans_a, trans_b : bool, keyword-only, default False. Use the transpose of
         A / B as stored, without copying it: a linear layer x @ W.T with W
         of shape [out, in] is sgemm(x, W, trans_b=True). The transpose is
-        read while packing (or along rows, for trans_b with M <= 4).
+        read while packing (or along rows, for trans_b with M <= 8: the decode GEMV).
 
 Returns
 -------
@@ -958,9 +1079,9 @@ Useful for checking before requesting isa='avx512' explicitly:
     m.def("sgemm_bf16", &py_sgemm_bf16,
           py::arg("A"), py::arg("B"),
           py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
-          py::arg("C") = py::none(),
+          py::arg("C") = py::none(), py::kw_only(), py::arg("trans_b") = false,
           R"doc(
-BF16-input GEMM: C[float32] = alpha * A[bfloat16] @ B[bfloat16] + beta * C[float32]
+BF16-input GEMM: C[float32] = alpha * A[bfloat16] @ op(B)[bfloat16] + beta * C[float32]
 
 A and B store Brain Float 16 values (same exponent as FP32, 7-bit mantissa).
 Accumulation and C are float32. Runs on every CPU.
@@ -977,6 +1098,11 @@ call makes packed single-threaded products use vdpbf16ps instead; that
 instruction reads BF16 subnormals (|x| < 2^-126) as zero and flushes subnormal
 results, and it ran slower than the default where measured.
 
+With trans_b=True, B is stored [N, K] (a weight matrix as torch.nn.Linear
+stores it) and op(B) = B.T: sgemm_bf16(x, W, trans_b=True) is x @ W.T. For
+up to 8 rows of A (decode) this reads the rows of W in place, converting
+them in registers (docs/DESIGN.md §2.7); larger M packs W.
+
 Input formats accepted
 ----------------------
 uint16:    BF16 bit patterns. From float32 (truncating):
@@ -989,10 +1115,11 @@ format (use sgemm_f16). NumPy itself has no bfloat16 dtype.
 Parameters
 ----------
 A     : ndarray [M, K], uint16 BF16 bit patterns or ml_dtypes.bfloat16, C-contiguous
-B     : ndarray [K, N], uint16 BF16 bit patterns or ml_dtypes.bfloat16, C-contiguous
+B     : ndarray [K, N] (or [N, K] with trans_b), same formats as A, C-contiguous
 alpha : float, default 1.0
 beta  : float, default 0.0  (0 = overwrite C, 1 = accumulate into C)
 C     : ndarray[float32], shape [M, N], optional (allocated if None)
+trans_b : bool, keyword-only, default False. B is stored [N, K]; C = A @ B.T.
 
 Returns
 -------
@@ -1014,9 +1141,9 @@ Example
     m.def("sgemm_f16", &py_sgemm_f16,
           py::arg("A"), py::arg("B"),
           py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
-          py::arg("C") = py::none(),
+          py::arg("C") = py::none(), py::kw_only(), py::arg("trans_b") = false,
           R"doc(
-FP16-input GEMM: C[float32] = alpha * A[float16] @ B[float16] + beta * C[float32]
+FP16-input GEMM: C[float32] = alpha * A[float16] @ op(B)[float16] + beta * C[float32]
 
 A and B must have dtype=np.float16 (IEEE 754 half-precision, 16-bit).
 C (output) is always float32 — accumulation in FP16 would lose precision
@@ -1029,10 +1156,14 @@ RuntimeError on CPUs without F16C.
 Parameters
 ----------
 A     : ndarray[float16], shape [M, K], C-contiguous
-B     : ndarray[float16], shape [K, N], C-contiguous
+B     : ndarray[float16], shape [K, N] (or [N, K] with trans_b), C-contiguous
 alpha : float, default 1.0
 beta  : float, default 0.0  (0 = overwrite C, 1 = accumulate into C)
 C     : ndarray[float32], shape [M, N], optional (allocated if None)
+trans_b : bool, keyword-only, default False. B is stored [N, K] (a weight
+        matrix as torch.nn.Linear stores it); C = A @ B.T. For up to 8 rows
+        of A (decode) the rows of B are read in place and converted in
+        registers (docs/DESIGN.md §2.7); larger M packs B.
 
 Returns
 -------
@@ -1123,6 +1254,14 @@ Example
     }, py::arg("isa"),
           "Make this kernel table the active one for the whole process. Private: used by "
           "`python -m simd_ml_kernels selftest` and the tests to cover every usable table.");
+    m.def("_stream_triad", &py_stream_triad, py::arg("a"), py::arg("b"), py::arg("c"),
+          py::arg("s"), py::arg("threads") = 1,
+          "a = b + s*c over float32 arrays (STREAM triad), on this thread or (threads > 1, "
+          "OpenMP builds) on that many threads. Private: used by `python -m simd_ml_kernels bench`.");
+    m.def("_stream_read", &py_stream_read, py::arg("a"), py::arg("threads") = 1, py::arg("streams") = 4,
+          "Sum of a float32 array (read-only stream) read as `streams` parts side by side, on this "
+          "thread or (threads > 1, OpenMP builds) on that many threads. Private: used by "
+          "`python -m simd_ml_kernels bench`.");
     m.def("_cpu_caches", &py_cpu_caches,
           "Caches of the core this thread runs on, from CPUID leaf 4 / 0x8000001D. "
           "Private: used by `python -m simd_ml_kernels bench` and `info`.");

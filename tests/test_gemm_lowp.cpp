@@ -89,15 +89,16 @@ struct Case {
     float alpha = 1.0f, beta = 0.0f;
     int pad_a = 0, pad_b = 0, pad_c = 0;  // extra elements per row (lda = K + pad_a, ...)
     int offset = 0;                       // elements added to every base pointer
+    bool tb = false;                      // B stored N×K (x·Wᵀ): ldb = K + pad_b
 };
 
 // Runs the case; returns the worst |err| / bound (pass: <= 1), or 1e30 if a
 // padding sentinel of C changed.
 static double run_case(const Fmt& f, const Case& c) {
-    const int lda = c.K + c.pad_a, ldb = c.N + c.pad_b, ldc = c.N + c.pad_c;
+    const int lda = c.K + c.pad_a, ldb = (c.tb ? c.K : c.N) + c.pad_b, ldc = c.N + c.pad_c;
     const float nan = std::nanf("");
     std::vector<uint16_t> A(c.offset + (std::size_t)c.M * lda + 1, f.nan),
-        B(c.offset + (std::size_t)c.K * ldb + 1, f.nan);
+        B(c.offset + (std::size_t)(c.tb ? c.N : c.K) * ldb + 1, f.nan);
     std::vector<float> C(c.offset + (std::size_t)c.M * ldc + 16, nan);
     uint16_t* a = A.data() + c.offset; uint16_t* b = B.data() + c.offset; float* cc = C.data() + c.offset;
     std::vector<float> va((std::size_t)c.M * c.K), vb((std::size_t)c.K * c.N);
@@ -113,7 +114,7 @@ static double run_case(const Fmt& f, const Case& c) {
     for (int p = 0; p < c.K; ++p)
         for (int j = 0; j < c.N; ++j) {
             const uint16_t h = f.enc(vb[(std::size_t)p * c.N + j]);
-            b[(std::size_t)p * ldb + j] = h;
+            b[c.tb ? (std::size_t)j * ldb + p : (std::size_t)p * ldb + j] = h;
             rb[(std::size_t)p * c.N + j] = f.dec(h);
         }
     std::vector<float> c0((std::size_t)c.M * c.N);
@@ -121,7 +122,7 @@ static double run_case(const Fmt& f, const Case& c) {
     if (c.beta == 0.0f) std::fill(c0.begin(), c0.end(), nan);   // beta = 0 must not read C
     for (int i = 0; i < c.M; ++i) std::copy_n(&c0[(std::size_t)i * c.N], c.N, cc + (std::size_t)i * ldc);
 
-    (T->*f.fn)(c.M, c.N, c.K, c.alpha, a, lda, b, ldb, c.beta, cc, ldc);
+    (T->*f.fn)(c.tb, c.M, c.N, c.K, c.alpha, a, lda, b, ldb, c.beta, cc, ldc);
 
     const double gamma = 2.0 * (c.K + 2) * std::ldexp(1.0, -24);
     double worst = 0.0;
@@ -149,9 +150,9 @@ static double run_case(const Fmt& f, const Case& c) {
 static bool check(const Fmt& f, const char* what, const Case& c) {
     const double w = run_case(f, c);
     const bool pass = w <= 1.0;
-    printf("  %-4s %-7s %5dx%5dx%5d a=%.1f b=%.1f pad=%d/%d/%d off=%d  err/bound=%-8.3g %s\n",
-           f.name, what, c.M, c.N, c.K, c.alpha, c.beta, c.pad_a, c.pad_b, c.pad_c, c.offset, w,
-           pass ? "PASS" : "FAIL");
+    printf("  %-4s %-7s %5dx%5dx%5d%s a=%.1f b=%.1f pad=%d/%d/%d off=%d  err/bound=%-8.3g %s\n",
+           f.name, what, c.M, c.N, c.K, c.tb ? " tb" : "   ", c.alpha, c.beta, c.pad_a, c.pad_b,
+           c.pad_c, c.offset, w, pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -187,6 +188,32 @@ static bool test_shapes(const Fmt& f) {
     return ok;
 }
 
+// trans_b (B stored N×K, x·Wᵀ): the row-streaming GEMV for M <= kDotRowsMax
+// (K around its 16- and 32-value steps, N around its 4-row blocks, unaligned
+// rows), and packing with transposed B above that.
+static bool test_trans_b(const Fmt& f) {
+    int kc = 0, mc = 0, nc = 0;
+    T->sgemm_blocking(&kc, &mc, &nc);
+    bool ok = true;
+    for (int K : {1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 47, 300, 4099})
+        ok &= check(f, "gemv", Case{1, 37, K, 1.0f, 0.0f, 0, 0, 0, 0, true});
+    for (int N : {1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17})   // around the 4- and 8-row blocks
+        ok &= check(f, "gemv", Case{1, N, 70, 1.0f, 0.0f, 0, 0, 0, 0, true});
+    for (int M : {2, 4, 7, simd_ml::gemm::kDotRowsMax, simd_ml::gemm::kDotRowsMax + 1, 97})
+        ok &= check(f, "tb", Case{M, 45, 133, 1.0f, 0.0f, 0, 0, 0, 0, true});
+    for (int off : {0, 1})
+        for (int M : {1, 5, 40}) {
+            ok &= check(f, "tb str", Case{M, 29, 51, 1.0f, 0.5f, 3, 5, 7, off, true});
+            ok &= check(f, "tb str", Case{M, 33, 64, -2.0f, 0.0f, 1, 1, 0, off, true});
+        }
+    if (kc > 0) {
+        ok &= check(f, "tb kc", Case{1, 33, 2 * kc + 3, 1.0f, 0.0f, 0, 0, 0, 0, true});
+        ok &= check(f, "tb kc", Case{97, 113, kc + 1, 1.0f, 0.0f, 0, 0, 0, 0, true});
+        ok &= check(f, "tb nc", Case{29, nc + 1, 19, 1.0f, 0.0f, 0, 0, 0, 0, true});
+    }
+    return ok;
+}
+
 // K == 0: C = beta·C, beta = 0 overwrites NaN; M or N == 0: nothing written.
 static bool test_degenerate(const Fmt& f) {
     bool ok = true;
@@ -195,18 +222,24 @@ static bool test_degenerate(const Fmt& f) {
         for (float beta : {0.0f, 0.5f}) {
             std::vector<float> C((std::size_t)M * N, beta == 0.0f ? std::nanf("") : 3.0f);
             const uint16_t dummy = 0x3c00;
-            (T->*f.fn)(M, N, 0, 1.0f, &dummy, 1, &dummy, N, beta, C.data(), N);
-            const float expect = beta == 0.0f ? 0.0f : beta * 3.0f;
-            bool pass = true;
-            for (float v : C) pass &= v == expect;
-            printf("  %-4s K=0 M=%-3d beta=%.1f: %s\n", f.name, M, beta, pass ? "PASS" : "FAIL");
-            ok &= pass;
+            for (bool tb : {false, true}) {
+                std::vector<float> Ct = C;
+                (T->*f.fn)(tb, M, N, 0, 1.0f, &dummy, 1, &dummy, tb ? 1 : N, beta, Ct.data(), N);
+                const float expect = beta == 0.0f ? 0.0f : beta * 3.0f;
+                bool pass = true;
+                for (float v : Ct) pass &= v == expect;
+                printf("  %-4s K=0 M=%-3d beta=%.1f%s: %s\n", f.name, M, beta, tb ? " tb" : "",
+                       pass ? "PASS" : "FAIL");
+                ok &= pass;
+            }
         }
     }
     float sentinel = 7.0f;
     const uint16_t one = f.enc(1.0f);
-    (T->*f.fn)(0, 5, 3, 1.0f, &one, 3, &one, 5, 0.0f, &sentinel, 5);
-    (T->*f.fn)(5, 0, 3, 1.0f, &one, 3, &one, 1, 0.0f, &sentinel, 1);
+    for (bool tb : {false, true}) {
+        (T->*f.fn)(tb, 0, 5, 3, 1.0f, &one, 3, &one, tb ? 3 : 5, 0.0f, &sentinel, 5);
+        (T->*f.fn)(tb, 5, 0, 3, 1.0f, &one, 3, &one, tb ? 3 : 1, 0.0f, &sentinel, 1);
+    }
     printf("  %-4s M=0 / N=0 write nothing: %s\n", f.name, sentinel == 7.0f ? "PASS" : "FAIL");
     return ok && sentinel == 7.0f;
 }
@@ -221,7 +254,7 @@ static bool test_nan(const Fmt& f) {
         A[(std::size_t)i0 * K + 3] = f.nan;
         B[(std::size_t)(K - 1) * N + j0] = f.nan;
         std::vector<float> C((std::size_t)M * N, 0.0f);
-        (T->*f.fn)(M, N, K, 1.0f, A.data(), K, B.data(), N, 0.0f, C.data(), N);
+        (T->*f.fn)(false, M, N, K, 1.0f, A.data(), K, B.data(), N, 0.0f, C.data(), N);
         bool pass = true;
         for (int i = 0; i < M; ++i)
             for (int j = 0; j < N; ++j) {
@@ -229,6 +262,25 @@ static bool test_nan(const Fmt& f) {
                 pass &= (i == i0 || j == j0) ? std::isnan(v) : v == -0.125f * K;
             }
         printf("  %-4s NaN row/column propagation %dx%dx%d: %s\n", f.name, M, N, K, pass ? "PASS" : "FAIL");
+        ok &= pass;
+    }
+    // trans_b: a NaN in x(i0, p) or in row j0 of W (in the K tail, past the
+    // last full vector step) makes exactly row i0 / column j0 of C NaN; GEMV
+    // (M = 1, 3) and packed (M = 40).
+    for (int M : {1, 3, 40}) {
+        const int N = 23, K = 77, i0 = M - 1, j0 = 13;
+        std::vector<uint16_t> A((std::size_t)M * K, f.enc(0.25f)), W((std::size_t)N * K, f.enc(-0.5f));
+        if (M > 1) A[(std::size_t)i0 * K + 2] = f.nan;
+        W[(std::size_t)j0 * K + K - 3] = f.nan;
+        std::vector<float> C((std::size_t)M * N, 0.0f);
+        (T->*f.fn)(true, M, N, K, 1.0f, A.data(), K, W.data(), K, 0.0f, C.data(), N);
+        bool pass = true;
+        for (int i = 0; i < M; ++i)
+            for (int j = 0; j < N; ++j) {
+                const float v = C[(std::size_t)i * N + j];
+                pass &= ((M > 1 && i == i0) || j == j0) ? std::isnan(v) : v == -0.125f * K;
+            }
+        printf("  %-4s NaN row/column propagation %dx%dx%d tb: %s\n", f.name, M, N, K, pass ? "PASS" : "FAIL");
         ok &= pass;
     }
     return ok;
@@ -265,7 +317,7 @@ static bool test_subnormals(const Fmt& f) {
         for (int i = 0; i < M; ++i) A[(std::size_t)i * K + i % K] = sub[i & 1];
         for (int p = 0; p < K; ++p) B[(std::size_t)p * N + p % N] = scale;   // diagonal
         std::vector<float> C((std::size_t)M * N, 0.0f);
-        (T->*f.fn)(M, N, K, 1.0f, A.data(), K, B.data(), N, 0.0f, C.data(), N);
+        (T->*f.fn)(false, M, N, K, 1.0f, A.data(), K, B.data(), N, 0.0f, C.data(), N);
         const bool daz = uses_vdpbf16ps(f, M, N, K);
         bool pass = true;
         for (int i = 0; i < M; ++i)
@@ -300,6 +352,7 @@ int run_lowp_gemm_tests() {
             bool ok = true;
             for (const Fmt* f : {&kF16, &kBF16}) {
                 ok &= test_shapes(*f);
+                ok &= test_trans_b(*f);
                 ok &= test_degenerate(*f);
                 ok &= test_nan(*f);
                 ok &= test_subnormals(*f);
@@ -320,6 +373,7 @@ int run_lowp_gemm_tests() {
             if (t.isa != simd_ml::Isa::avx512) return true;
             T = &t;
             bool ok = test_shapes(kBF16);
+            ok &= test_trans_b(kBF16);
             ok &= test_degenerate(kBF16);
             ok &= test_nan(kBF16);
             ok &= test_subnormals(kBF16);

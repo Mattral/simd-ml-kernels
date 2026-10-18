@@ -34,14 +34,14 @@ void set_bf16_dot(bool on) noexcept;
 
 /**
  * sgemm_bf16_avx2 / sgemm_bf16_avx512 — the per-ISA implementations; call
- * through kernels().sgemm_bf16. Same layout, beta and exception rules as
- * sgemm_f16_avx2.
+ * through kernels().sgemm_bf16. Same layout, trans_b, beta and exception
+ * rules as sgemm_f16_avx2.
  */
-void sgemm_bf16_avx2(int M, int N, int K, float alpha,
+void sgemm_bf16_avx2(bool trans_b, int M, int N, int K, float alpha,
                      const std::uint16_t* A, int lda,
                      const std::uint16_t* B, int ldb,
                      float beta, float* C, int ldc);
-void sgemm_bf16_avx512(int M, int N, int K, float alpha,
+void sgemm_bf16_avx512(bool trans_b, int M, int N, int K, float alpha,
                        const std::uint16_t* A, int lda,
                        const std::uint16_t* B, int ldb,
                        float beta, float* C, int ldc);
@@ -49,7 +49,8 @@ void sgemm_bf16_avx512(int M, int N, int K, float alpha,
 /**
  * sgemm_bf16_avx512bf16 — the vdpbf16ps path (avx512bf16_gemm.cpp), compiled
  * when the compiler supports -mavx512bf16 (SIMD_ML_HAVE_AVX512BF16). Call only
- * if bf16_avx512bf16_available(); sgemm_bf16_avx512 checks bf16_dot_enabled(). Unlike
+ * if bf16_avx512bf16_available(); sgemm_bf16_avx512 checks bf16_dot_enabled()
+ * and sends only products without trans_b here. Unlike
  * the conversion path, BF16 subnormal inputs are read as zero and subnormal
  * results are flushed to zero (the instruction ignores MXCSR).
  */

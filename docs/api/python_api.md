@@ -44,9 +44,25 @@ y = simd_ml_kernels.sgemm(A, W, trans_b=True)          # A @ W.T, shape [256, 12
 
 `trans_a` / `trans_b` (keyword-only) mean A is stored `[K, M]` / B is stored
 `[N, K]`. The transpose is read while packing the panels (8×8 register
-transposes for B), or, for `trans_b` with `M ≤ 16`, by a dot-product path
-along rows of A and B. `examples/linear_trans_b.py` runs both and checks them
-against PyTorch.
+transposes for B), or, for `trans_b` with `M ≤ 8`, by the decode GEMV: dot
+products along rows of A and B, B read in place (`docs/DESIGN.md` §2.7).
+`examples/linear_trans_b.py` runs both and checks them against PyTorch.
+
+### `sgemm_f16(A, B, alpha=1.0, beta=0.0, C=None, *, trans_b=False)` / `sgemm_bf16(...)` → `np.ndarray[float32]`
+
+FP16 (`np.float16`) or BF16 (uint16 bit patterns or `ml_dtypes.bfloat16`)
+inputs, FP32 accumulation and output: `C = alpha * A @ op(B) + beta * C`.
+Both conversions are exact, so the error bound is the FP32 GEMM's,
+`|C − A·op(B)| ≤ 2·K·u·(|A|·|op(B)|)`, u = 2⁻²⁴. With `trans_b=True`
+(keyword-only) B is stored `[N, K]`, a weight matrix in `torch.nn.Linear`'s
+layout, and op(B) = Bᵀ; up to 8 rows of A take the decode GEMV, which reads
+the rows of B in place and converts them in registers (2 bytes per weight).
+
+```python
+W = np.random.randn(4096, 4096).astype(np.float16)    # [out, in]
+x = np.random.randn(1, 4096).astype(np.float16)
+y = simd_ml_kernels.sgemm_f16(x, W, trans_b=True)     # x @ W.T, float32 [1, 4096]
+```
 
 **Implementation**: a 6×16 AVX2 register tile (12 accumulators) run on A and B in place for small products and inside the Goto/BLIS 5 loops with packed panels otherwise, block sizes from the CPU caches (`build_info()["sgemm_blocking"]`); 12×32 (24 accumulators) on AVX-512; a plain loop in the scalar table. See `docs/DESIGN.md` §2.
 

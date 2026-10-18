@@ -571,6 +571,37 @@ class TestSizeZero:
     def test_empty_output(self, fn, M, N):
         assert self._gemm(fn, M, 3, N).shape == (M, N)
 
+    @pytest.mark.parametrize("fn", ["sgemm", "sgemm_f16", "sgemm_bf16"])
+    def test_trans_b_k_zero_beta_zero_overwrites_nan(self, fn):
+        # B is [N, 0] with trans_b; the GEMV path (M = 1) must not read it.
+        mk = {"sgemm": lambda s: np.ones(s, np.float32), "sgemm_f16": lambda s: np.ones(s, np.float16),
+              "sgemm_bf16": lambda s: _bf16_bits(np.ones(s))}[fn]
+        C = np.full((1, 5), np.nan, np.float32)
+        getattr(simd_ml_kernels, fn)(mk((1, 0)), mk((5, 0)), C=C, beta=0.0, trans_b=True)
+        np.testing.assert_array_equal(C, 0.0)
+
+
+class TestLowpTransB:
+    """sgemm_f16 / sgemm_bf16 with trans_b=True take B as [N, K]."""
+
+    @pytest.mark.parametrize("fn", ["sgemm_f16", "sgemm_bf16"])
+    def test_shape_mismatch_names_the_transpose(self, fn):
+        mk = (lambda s: np.ones(s, np.float16)) if fn == "sgemm_f16" else (lambda s: _bf16_bits(np.ones(s)))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match=r"B\.T is \[3×5\]"):
+            getattr(simd_ml_kernels, fn)(mk((2, 4)), mk((5, 3)), trans_b=True)
+
+    @pytest.mark.parametrize("fn", ["sgemm_f16", "sgemm_bf16"])
+    def test_trans_b_is_keyword_only(self, fn):
+        mk = (lambda s: np.ones(s, np.float16)) if fn == "sgemm_f16" else (lambda s: _bf16_bits(np.ones(s)))
+        with pytest.raises(TypeError):
+            getattr(simd_ml_kernels, fn)(mk((2, 4)), mk((5, 4)), 1.0, 0.0, None, True)
+
+    @pytest.mark.parametrize("fn", ["sgemm_f16", "sgemm_bf16"])
+    def test_trans_b_output_shape(self, fn):
+        mk = (lambda s: np.ones(s, np.float16)) if fn == "sgemm_f16" else (lambda s: _bf16_bits(np.ones(s)))
+        out = getattr(simd_ml_kernels, fn)(mk((2, 4)), mk((5, 4)), trans_b=True)
+        np.testing.assert_array_equal(out, np.full((2, 5), 4.0, np.float32))
+
     @pytest.mark.parametrize("shape", [(0,), (3, 0), (0, 5)])
     def test_layer_norm_empty(self, shape):
         assert simd_ml_kernels.layer_norm(np.ones(shape, np.float32)).shape == shape

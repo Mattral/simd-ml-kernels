@@ -183,6 +183,73 @@ class TestGEMM:
         assert C.dtype == np.float32 and C.shape == (M, N)
         assert (err <= bound).all(), f"{fmt} [{M}x{N}x{K}]: max err/bound {np.max(err / bound):.3g}"
 
+    @staticmethod
+    def _to_fmt(x, fmt):
+        """(array the kernel takes, its exact float64 values) for fp32 / f16 / bf16."""
+        if fmt == "fp32":
+            return x, x.astype(np.float64)
+        if fmt == "f16":
+            h = x.astype(np.float16)
+            return h, h.astype(np.float64)
+        u = x.view(np.uint32).astype(np.uint64)          # BF16, round to nearest even
+        b = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
+        return b, (b.astype(np.uint32) << 16).view(np.float32).astype(np.float64)
+
+    @staticmethod
+    def _gemm_fn(fmt):
+        return {"fp32": simd_ml_kernels.sgemm, "f16": simd_ml_kernels.sgemm_f16,
+                "bf16": simd_ml_kernels.sgemm_bf16}[fmt]
+
+    @pytest.mark.parametrize("fmt", ["fp32", "f16", "bf16"])
+    @pytest.mark.parametrize("M,N,K", [
+        (1, 37, 1), (1, 37, 15), (1, 37, 17), (1, 37, 33), (1, 1, 70), (1, 3, 70), (1, 5, 70),
+        (1, 4096, 300), (1, 64, 4099), (1, 17, 70),       # decode GEMV: K, N tails
+        (4, 33, 1027), (8, 45, 133),                      # GEMV, a few rows of x (M <= 8)
+        (9, 45, 133), (97, 113, 769),                     # packed with transposed B
+    ])
+    def test_trans_b_vs_float64(self, fmt, M, N, K):
+        """x @ W.T with W stored [N, K] (trans_b): the bound of the FP32 GEMM,
+        |C - C64| <= 2(K+2)u * (|A||W|ᵀ), u = 2^-24, on the exact input values."""
+        (A, Ar), (W, Wr) = self._to_fmt(rand_matrix(M, K), fmt), self._to_fmt(rand_matrix(N, K), fmt)
+        C = self._gemm_fn(fmt)(A, W, trans_b=True)
+        bound = 2 * (K + 2) * 2.0 ** -24 * (np.abs(Ar) @ np.abs(Wr).T)
+        err = np.abs(C.astype(np.float64) - Ar @ Wr.T)
+        assert C.dtype == np.float32 and C.shape == (M, N)
+        assert (err <= bound).all(), f"{fmt} [{M}x{N}x{K}] tb: max err/bound {np.max(err / bound):.3g}"
+
+    @pytest.mark.parametrize("fmt", ["fp32", "f16", "bf16"])
+    def test_trans_b_unaligned_rows_alpha_beta(self, fmt):
+        """GEMV on x and W that start one element past an aligned address
+        (rows of W at odd 2- or 4-byte offsets), with alpha and beta."""
+        M, N, K = 1, 21, 77
+        (A, Ar), (W, Wr) = self._to_fmt(rand_matrix(M, K), fmt), self._to_fmt(rand_matrix(N, K), fmt)
+
+        def shifted(x):
+            buf = np.empty(x.size + 1, x.dtype)
+            out = buf[1:].reshape(x.shape)
+            out[...] = x
+            return out
+        A1, W1 = shifted(A), shifted(W)
+        assert A1.ctypes.data % 8 != 0 and W1.ctypes.data % 8 != 0
+        y0 = rand_matrix(M, N)
+        y = y0.copy()
+        self._gemm_fn(fmt)(A1, W1, C=y, alpha=-1.5, beta=0.5, trans_b=True)
+        ref = -1.5 * (Ar @ Wr.T) + 0.5 * y0.astype(np.float64)
+        bound = 2 * (K + 2) * 2.0 ** -24 * (1.5 * (np.abs(Ar) @ np.abs(Wr).T) + 0.5 * np.abs(y0))
+        assert (np.abs(y - ref) <= bound).all()
+
+    @pytest.mark.parametrize("fmt", ["fp32", "f16", "bf16"])
+    def test_trans_b_nan_propagates(self, fmt):
+        """A NaN in row j0 of W (inside the K tail) makes exactly y[:, j0] NaN."""
+        M, N, K, j0 = 1, 9, 45, 6
+        A, _ = self._to_fmt(np.full((M, K), 0.5, np.float32), fmt)
+        Wf = np.full((N, K), 0.25, np.float32)
+        Wf[j0, K - 2] = np.nan
+        W, _ = self._to_fmt(Wf, fmt)
+        y = self._gemm_fn(fmt)(A, W, trans_b=True)
+        assert np.isnan(y[:, j0]).all()
+        assert (np.delete(y, j0, axis=1) == 0.125 * K).all()
+
     @pytest.mark.parametrize("path", ["table", "fp32_convert"])
     @pytest.mark.parametrize("trans_b", [False, True])
     @pytest.mark.parametrize("M,N,K,zp", [
@@ -220,7 +287,7 @@ class TestGEMM:
 
     @pytest.mark.parametrize("trans_a,trans_b", [(False, True), (True, False), (True, True)])
     @pytest.mark.parametrize("M,N,K", [
-        (1, 300, 257),    # trans_b: dot-product path (M <= 4)
+        (1, 300, 257),    # trans_b: dot-product path (M <= 8)
         (4, 33, 1027),    # dot path, K tail
         (5, 17, 9),       # trans_b packed, tiny
         (64, 64, 64),

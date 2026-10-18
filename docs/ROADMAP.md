@@ -182,9 +182,23 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   0.66–0.70× PyTorch's quantized linear at N = 512–2048), FP32 conversion path (memory only) without
   VNNI. Left for W5: single-row (GEMV) shapes, where both low-precision
   families lose to PyTorch.
-- **W5 — CPU LLM decode kernels.** Quantized GEMV with fused dequantization,
-  RMSNorm/SwiGLU epilogues, flash-decoding attention; judged by % of measured
-  STREAM bandwidth vs PyTorch CPU and llama.cpp.
+- **W5 — CPU LLM decode kernels**, judged by achieved GB/s as a % of the
+  measured single-core read stream (and STREAM triad) against PyTorch CPU and
+  llama.cpp, one PR per kernel family, in this order:
+  1. *Bandwidth roofs and the FP32/FP16/BF16 decode GEMV* (in review): read
+     stream and STREAM triad in `bench`; `x @ W.T` with W [N, K] streamed in
+     place for up to 8 rows (`trans_b` for `sgemm_f16`/`sgemm_bf16`);
+     DESIGN.md §2.7. AVX-512 speed: pending a cloud run.
+  2. Q8_0 weight-only GEMV with fused dequantization (`quantize_q8_0`,
+     `gemv_q8_0`; ggml `block_q8_0` layout, group 32; x quantized to Q8 blocks
+     once per call, integer dots with VNNI where available), compared with
+     llama.cpp `test-backend-ops perf -o MUL_MAT`; `sgemm_u8s8`'s single-row
+     case routed to a row-streaming VNNI path.
+  3. Q4_0 (`quantize_q4_0`, `gemv_q4_0`; ggml `block_q4_0`, rounding as
+     `quantize_row_q4_0_ref`).
+  4. Fused RMSNorm and SwiGLU (`silu(gate) * up`) epilogues.
+  5. Flash-decoding attention for one query (online softmax, GQA, split-K).
+  6. Opt-in row-split OpenMP GEMV, judged against the all-core roofs.
 - **W6 — end-to-end decode loop** against PyTorch and llama.cpp.
 
 ---

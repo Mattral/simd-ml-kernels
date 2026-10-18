@@ -39,7 +39,8 @@ constexpr int kNumIsa = 3;
 using SgemmFn  = void (*)(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
                           const float* A, int lda, const float* B, int ldb,
                           float beta, float* C, int ldc);
-using Sgemm16Fn = void (*)(int M, int N, int K, float alpha,
+/** FP16/BF16 inputs, FP32 accumulate and output; trans_b: B stored N×K (x·Wᵀ). */
+using Sgemm16Fn = void (*)(bool trans_b, int M, int N, int K, float alpha,
                            const std::uint16_t* A, int lda, const std::uint16_t* B, int ldb,
                            float beta, float* C, int ldc);
 /** C[i][j] = a_scale·b_scales[j]·Σ_k (A[i][k] − a_zero_point)·op(B)[k][j]; gemm/int8_gemm.hpp. */

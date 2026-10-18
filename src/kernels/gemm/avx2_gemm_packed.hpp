@@ -34,6 +34,14 @@ void sgemm_direct_avx2(bool trans_a, bool trans_b, int M, int N, int K,
                        float beta,
                        float* C, int ldc);
 
+/**
+ * kDotRowsMax — with trans_b (B stored N×K, x·Wᵀ) and at most this many rows
+ * of op(A), every table's FP32/FP16/BF16 GEMM takes the row-streaming dot
+ * path (the decode GEMV, DESIGN.md §2.7) instead of packing B; the cut-off is
+ * measured in avx2_gemm_packed.cpp (choose_path).
+ */
+static constexpr int kDotRowsMax = 8;
+
 /** Whether sgemm_packed_avx2 takes the direct path for this shape. */
 bool sgemm_avx2_prefers_direct(int M, int N, int K) noexcept;
 

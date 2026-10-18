@@ -4,6 +4,31 @@ All notable user-visible changes. The project follows semantic versioning;
 before 1.0, minor versions may contain breaking changes, which are listed
 under **Changed** with a migration note.
 
+## Unreleased
+
+### Added
+- `sgemm_f16(..., *, trans_b=False)` and `sgemm_bf16(..., *, trans_b=False)`
+  (keyword-only, as `sgemm`'s): B stored `[N, K]`, C = A·Bᵀ, so a weight
+  matrix in `torch.nn.Linear`'s layout needs no transpose copy. Existing
+  calls are unchanged.
+- Decode GEMV: with `trans_b` and at most 8 rows of A, `sgemm`, `sgemm_f16`
+  and `sgemm_bf16` stream the rows of B in place (FP16/BF16 converted in
+  registers, no packing) on the scalar, AVX2 and AVX-512 tables.
+  docs/DESIGN.md §2.7.
+- `python -m simd_ml_kernels bench`: memory-bandwidth roofs (a read-only
+  stream and the STREAM triad, arrays of at least 4× the last-level cache,
+  single core; `machine.stream_read_gbs`, `machine.stream_triad_gbs`) and
+  decode GEMV cases (1×4096×4096, 1×4096×11008, 1×2048×8192; FP32, FP16,
+  BF16) reported in GB/s and % of both roofs, against PyTorch's `F.linear`
+  and, for FP32, OpenBLAS sgemv.
+
+### Changed
+- `sgemm(..., trans_b=True)` takes the dot-product (GEMV) path for at most 8
+  rows of A instead of 16: from 9 rows on, packing B was measured faster at
+  K = 4096 (docs/DESIGN.md §2.7). The scalar table computes x·Wᵀ as dot
+  products along rows. Results change only by rounding (a different
+  summation order, within the documented bound).
+
 ## 0.3.0rc1 — 2026-10-18
 
 ### Added

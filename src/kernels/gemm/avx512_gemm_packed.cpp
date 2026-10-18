@@ -197,6 +197,71 @@ void pack_b(const typename E::T* B, std::ptrdiff_t ldb, bool trans, int kc, int 
     }
 }
 
+// ─── trans_b with few rows: row-streaming GEMV (as in the AVX2 unit) ─────────
+/** Lanes [0, n) of a 16-lane mask; n may be <= 0 or >= 16. */
+SIMD_ML_ALWAYS_INLINE __mmask16 first_lanes(int n) noexcept {
+    return static_cast<__mmask16>(n >= 16 ? 0xFFFFu : n <= 0 ? 0u : (1u << n) - 1u);
+}
+
+/**
+ * dot_rows<EB, J> — C[i][j..j+J) += alpha · Σ_p a[p] · B[j+q][p], J <= 8 rows
+ * of B (stored N×K, elements EB::T) and one FP32 row a: J streams of B, 32
+ * values per row per step in 2 ZMM accumulators (16 for J = 8, of 32
+ * registers), FP16/BF16 converted in registers (16 values per conversion), K
+ * tail with masked loads. Bound by reading B, like the AVX2 version, with the
+ * same row counts (4 FP32, 8 FP16/BF16; chosen on the AVX2 core); its speed
+ * is measured on AVX-512 hardware only (docs/BENCHMARKS.md).
+ */
+template <class EB, int J>
+SIMD_ML_ALWAYS_INLINE void dot_rows(int K, const float* __restrict__ a, const typename EB::T* __restrict__ B,
+                                    std::ptrdiff_t ldb, float* __restrict__ c, float alpha) noexcept {
+    __m512 acc[J][2];
+    for (int q = 0; q < J; ++q) acc[q][0] = acc[q][1] = _mm512_setzero_ps();
+    int p = 0;
+    for (; p + 32 <= K; p += 32) {
+        const __m512 a0 = _mm512_loadu_ps(a + p), a1 = _mm512_loadu_ps(a + p + 16);
+        for (int q = 0; q < J; ++q) {
+            const typename EB::T* b = B + q * ldb + p;
+            acc[q][0] = _mm512_fmadd_ps(a0, EB::sixteen(0xFFFF, b), acc[q][0]);
+            acc[q][1] = _mm512_fmadd_ps(a1, EB::sixteen(0xFFFF, b + 16), acc[q][1]);
+        }
+    }
+    if (p < K) {
+        const __mmask16 m0 = first_lanes(K - p), m1 = first_lanes(K - p - 16);
+        const __m512 a0 = _mm512_maskz_loadu_ps(m0, a + p), a1 = _mm512_maskz_loadu_ps(m1, a + p + 16);
+        for (int q = 0; q < J; ++q) {
+            const typename EB::T* b = B + q * ldb + p;
+            acc[q][0] = _mm512_fmadd_ps(a0, EB::sixteen(m0, b), acc[q][0]);
+            acc[q][1] = _mm512_fmadd_ps(a1, EB::sixteen(m1, b + 16), acc[q][1]);
+        }
+    }
+    for (int q = 0; q < J; ++q) c[q] += alpha * _mm512_reduce_add_ps(_mm512_add_ps(acc[q][0], acc[q][1]));
+}
+
+/** C (prescaled by beta) += alpha · A · Bᵀ, A FP32, B stored N×K (EB::T), R rows of B at a time. */
+template <class EB>
+void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
+                      const typename EB::T* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
+    constexpr int R = sizeof(typename EB::T) == 2 ? 8 : 4;
+    for (int j = 0; j < N; j += R) {
+        const typename EB::T* Bj = B + j * ldb;
+        for (int i = 0; i < M; ++i) {
+            const float* a = A + i * lda;
+            float* c = C + i * ldc + j;
+            switch (std::min(R, N - j)) {
+                case 8: if constexpr (R >= 8) dot_rows<EB, 8>(K, a, Bj, ldb, c, alpha); break;
+                case 7: if constexpr (R >= 7) dot_rows<EB, 7>(K, a, Bj, ldb, c, alpha); break;
+                case 6: if constexpr (R >= 6) dot_rows<EB, 6>(K, a, Bj, ldb, c, alpha); break;
+                case 5: if constexpr (R >= 5) dot_rows<EB, 5>(K, a, Bj, ldb, c, alpha); break;
+                case 4: dot_rows<EB, 4>(K, a, Bj, ldb, c, alpha); break;
+                case 3: dot_rows<EB, 3>(K, a, Bj, ldb, c, alpha); break;
+                case 2: dot_rows<EB, 2>(K, a, Bj, ldb, c, alpha); break;
+                default: dot_rows<EB, 1>(K, a, Bj, ldb, c, alpha); break;
+            }
+        }
+    }
+}
+
 struct Blocking { int kc, mc, nc; };
 
 const Blocking& blocking() noexcept {
@@ -330,11 +395,32 @@ void packed(int M, int N, int K, float alpha, const Operands<E>& op, float* C, s
 
 /** FP16/BF16 packed path: conversion in pack_a/pack_b, the 12×32 FP32 kernel inside. */
 template <class E>
-void sgemm_lowp_packed(int M, int N, int K, float alpha, const typename E::T* A, int lda,
+void sgemm_lowp_packed(bool tb, int M, int N, int K, float alpha, const typename E::T* A, int lda,
                        const typename E::T* B, int ldb, float beta, float* C, int ldc) {
     scale_matrix_c(C, M, N, ldc, beta);
     if (K == 0) return;
-    packed<E>(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, false}, C, ldc);
+    packed<E>(M, N, K, alpha, Operands<E>{A, lda, false, B, ldb, tb}, C, ldc);
+}
+
+/**
+ * FP16/BF16 with trans_b and at most kDotRowsMax rows (x·Wᵀ, decode): the
+ * rows of A converted to FP32 once, then the row-streaming GEMV on B in place.
+ */
+template <class E>
+void sgemm_lowp_dot(int M, int N, int K, float alpha, const typename E::T* A, int lda,
+                    const typename E::T* B, int ldb, float beta, float* C, int ldc) {
+    scale_matrix_c(C, M, N, ldc, beta);
+    if (K == 0) return;
+    float* Af = thread_buffers().get_a(static_cast<std::size_t>(M) * K);
+    for (int i = 0; i < M; ++i) {
+        const typename E::T* src = A + static_cast<std::ptrdiff_t>(i) * lda;
+        float* dst = Af + static_cast<std::ptrdiff_t>(i) * K;
+        for (int p = 0; p < K; p += 16) {
+            const __mmask16 m = first_lanes(K - p);
+            _mm512_mask_storeu_ps(dst + p, m, E::sixteen(m, src + p));
+        }
+    }
+    gemm_dot_trans_b<E>(M, N, K, alpha, Af, K, B, ldb, C, ldc);
 }
 
 }  // namespace
@@ -351,9 +437,14 @@ void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K,
                          float beta,
                          float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
-    // Same unpacked paths as the AVX2 table (they are in the AVX2 unit).
-    const bool unpacked = trans_b ? (!trans_a && M <= 16) : sgemm_avx2_prefers_direct(M, N, K);
-    if (unpacked) {
+    // x·Wᵀ with a few rows: this unit's row-streaming GEMV. Other small
+    // products: the AVX2 direct path (in the AVX2 unit).
+    if (trans_b && !trans_a && M <= kDotRowsMax) {
+        scale_matrix_c(C, M, N, ldc, beta);
+        if (K > 0) gemm_dot_trans_b<F32>(M, N, K, alpha, A, lda, B, ldb, C, ldc);
+        return;
+    }
+    if (!trans_b && sgemm_avx2_prefers_direct(M, N, K)) {
         sgemm_direct_avx2(trans_a, trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
@@ -362,14 +453,17 @@ void sgemm_packed_avx512(bool trans_a, bool trans_b, int M, int N, int K,
     packed<F32>(M, N, K, alpha, Operands<F32>{A, lda, trans_a, B, ldb, trans_b}, C, ldc);
 }
 
-// Small products take the AVX2 direct path, as for FP32.
-void sgemm_f16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+// x·Wᵀ with a few rows: the row-streaming GEMV; other small products: the AVX2
+// direct path, as for FP32.
+void sgemm_f16_avx512(bool trans_b, int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                       const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
-    if (sgemm_avx2_prefers_direct(M, N, K))
-        sgemm_f16_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    if (trans_b && M <= kDotRowsMax)
+        sgemm_lowp_dot<F16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    else if (!trans_b && sgemm_avx2_prefers_direct(M, N, K))
+        sgemm_f16_avx2(false, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
     else
-        sgemm_lowp_packed<F16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        sgemm_lowp_packed<F16>(trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 // INT8: AVX512_VNNI (avx512vnni_gemm.cpp) where the CPU has it, else the AVX2
@@ -389,20 +483,25 @@ void sgemm_u8s8_avx512(bool trans_b, int M, int N, int K, const std::uint8_t* A,
 // Packed shapes convert at pack time and run the FP32 kernel. vdpbf16ps
 // (avx512bf16_gemm.cpp) is opt-in, SIMD_ML_BF16_DOT=1 with AVX512_BF16 and one
 // thread: on Emerald Rapids it ran at 64-73% of this path (DESIGN.md §4.1).
-void sgemm_bf16_avx512(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+// The vdpbf16ps path has no trans_b; x·Wᵀ goes to the GEMV or packing.
+void sgemm_bf16_avx512(bool trans_b, int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                        const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
-    if (sgemm_avx2_prefers_direct(M, N, K)) {
-        sgemm_bf16_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    if (trans_b && M <= kDotRowsMax) {
+        sgemm_lowp_dot<BF16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+    if (!trans_b && sgemm_avx2_prefers_direct(M, N, K)) {
+        sgemm_bf16_avx2(false, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 #ifdef SIMD_ML_HAVE_AVX512BF16
-    if (bf16_dot_enabled() && gemm_threads(M, N, K, MR, NR) == 1) {
+    if (!trans_b && bf16_dot_enabled() && gemm_threads(M, N, K, MR, NR) == 1) {
         sgemm_bf16_avx512bf16(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 #endif
-    sgemm_lowp_packed<BF16>(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    sgemm_lowp_packed<BF16>(trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 }  // namespace gemm
