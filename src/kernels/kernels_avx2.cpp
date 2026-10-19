@@ -10,6 +10,7 @@
 #include "gemm/f16_gemm.hpp"
 #include "gemm/int8_gemm.hpp"
 #include "intrinsic_gelu.hpp"
+#include "quant/q8_0.hpp"
 
 #ifndef SIMD_ML_UNIT_FLAGS
 #  define SIMD_ML_UNIT_FLAGS "unknown"
@@ -22,6 +23,7 @@ const KernelTable& kernel_table_avx2() noexcept {
         Isa::avx2, "avx2", SIMD_ML_UNIT_FLAGS, "6x16 (12 YMM accumulators)",
         &gemm::sgemm_blocking_avx2,
         &gemm::sgemm_packed_avx2, &gemm::sgemm_f16_avx2, &gemm::sgemm_bf16_avx2, &gemm::sgemm_u8s8_avx2,
+        &quant::gemv_q8_0_avx2,
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,
         &activations::softmax_row_avx2, &activations::layer_norm_avx2,

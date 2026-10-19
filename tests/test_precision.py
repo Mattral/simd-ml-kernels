@@ -13,12 +13,14 @@ Requirements:
 """
 
 import math
+import os
 
 import numpy as np
 import pytest
 
 try:
     import simd_ml_kernels
+    from simd_ml_kernels._cli import q8_0_blocks, q8_0_reference, q8_0_x_scales
     HAS_SIMD = True
 except ImportError:
     HAS_SIMD = False
@@ -403,6 +405,157 @@ class TestGEMMThreads:
 
 
 # ─── GeLU Tests ──────────────────────────────────────────────────────────────
+
+# ─── Q8_0 (quantize_q8_0, gemv_q8_0) ──────────────────────────────────────────
+
+def q8_0_quantize_numpy(w: np.ndarray) -> np.ndarray:
+    """ggml's quantize_row_q8_0_ref in NumPy float32 arithmetic (IEEE, as the C
+    reference): d = amax / 127, q = roundf(w * (1/d)) (half away from zero),
+    scale stored as float16 (round to nearest even), little-endian."""
+    k = w.shape[-1]
+    b = w.astype(np.float32).reshape(-1, k // 32, 32)
+    amax = np.abs(b).max(axis=2)
+    d = (amax / np.float32(127)).astype(np.float32)
+    with np.errstate(divide="ignore", over="ignore"):
+        idv = np.where(d != 0, np.float32(1) / d, np.float32(0)).astype(np.float32)
+    idv = np.where(np.isinf(idv), np.float32(0), idv)       # 1/d overflow: q = 0 (q8_0.hpp)
+    v = (b * idv[:, :, None]).astype(np.float32).astype(np.float64)
+    t = np.trunc(v)
+    q = (t + (v - t >= 0.5) - (v - t <= -0.5)).astype(np.int8)
+    out = np.empty(b.shape[:2] + (34,), np.uint8)
+    out[:, :, :2] = d.astype("<f2").view(np.uint8).reshape(b.shape[:2] + (2,))
+    out[:, :, 2:] = q.view(np.uint8)
+    return out.reshape(w.shape[:-1] + (k // 32 * 34,))
+
+
+def _ggml_lib():
+    """libggml-base.so of the llama.cpp build the bench uses (optional)."""
+    path = os.environ.get("SIMD_ML_GGML_LIB")
+    if not path and os.environ.get("SIMD_ML_GGML_TEST_BACKEND_OPS"):
+        path = os.path.join(os.path.dirname(os.environ["SIMD_ML_GGML_TEST_BACKEND_OPS"]), "libggml-base.so")
+    if not path or not os.path.exists(path):
+        pytest.skip("set SIMD_ML_GGML_LIB (libggml-base.so) or SIMD_ML_GGML_TEST_BACKEND_OPS to compare with ggml")
+    import ctypes
+
+    return ctypes.CDLL(path)
+
+
+class TestQ8_0:
+    """quantize_q8_0 byte for byte against ggml's quantize_row_q8_0_ref
+    (NumPy port, and the real ggml when available); gemv_q8_0 against the
+    exact sum of its quantized operands (documented bound) and against the
+    FP32 product (end-to-end bound from the quantization steps)."""
+
+    @staticmethod
+    def _special_rows() -> np.ndarray:
+        rng = np.random.default_rng(11)
+        w = rng.standard_normal((6, 128)).astype(np.float32)
+        w[0, :32] = np.arange(-16, 16) + 0.5          # ties: amax 15.5, but exact halves...
+        w[0, 31] = 127.0                                # ...with d = 1: k + 0.5 -> away from zero
+        w[1, :32] = 0.0                                 # zero block: d = 0, q = 0
+        w[1, 32:64] = rng.uniform(-1e-4, 1e-4, 32)      # d a float16 subnormal
+        w[2, :] = rng.uniform(-8.3e6, 8.3e6, 128)       # large scales, below float16 overflow
+        w[3, :32] = -w[3, :32]                          # negative values with a negative max
+        w[4, :32] = np.float32(1.0)                     # constant block: q = 127
+        w[5, :32] = np.where(np.arange(32) % 2, 1e-38, -1e-38).astype(np.float32)   # 1/d overflows: q = 0
+        return w
+
+    @pytest.mark.parametrize("shape", [(32,), (1, 32), (7, 64), (33, 4096), (3, 2, 96)])
+    def test_quantize_matches_ggml_reference(self, shape):
+        w = np.random.default_rng(sum(shape)).standard_normal(shape).astype(np.float32) * 3
+        q = simd_ml_kernels.quantize_q8_0(w)
+        assert q.dtype == np.uint8 and q.shape == shape[:-1] + (shape[-1] // 32 * 34,)
+        np.testing.assert_array_equal(q, q8_0_quantize_numpy(w))
+
+    def test_quantize_special_blocks(self):
+        w = self._special_rows()
+        q = simd_ml_kernels.quantize_q8_0(w)
+        np.testing.assert_array_equal(q, q8_0_quantize_numpy(w))
+        blk = q.reshape(6, 4, 34)
+        assert blk[0, 0, 2:].view(np.int8).tolist()[:4] == [-16, -15, -14, -13]   # -15.5 -> -16
+        assert (blk[1, 0] == 0).all()
+        assert (blk[4, 0, 2:].view(np.int8) == 127).all()
+        assert (blk[5, 0, 2:] == 0).all() and blk[5, 0, :2].view("<f2")[0] == 0
+
+    def test_quantize_matches_real_ggml(self):
+        import ctypes
+
+        lib = _ggml_lib()
+        w = np.concatenate([np.random.default_rng(5).standard_normal((40, 256)).astype(np.float32),
+                            self._special_rows()[:5, :128].repeat(2, axis=1)])   # rows 0-4: no UB case
+        q = simd_ml_kernels.quantize_q8_0(w)
+        ref = np.empty_like(q)
+        f = lib.quantize_row_q8_0_ref
+        f.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+        for i in range(w.shape[0]):
+            f(w[i].ctypes.data, ref[i].ctypes.data, w.shape[1])
+        np.testing.assert_array_equal(q, ref)
+        deq = np.empty(w.shape, np.float32)
+        g = lib.dequantize_row_q8_0
+        g.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+        for i in range(w.shape[0]):
+            g(q[i].ctypes.data, deq[i].ctypes.data, w.shape[1])
+        d, qs = q8_0_blocks(q, w.shape[0], w.shape[1])
+        np.testing.assert_array_equal(deq, (qs.astype(np.float32) * d.astype(np.float32)[:, :, None]).reshape(w.shape))
+
+    @pytest.mark.parametrize("N,K", [(1, 32), (7, 64), (8, 96), (9, 128), (17, 352), (100, 4096), (33, 11008)])
+    def test_gemv_vs_exact_quantized(self, N, K):
+        rng = np.random.default_rng(N * 31 + K)
+        w = rng.standard_normal((N, K)).astype(np.float32)
+        x = (rng.standard_normal(K) * 4).astype(np.float32)
+        wq = simd_ml_kernels.quantize_q8_0(w)
+        y = simd_ml_kernels.gemv_q8_0(x, wq, N, K)
+        assert y.dtype == np.float32 and y.shape == (N,)
+        ref, mag = q8_0_reference(x, wq, N, K)
+        bound = 2 * (K // 32 + 4) * 2.0 ** -24 * mag + 1e-300
+        err = np.abs(y.astype(np.float64) - ref)
+        assert (err <= bound).all(), f"[{N}x{K}] max err/bound {np.max(err / bound):.3g}"
+
+    @pytest.mark.parametrize("N,K", [(64, 4096), (300, 2048)])
+    def test_gemv_end_to_end_bound_vs_fp32(self, N, K):
+        """|y - x·Wᵀ| <= sum_b [0.5622·dw_b·sum|x| + 0.5001·dx_b·sum|ŵ|] + the kernel bound:
+        |w - ŵ| <= d·(0.5 + 2^-16 + 127·2^-11) per weight (rounding w/d, then d to
+        float16, a normal float16 here), |x - x̂| <= dx·(0.5 + 2^-16)."""
+        rng = np.random.default_rng(K + N)
+        w = rng.standard_normal((N, K)).astype(np.float32)
+        x = rng.standard_normal(K).astype(np.float32)
+        wq = simd_ml_kernels.quantize_q8_0(w)
+        y = simd_ml_kernels.gemv_q8_0(x, wq, N, K).astype(np.float64)
+        dw, qw = q8_0_blocks(wq, N, K)
+        assert (dw >= 2.0 ** -14).all()                  # normal float16 scales
+        dx = q8_0_x_scales(x).astype(np.float64)
+        what = np.abs(qw.astype(np.float64) * dw[:, :, None]).sum(axis=2)          # sum |ŵ| per block
+        xs = np.abs(x.astype(np.float64)).reshape(-1, 32).sum(axis=1)               # sum |x| per block
+        _, mag = q8_0_reference(x, wq, N, K)
+        bound = (0.5622 * dw * xs[None, :] + 0.5001 * dx[None, :] * what).sum(axis=1) \
+            + 2 * (K // 32 + 4) * 2.0 ** -24 * mag
+        err = np.abs(y - w.astype(np.float64) @ x.astype(np.float64))
+        assert (err <= bound).all(), f"max err/bound {np.max(err / bound):.3g}"
+
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    def test_gemv_nonfinite_x_gives_nan(self, bad):
+        w = np.full((9, 64), 0.25, np.float32)
+        x = np.ones(64, np.float32)
+        x[37] = bad
+        y = simd_ml_kernels.gemv_q8_0(x, simd_ml_kernels.quantize_q8_0(w), 9, 64)
+        assert np.isnan(y).all()
+
+    def test_gemv_k0_and_n0(self):
+        assert (simd_ml_kernels.gemv_q8_0(np.ones(0, np.float32), np.zeros(0, np.uint8), 5, 0) == 0).all()
+        assert simd_ml_kernels.gemv_q8_0(np.ones(32, np.float32), np.zeros(0, np.uint8), 0, 32).shape == (0,)
+
+    def test_gemv_unaligned_wq(self):
+        """Wq at an odd address (a slice of a larger buffer)."""
+        N, K = 13, 160
+        rng = np.random.default_rng(3)
+        w = rng.standard_normal((N, K)).astype(np.float32)
+        x = rng.standard_normal(K).astype(np.float32)
+        wq = simd_ml_kernels.quantize_q8_0(w).ravel()
+        buf = np.empty(wq.size + 1, np.uint8)
+        buf[1:] = wq
+        np.testing.assert_array_equal(simd_ml_kernels.gemv_q8_0(x, buf[1:], N, K),
+                                      simd_ml_kernels.gemv_q8_0(x, wq, N, K))
+
 
 class TestGeLU:
     """GeLU, both variants, against float64 evaluations of the same formula.

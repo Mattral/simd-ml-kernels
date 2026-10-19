@@ -259,6 +259,7 @@ class TestSgemmU8S8Arguments:
 
     def test_path_reported(self):
         assert simd_ml_kernels.build_info()["u8s8_path"] in ("avx512_vnni", "avx_vnni", "fp32_convert", "scalar")
+        assert simd_ml_kernels.build_info()["q8_0_path"] in ("avx512_vnni", "avx_vnni", "avx2", "scalar")
 
 
 class TestEmptyAndSingleElement:
@@ -645,3 +646,73 @@ class TestThreadControl:
                              env=env, capture_output=True, text=True, check=True).stdout
         expected = omp_num_threads if simd_ml_kernels.build_info()["openmp"] else "1"
         assert out.strip() == expected
+
+
+class TestQ8_0Args:
+    """quantize_q8_0 / gemv_q8_0 reject every input they would otherwise misread."""
+
+    def test_quantize_rejects(self):
+        q = simd_ml_kernels.quantize_q8_0
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="multiple of 32"):
+            q(np.ones((2, 33), np.float32))
+        with pytest.raises(simd_ml_kernels.DTypeError):
+            q(np.ones((2, 32), np.float64))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
+            q(np.ones((32, 64), np.float32).T)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="at least 1 dimension"):
+            q(np.array(1.0, np.float32))
+        for bad in (np.nan, np.inf, -np.inf, 127.0 * 65520.0):
+            w = np.ones((2, 64), np.float32)
+            w[1, 40] = bad
+            with pytest.raises(simd_ml_kernels.ArgumentError, match="finite"):
+                q(w)
+        w = np.ones((1, 32), np.float32)
+        w[0, 3] = 127.0 * 65504.0     # the largest float16 scale: accepted
+        assert q(w).shape == (1, 34)
+
+    def test_gemv_rejects(self):
+        g = simd_ml_kernels.gemv_q8_0
+        x = np.ones(64, np.float32)
+        wq = simd_ml_kernels.quantize_q8_0(np.ones((3, 64), np.float32))
+        assert g(x, wq, 3, 64).shape == (3,)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="multiple of 32"):
+            g(np.ones(63, np.float32), wq, 3, 63)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="bytes"):
+            g(x, wq, 4, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):
+            g(x[None, :], wq, 3, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):
+            g(np.ones(32, np.float32), wq, 3, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match=">= 0"):
+            g(x, wq, -1, 64)
+        with pytest.raises(simd_ml_kernels.DTypeError, match="uint8"):
+            g(x, wq.view(np.int8), 3, 64)
+        with pytest.raises(simd_ml_kernels.DTypeError):
+            g(x.astype(np.float64), wq, 3, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
+            g(x, np.ascontiguousarray(np.stack([wq, wq], axis=1))[:, 0], 3, 64)
+
+
+class TestReadStreams:
+    """The bench's read-only loops (private): every variant sums every element
+    once, tails included (ones: exact in float32 for these sizes)."""
+
+    N = 8 * 3 * 4096 + 77     # 3 groups of 8 rows of 4096 floats, plus a tail
+
+    def test_part_sums(self):
+        a = np.ones(self.N, np.float32)
+        for s in (1, 2, 4, 8, 16):
+            assert simd_ml_kernels._core._stream_read(a, 1, s) == self.N
+        with pytest.raises(simd_ml_kernels.ArgumentError):
+            simd_ml_kernels._core._stream_read(a, 1, 3)
+
+    def test_row_pattern(self):
+        if "avx2" not in simd_ml_kernels.build_info()["isa_usable"].split():
+            pytest.skip("no AVX2 kernels on this CPU / build")
+        a = np.ones(self.N, np.float32)
+        for rows in (4, 8):
+            for row_floats in (4096, 1000):
+                for pf in (False, True):
+                    assert simd_ml_kernels._core._stream_read_rows(a, rows, row_floats, pf) == self.N
+        with pytest.raises(simd_ml_kernels.ArgumentError):
+            simd_ml_kernels._core._stream_read_rows(a, 5, 4096)

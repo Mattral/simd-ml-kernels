@@ -131,6 +131,24 @@ static bool test_path(U8S8Fn fn, const char* path, int kc8, int mc, int nc) {
         ext.fill = 1;
         ok &= check(fn, path, "extreme", ext);
     }
+    // One row with B [N, K] (the row-streaming path, int8_rows.hpp): row
+    // groups of 4 and 8 ± 1, K tails of the 32-byte step, K across the 2^18
+    // int32 chunk, padded strides and odd base pointers.
+    for (int N : {1, 3, 4, 5, 7, 8, 9, 17, 4097})
+        ok &= check(fn, path, "row", Case{1, N, 64, true});
+    for (int K : {1, 31, 32, 33, 63, 65, 300, 4096})
+        ok &= check(fn, path, "row", Case{1, 11, K, true});
+    for (int zp : {0, 255})
+        for (int off : {0, 1}) {
+            Case st{1, 13, 77, true, zp, 3, 5, 0, off};
+            ok &= check(fn, path, "row", st);
+        }
+    for (int K : {(1 << 18) - 3, (1 << 18) + 77}) {
+        Case big{1, 5, K, true, 0};
+        big.fill = 1;   // A = 255, B = -128: every int32 lane near its chunk maximum
+        ok &= check(fn, path, "row", big);
+        ok &= check(fn, path, "row", Case{1, 3, K, true, 131});
+    }
     // K = 0: C = 0 (a sum over nothing); M = 0 / N = 0: nothing written.
     std::vector<float> C(7 * 9, 3.0f), s9(9, 1.0f);   // b_scales: one per column, as always
     const std::uint8_t a1 = 1; const std::int8_t b1 = 1; const float s1 = 1.0f;

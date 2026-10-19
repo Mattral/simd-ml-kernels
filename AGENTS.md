@@ -35,6 +35,8 @@ Pitfalls:
   benchmarks only), `SIMD_ML_ENABLE_X86=OFF` (scalar-only build).
 - `SIMD_ML_BF16_DOT=1` opts `sgemm_bf16` into the `vdpbf16ps` path (AVX512_BF16
   CPUs; off by default, slower where measured).
+- `SIMD_ML_GGML_TEST_BACKEND_OPS=<llama.cpp>/build/bin/test-backend-ops` adds ggml's
+  Q8_0 MUL_MAT to `bench` (and the ggml byte-comparison test); unset: "not measured".
 - `SIMD_ML_ISA=scalar|avx2` caps the kernel table, e.g. to benchmark AVX2 on
   an AVX-512 machine. AVX-512 without AVX-512 hardware: run under Intel SDE,
   `sde64 -skx -- python -m simd_ml_kernels selftest` (or `-nhm` for no AVX).
@@ -49,7 +51,10 @@ src/kernels/kernels_{avx2,avx512}.cpp        the AVX2 / AVX-512 tables
 src/kernels/gemm/avx2_gemm_packed.{hpp,cpp}  FP32/FP16/BF16 GEMM, AVX2: 6x16 kernel, direct (small) and 5-loop packed paths
 src/kernels/gemm/avx512_gemm_packed.cpp      the same on AVX-512 (12x32 kernel); avx512bf16_gemm.cpp: vdpbf16ps, CPUID-gated
 src/kernels/gemm/{f16,bf16}_gemm.hpp         FP16 / BF16-input GEMM declarations (inputs converted to FP32 while packing)
-src/kernels/gemm/int8_gemm.hpp, *vnni_gemm.cpp  INT8 GEMM (uint8 x int8, per-column scales): AVX-VNNI / AVX512_VNNI units
+src/kernels/gemm/int8_gemm.hpp, *vnni_gemm.cpp  INT8 GEMM (uint8 x int8, per-column scales): AVX-VNNI / AVX512_VNNI units;
+                                             int8_rows.hpp: its M = 1, trans_b row-streaming path
+src/kernels/quant/q8_0*                      ggml Q8_0 quantization (scalar unit, no fast-math) and gemv_q8_0
+                                             (q8_0_rows.hpp: the YMM loop; avx2 / avxvnni / avx512vnni units)
 src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM (tests)
 src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh (AVX2)
 src/kernels/activations/                     relu, silu, softmax, layer_norm (AVX2; + activations.hpp)
@@ -143,14 +148,15 @@ schema, command, python, timestamp_utc
 machine   label, cpu_model, core, pinned_cpus, caches[] (CPUID leaf 4), logical_cpus, os, note,
           stream_{read,triad}_gbs, stream_{read,triad}_allcore_gbs (null: no OpenMP or one CPU)
 build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp,
-          sgemm_tile, sgemm_blocking {kc, mc, nc}, u8s8_path
-baselines numpy, blas {name, version}, torch
+          sgemm_tile, sgemm_blocking {kc, mc, nc}, u8s8_path, q8_0_path
+baselines numpy, blas {name, version}, torch, ggml {tag, commit, cmake, system_info, ...} | "not measured (...)"
 env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, SIMD_ML_ISA, SIMD_ML_BF16_DOT
-protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc, stream, gemv
+protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc, stream, gemv, gemv_roof
 results[] kernel, impl, shape, median_s, p25_s, p75_s, min_s, reps,
           core_ghz {median, min, max, samples, attempts, below_min_ghz},
           gflops + flop_per_cycle (GEMM; GEMV also bytes, gb_per_s, pct_stream_{read,triad},
-          weight_copies) | gelem_per_s + elem_per_cycle (elementwise) | gb_per_s (stream_*)
+          weight_copies, roof_read_gbs, roof_unstable; Q8_0: err_vs_fp32; ggml rows: time_s,
+          runs, threads_max/timed, command) | gelem_per_s + elem_per_cycle (elementwise) | gb_per_s (stream_*)
 ```
 
 Files are named `benchmarks/results/<label>_<YYYY-MM-DD>_<commit>.json`, one

@@ -17,6 +17,7 @@
 #include "avx2_gemm_packed.hpp"
 #include "int8_gemm.hpp"
 #include "int8_pack.hpp"
+#include "int8_rows.hpp"
 #include "cache_alloc.hpp"
 #include "../../dispatch/cpuid.hpp"
 
@@ -97,6 +98,27 @@ constexpr auto make_row_table(std::index_sequence<I...>) {
 }
 
 /** pack_b — op(B) into 32-column micro-panels of k-quads (byte by byte) plus column sums. */
+/** int8_rows.hpp step: vpdpbusd for Σ a·b and, against ones, for Σ b. */
+struct StepAvx512Vnni {
+    using Zp = int;
+    using A = __m256i;
+    static Zp zero_point(int zp) noexcept { return zp; }
+    static A load_a(const std::uint8_t* p, Zp) noexcept {
+        return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    }
+    static SIMD_ML_ALWAYS_INLINE void step(A a, __m256i b, __m256i& ab, __m256i& sb) noexcept {
+        ab = _mm256_dpbusd_epi32(ab, a, b);
+        sb = _mm256_dpbusd_epi32(sb, _mm256_set1_epi8(1), b);
+    }
+    static long long finish(__m256i ab, __m256i sb, int zp) noexcept {
+        return hsum_epi32_to_i64(ab) - static_cast<long long>(zp) * hsum_epi32_to_i64(sb);
+    }
+};
+
+// Rows of B per pass: 2 int32 accumulators each, 8 rows = 16 of 32 registers (YMM:
+// the row loop is bound by reading B, as the Q8_0 GEMV, q8_0_avx512vnni.cpp).
+constexpr int kU8S8Rows = 8;
+
 void pack_b(const std::int8_t* B, std::ptrdiff_t ldb, bool trans, int kc, int nc, std::uint32_t* Bp) noexcept {
     const int kq = kquads(kc);
     const __m512i ones = _mm512_set1_epi8(1);
@@ -148,6 +170,10 @@ void sgemm_u8s8_avx512vnni(bool trans_b, int M, int N, int K, const std::uint8_t
                            int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
                            const float* b_scales, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
+    if (M == 1 && trans_b) {   // one row x·Wᵀ: stream B in place (int8_rows.hpp)
+        u8s8_rows<StepAvx512Vnni, kU8S8Rows>(N, K, A, a_zero_point, B, ldb, a_scale, b_scales, C);
+        return;
+    }
     scale_matrix_c(C, M, N, ldc, 0.0f);
     if (K == 0) return;
     static constexpr auto full = make_row_table<false>(std::make_index_sequence<MR>{});

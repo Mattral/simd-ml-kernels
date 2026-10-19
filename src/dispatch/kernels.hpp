@@ -47,6 +47,8 @@ using Sgemm16Fn = void (*)(bool trans_b, int M, int N, int K, float alpha,
 using GemmU8S8Fn = void (*)(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
                             int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
                             const float* b_scales, float* C, int ldc);
+/** y[n] = Σ_k x[k]·W[n][k], W in ggml's Q8_0 blocks, x quantized to Q8 once per call; quant/q8_0.hpp. */
+using GemvQ8_0Fn = void (*)(int N, int K, const float* x, const std::uint8_t* Wq, float* y);
 using UnaryFn  = void (*)(const float* in, float* out, std::size_t n);
 using RowFn    = void (*)(const float* in, float* out, int n);
 using LayerNormFn = void (*)(const float* in, float* out, int n,
@@ -63,6 +65,7 @@ struct KernelTable {
     Sgemm16Fn   sgemm_f16;   ///< IEEE binary16 inputs, FP32 accumulate and output
     Sgemm16Fn   sgemm_bf16;  ///< BF16 bit patterns, FP32 accumulate and output
     GemmU8S8Fn  sgemm_u8s8;  ///< uint8 × int8 with per-column scales, FP32 output
+    GemvQ8_0Fn  gemv_q8_0;   ///< x·Wᵀ, W in Q8_0 blocks (K % 32 == 0), FP32 x and y
     UnaryFn     gelu_erf;    ///< exact GeLU; in == out allowed
     UnaryFn     gelu_tanh;   ///< tanh-approximate GeLU; in == out allowed
     RowFn       relu;

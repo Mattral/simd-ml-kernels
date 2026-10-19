@@ -105,6 +105,7 @@ endif()
 set(SIMD_ML_SCALAR_SRCS
     src/dispatch/dispatch.cpp
     src/kernels/scalar_kernels.cpp
+    src/kernels/quant/q8_0_scalar.cpp
 )
 set(SIMD_ML_AVX2_SRCS
     src/kernels/kernels_avx2.cpp
@@ -114,6 +115,8 @@ set(SIMD_ML_AVX2_SRCS
     src/kernels/activations/silu_avx2.cpp
     src/kernels/activations/softmax_avx2.cpp
     src/kernels/activations/layer_norm_avx2.cpp
+    src/kernels/quant/q8_0_avx2.cpp
+    src/kernels/stream_read_avx2.cpp
 )
 set(SIMD_ML_AVX512_SRCS
     src/kernels/kernels_avx512.cpp
@@ -123,12 +126,12 @@ set(SIMD_ML_AVX512_SRCS
 # Extension units (no kernel table of their own), each called from a table
 # unit after a CPUID check, and built only if the compiler accepts its flag:
 #   avx512bf16  vdpbf16ps BF16 GEMM, from the AVX-512 table (GCC 10+, Clang 9+)
-#   avxvnni     AVX-VNNI INT8 GEMM, from the AVX2 table (GCC 11+, Clang 12+)
-#   avx512vnni  AVX512_VNNI INT8 GEMM, from the AVX-512 table (GCC 8+, Clang 6+)
+#   avxvnni     AVX-VNNI INT8 GEMM and Q8_0 GEMV, from the AVX2 table (GCC 11+, Clang 12+)
+#   avx512vnni  AVX512_VNNI INT8 GEMM and Q8_0 GEMV, from the AVX-512 table (GCC 8+, Clang 6+)
 # The calling unit gets SIMD_ML_HAVE_<UNIT>.
 set(SIMD_ML_AVX512BF16_SRCS src/kernels/gemm/avx512bf16_gemm.cpp)
-set(SIMD_ML_AVXVNNI_SRCS    src/kernels/gemm/avxvnni_gemm.cpp)
-set(SIMD_ML_AVX512VNNI_SRCS src/kernels/gemm/avx512vnni_gemm.cpp)
+set(SIMD_ML_AVXVNNI_SRCS    src/kernels/gemm/avxvnni_gemm.cpp src/kernels/quant/q8_0_avxvnni.cpp)
+set(SIMD_ML_AVX512VNNI_SRCS src/kernels/gemm/avx512vnni_gemm.cpp src/kernels/quant/q8_0_avx512vnni.cpp)
 set(_ext_units  avx512bf16   avxvnni   avx512vnni)
 set(_ext_flags  -mavx512bf16 -mavxvnni -mavx512vnni)
 set(_ext_parent avx512       avx2      avx512)
