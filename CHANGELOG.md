@@ -4,7 +4,10 @@ All notable user-visible changes. The project follows semantic versioning;
 before 1.0, minor versions may contain breaking changes, which are listed
 under **Changed** with a migration note.
 
-## Unreleased
+## 0.3.0 — 2026-10-19
+
+First release on PyPI (`pip install simd-ml-kernels`); 0.3.0rc1 was on
+TestPyPI only. Changes since 0.2.0:
 
 ### Added
 - `sgemm_f16(..., *, trans_b=False)` and `sgemm_bf16(..., *, trans_b=False)`
@@ -24,23 +27,6 @@ under **Changed** with a migration note.
   decode GEMV cases (1×4096×4096, 1×4096×11008, 1×2048×8192; FP32, FP16,
   BF16) reported in GB/s and % of both roofs, against PyTorch's `F.linear`
   and, for FP32, OpenBLAS sgemv.
-
-### Changed
-- `sgemm(..., trans_b=True)` takes the dot-product (GEMV) path for at most 8
-  rows of A instead of 16: from 9 rows on, packing B was measured faster at
-  K = 4096 (docs/DESIGN.md §2.7). The scalar table computes x·Wᵀ as dot
-  products along rows. Results change only by rounding (a different
-  summation order, within the documented bound).
-- Documentation: README rewritten for readers outside ML systems (what the
-  library is for and not for, install from TestPyPI, a decode example, what
-  each measurement means); README links are absolute so they work on PyPI;
-  stale claims fixed across the docs and docstrings (AVX-512 results from the
-  cloud VM, SiLU and LayerNorm methods, the BF16 `vdpbf16ps` opt-in, the
-  package description).
-
-## 0.3.0rc1 — 2026-10-18
-
-### Added
 - **`sgemm_u8s8(A, B, a_scale, a_zero_point, b_scales, C=None, *, trans_b=False)`**:
   INT8 GEMM, uint8 activations × int8 weights with one scale per output
   column, float32 output (PyTorch's quantized-linear arithmetic, not
@@ -57,9 +43,9 @@ under **Changed** with a migration note.
 - `sgemm(..., trans_a=False, trans_b=False)` (keyword-only): C = alpha·op(A)·op(B)
   + beta·C with op(X) = X or Xᵀ, as BLAS transa/transb. A stored `[K, M]` /
   B stored `[N, K]` are read in place: the transpose happens while packing
-  (8×8 register transposes for B), or for `trans_b` with M ≤ 16 in a
-  dot-product path, so `x @ W.T` with `W` as `torch.nn.Linear` stores it
-  needs no copy. `examples/linear_trans_b.py`.
+  (8×8 register transposes for B), or for `trans_b` with M ≤ 8 in a
+  dot-product path (the decode GEMV), so `x @ W.T` with `W` as
+  `torch.nn.Linear` stores it needs no copy. `examples/linear_trans_b.py`.
 - `python -m simd_ml_kernels selftest`: checks every kernel against a NumPy
   float64 reference with the bounds the test suite asserts (GEMMs: elementwise
   `|C − AB| ≤ 2·K·u·(|A||B|)`, u = 2⁻²⁴), prints one line per kernel and exits 1
@@ -91,13 +77,20 @@ under **Changed** with a migration note.
   that importing and running the kernels leaves FTZ/DAZ unchanged.
 - Wheels with cibuildwheel (`pyproject.toml` `[tool.cibuildwheel]`,
   `.github/workflows/wheels.yml`): manylinux x86_64 and macOS arm64, each
-  `selftest`ed after a clean install; built as CI artifacts, not published.
+  `selftest`ed after a clean install, and an sdist; `publish.yml` uploads them
+  to TestPyPI or PyPI with Trusted Publishing (manual, from `main`).
 - CI checks that the default kernel table matches the runner's CPU flags
   (an AVX-512 runner must use the AVX-512 table).
 - `selftest` and the Python tests check every kernel table the CPU can run;
   ctest `isa_units` checks the object files contain only their own ISA.
 
 ### Changed
+- Documentation: README rewritten for readers outside ML systems (what the
+  library is for and not for, install, a decode example, what
+  each measurement means); README links are absolute so they work on PyPI;
+  stale claims fixed across the docs and docstrings (AVX-512 results from the
+  cloud VM, SiLU and LayerNorm methods, the BF16 `vdpbf16ps` opt-in, the
+  package description).
 - **`sgemm_f16` / `sgemm_bf16` run the FP32 GEMM paths.** FP16/BF16 inputs
   are converted to FP32 once while packing A and B (or, for small products,
   per 6-row strip of A, and B in registers or once), and the 6×16 / 12×32 FP32

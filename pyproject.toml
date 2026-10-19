@@ -10,7 +10,7 @@ build-backend = "scikit_build_core.build"
 # ─── Project metadata ──────────────────────────────────────────────────────────
 [project]
 name            = "simd-ml-kernels"
-version         = "0.3.0rc1"   # keep in step with CMakeLists.txt (tests/test_cli.py checks)
+version         = "0.3.0"      # keep in step with CMakeLists.txt (tests/test_cli.py checks)
 description     = "Hand-vectorized x86 SIMD kernels (AVX2, AVX-512, VNNI) for GEMM, decode GEMV and ML activations, with Python bindings"
 readme          = "README.md"
 license         = { file = "LICENSE" }

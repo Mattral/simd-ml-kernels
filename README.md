@@ -26,8 +26,7 @@ Use it if you want to:
 - read how a matrix multiply or a memory-bound matrix-vector product gets
   close to the hardware's limit, with the measurement behind each choice;
 - compute decode-shaped `x @ W.T` (one row of activations times a weight
-  matrix) from NumPy, on FP32 weights or, built from source until the next
-  release, FP16 / BF16 weights;
+  matrix) from NumPy, on FP32, FP16 or BF16 weights;
 - test or compare SIMD code paths (scalar, AVX2, AVX-512) on one machine:
   `sgemm(..., isa=...)`, `SIMD_ML_ISA`, Intel SDE.
 
@@ -35,31 +34,27 @@ Do not use it if you just want a model to run fast on a CPU: use PyTorch
 (oneDNN), a BLAS such as OpenBLAS or MKL, or llama.cpp. This library is
 single-threaded by default, has no autograd, no model runtime and no batching
 logic, vectorizes only on x86-64, and loses to those libraries in several
-measured cases (Known Honest Limitations below). It is pre-1.0 (0.3.0rc1).
+measured cases (Known Honest Limitations below). It is pre-1.0 (0.3.0).
 
 ## Install
 
 ```bash
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ simd-ml-kernels==0.3.0rc1
+pip install simd-ml-kernels
 python -m simd_ml_kernels selftest   # every kernel vs a float64 reference; exits 1 on failure
 ```
 
-0.3.0rc1 is a release candidate on TestPyPI; `pip install simd-ml-kernels`
-from PyPI will work after the 0.3.0 release. Wheels exist for CPython 3.9–3.13
-on Linux x86-64 (manylinux_2_28) and macOS arm64 (scalar kernels only);
-anywhere else pip builds from source, which needs a C++17 compiler. From a
-clone: `pip install .`; that is also the way, until the next release, to get
-`trans_b=True` on `sgemm_f16` / `sgemm_bf16` (the FP16/BF16 decode GEMV,
-merged after 0.3.0rc1). Details:
+Wheels exist for CPython 3.9–3.13 on Linux x86-64 (manylinux_2_28) and macOS
+arm64 (scalar kernels only); anywhere else pip builds from source, which needs
+a C++17 compiler. From a clone: `pip install .`. Details:
 [docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md).
 
 ```python
 import numpy as np
 import simd_ml_kernels as sk
 
-x = np.random.randn(1, 4096).astype(np.float32)      # one token's activations
-W = np.random.randn(11008, 4096).astype(np.float32)  # weights [out, in], as torch.nn.Linear stores them
-y = sk.sgemm(x, W, trans_b=True)                     # y = x @ W.T without copying W: the decode GEMV
+x = np.random.randn(1, 4096).astype(np.float16)      # one token's activations
+W = np.random.randn(11008, 4096).astype(np.float16)  # weights [out, in], as torch.nn.Linear stores them
+y = sk.sgemm_f16(x, W, trans_b=True)                 # y = x @ W.T in float32, W read in place: the decode GEMV
 h = sk.silu(y)                                       # activation
 A = np.random.randn(512, 512).astype(np.float32)
 C = sk.sgemm(A, A)                                   # FP32 matrix multiply, C = A @ A

@@ -4,11 +4,8 @@
 
 ## Install a release
 
-0.3.0rc1, a release candidate, is on TestPyPI; nothing is on PyPI yet
-(`pip install simd-ml-kernels` will work after the 0.3.0 release):
-
 ```bash
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ simd-ml-kernels==0.3.0rc1
+pip install simd-ml-kernels
 python -m simd_ml_kernels selftest
 ```
 

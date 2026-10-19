@@ -154,8 +154,8 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   `-march=native` (kept as an opt-in for local benchmarking); runtime dispatch
   from CPUID + XGETBV, resolved once; a scalar path for every kernel;
   `-ffast-math` only where tests show it is safe; FTZ/DAZ test; AVX-512
-  correctness under Intel SDE; wheels built with cibuildwheel (0.3.0rc1 is
-  on TestPyPI, not yet on PyPI).
+  correctness under Intel SDE; wheels built with cibuildwheel, published
+  to PyPI from 0.3.0.
 - **W3 — GEMM.** Done: one register-blocked 6×16 AVX2 kernel for small
   (unpacked) and large (packed) products, blocking from CPUID leaf 4,
   persistent packing buffers (N = 128 went from 24% to 95% of OpenBLAS on the
