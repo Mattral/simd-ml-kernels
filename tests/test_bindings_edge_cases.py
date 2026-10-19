@@ -691,3 +691,28 @@ class TestQ8_0Args:
             g(x.astype(np.float64), wq, 3, 64)
         with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
             g(x, np.ascontiguousarray(np.stack([wq, wq], axis=1))[:, 0], 3, 64)
+
+
+class TestReadStreams:
+    """The bench's read-only loops (private): every variant sums every element
+    once, tails included (ones: exact in float32 for these sizes)."""
+
+    N = 8 * 3 * 4096 + 77     # 3 groups of 8 rows of 4096 floats, plus a tail
+
+    def test_part_sums(self):
+        a = np.ones(self.N, np.float32)
+        for s in (1, 2, 4, 8, 16):
+            assert simd_ml_kernels._core._stream_read(a, 1, s) == self.N
+        with pytest.raises(simd_ml_kernels.ArgumentError):
+            simd_ml_kernels._core._stream_read(a, 1, 3)
+
+    def test_row_pattern(self):
+        if "avx2" not in simd_ml_kernels.build_info()["isa_usable"].split():
+            pytest.skip("no AVX2 kernels on this CPU / build")
+        a = np.ones(self.N, np.float32)
+        for rows in (4, 8):
+            for row_floats in (4096, 1000):
+                for pf in (False, True):
+                    assert simd_ml_kernels._core._stream_read_rows(a, rows, row_floats, pf) == self.N
+        with pytest.raises(simd_ml_kernels.ArgumentError):
+            simd_ml_kernels._core._stream_read_rows(a, 5, 4096)

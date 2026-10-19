@@ -232,14 +232,20 @@ laptop, which moved every percentage with it. A case where any implementation
 exceeds 105% of its own roof is marked `roof_unstable` and not published
 (make_tables.py lists it under "Not shown", as for `--min-ghz`):
 
-- *read stream*: the sum of one large float32 array, 4 bytes per element,
-  nothing written, read as 2, 4 and 8 parts side by side (as the GEMV reads 4
-  or 8 rows of W at once); the roof is the fastest of the three, which can
-  only lower a kernel's percentage. This is the primary roof for a GEMV,
-  which only reads its big operand. Dev runs on the reference laptop: one
-  stream reached 25–29 GB/s, 2–8 streams 30–34 GB/s. It is a measurement,
-  not a hardware limit: runs vary by several percent, so a kernel within
-  about ±10% of 100% is at the roof.
+- *read stream*: the fastest read-only loop we have, including the GEMV
+  access pattern, over one large float32 array (4 bytes per element, nothing
+  written): its sum read as 2, 4, 8 and 16 parts side by side, and (AVX2
+  kernels) as rows of 16 KiB with 4 or 8 rows walked together with 32-byte
+  loads, the GEMV's own pattern, plus 8 rows with the next group prefetched.
+  The roof is the fastest variant, which can only lower a kernel's
+  percentage; it is a lower bound on the core's true read limit, not the
+  limit itself. This is the primary roof for a GEMV, which only reads its
+  big operand. With the part sums alone (before W5 PR2), the FP32 GEMV read
+  104–106% of the roof at 1×4096×11008 in three runs; in a dev run the 8-row
+  pattern read 7% faster than the best part sum there, and the FP32 GEMV
+  92–94% of it. Dev runs on the reference laptop: one stream reached 25–29
+  GB/s, 2–8 streams 30–34 GB/s. Runs vary by several percent, so a kernel
+  within about ±10% of 100% is at the roof.
 - *STREAM triad*: `a = b + s·c`, 12 bytes per element (STREAM's convention).
   The store's read-for-ownership is real traffic that the convention does not
   count, so a read-only kernel can exceed 100% of the triad: our FP32 GEMV ran

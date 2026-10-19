@@ -59,6 +59,7 @@
 #include "../kernels/gemm/bf16_gemm.hpp"
 #include "../kernels/gemm/int8_gemm.hpp"
 #include "../kernels/quant/q8_0.hpp"
+#include "../kernels/stream_read.hpp"
 #include "../kernels/intrinsic_gelu.hpp"
 #include "../kernels/cache_alloc.hpp"
 #include "../dispatch/kernels.hpp"
@@ -521,7 +522,7 @@ static void py_stream_triad(py::array_t<float, py::array::c_style> a,
  */
 template <int S>
 static double stream_read_sum(const float* p, std::ptrdiff_t n) noexcept {
-    constexpr int V = 8 / S;                        // vectors per stream per step
+    constexpr int V = S >= 8 ? 1 : 8 / S;           // vectors per stream per step
     const std::ptrdiff_t part = n / S / (4 * V) * (4 * V);
     double total = 0.0;
 #if defined(__SSE2__)
@@ -530,7 +531,7 @@ static double stream_read_sum(const float* p, std::ptrdiff_t n) noexcept {
     for (std::ptrdiff_t i = 0; i < part; i += 4 * V)
         for (int s = 0; s < S; ++s)
             for (int v = 0; v < V; ++v)
-                acc[s * V + v] = _mm_add_ps(acc[s * V + v], _mm_loadu_ps(p + s * part + i + 4 * v));
+                acc[(s * V + v) % 8] = _mm_add_ps(acc[(s * V + v) % 8], _mm_loadu_ps(p + s * part + i + 4 * v));
     for (int k = 1; k < 8; ++k) acc[0] = _mm_add_ps(acc[0], acc[k]);
     float lanes[4];
     _mm_storeu_ps(lanes, acc[0]);
@@ -552,7 +553,8 @@ static double stream_read_sum(const float* p, std::ptrdiff_t n, int streams) {
         case 2: return stream_read_sum<2>(p, n);
         case 4: return stream_read_sum<4>(p, n);
         case 8: return stream_read_sum<8>(p, n);
-        default: throw ArgumentError("_stream_read: streams must be 1, 2, 4 or 8");
+        case 16: return stream_read_sum<16>(p, n);
+        default: throw ArgumentError("_stream_read: streams must be 1, 2, 4, 8 or 16");
     }
 }
 
@@ -562,12 +564,12 @@ static double stream_read_sum(const float* p, std::ptrdiff_t n, int streams) {
  * operand, such as a GEMV's weights. The triad also writes, and its counted
  * 12 bytes/element leave out the read-for-ownership of every stored line, so
  * a read-only kernel can exceed 100% of it. streams: how many parts of the
- * array are read side by side (1, 2, 4, 8). threads > 1: OpenMP builds only.
+ * array are read side by side (1, 2, 4, 8, 16). threads > 1: OpenMP builds only.
  */
 static double py_stream_read(py::array_t<float, py::array::c_style> a, int threads, int streams) {
     if (a.ndim() != 1) throw ArgumentError("_stream_read: a must be a 1-D float32 array");
-    if (streams != 1 && streams != 2 && streams != 4 && streams != 8)
-        throw ArgumentError("_stream_read: streams must be 1, 2, 4 or 8");
+    if (streams != 1 && streams != 2 && streams != 4 && streams != 8 && streams != 16)
+        throw ArgumentError("_stream_read: streams must be 1, 2, 4, 8 or 16");
     const float* p = a.data();
     const std::ptrdiff_t n = static_cast<std::ptrdiff_t>(a.size());
     if (threads > 1) {
@@ -587,6 +589,28 @@ static double py_stream_read(py::array_t<float, py::array::c_style> a, int threa
     }
     py::gil_scoped_release release;
     return stream_read_sum(p, n, streams);
+}
+
+/**
+ * _stream_read_rows — sum of a float32 array read in a decode GEMV's pattern
+ * (stream_read.hpp): rows of row_floats values, `rows` (4 or 8) rows side by
+ * side with 32-byte loads, optionally prefetching the next group's rows.
+ * Single thread; needs the AVX2 kernels (RuntimeError otherwise).
+ */
+static double py_stream_read_rows(py::array_t<float, py::array::c_style> a, int rows, std::ptrdiff_t row_floats,
+                                  bool prefetch) {
+    if (a.ndim() != 1) throw ArgumentError("_stream_read_rows: a must be a 1-D float32 array");
+    if (rows != 4 && rows != 8) throw ArgumentError("_stream_read_rows: rows must be 4 or 8");
+    if (row_floats < 16) throw ArgumentError("_stream_read_rows: row_floats must be >= 16");
+#if SIMD_ML_X86_AVAILABLE
+    if (simd_ml::kernels_for(simd_ml::Isa::avx2)) {
+        const float* p = a.data();
+        const auto n = static_cast<std::ptrdiff_t>(a.size());
+        py::gil_scoped_release release;
+        return simd_ml::stream_read_rows_avx2(p, n, rows, row_floats, prefetch);
+    }
+#endif
+    throw std::runtime_error("_stream_read_rows needs the AVX2 kernels (this CPU or build has none)");
 }
 
 static py::list py_cpu_caches() {
@@ -1394,6 +1418,8 @@ Example
           py::arg("s"), py::arg("threads") = 1,
           "a = b + s*c over float32 arrays (STREAM triad), on this thread or (threads > 1, "
           "OpenMP builds) on that many threads. Private: used by `python -m simd_ml_kernels bench`.");
+    m.def("_stream_read_rows", &py_stream_read_rows, py::arg("a"), py::arg("rows"), py::arg("row_floats"),
+          py::arg("prefetch") = false, "Private (bench): read-only stream in a GEMV's row pattern; AVX2 only.");
     m.def("_stream_read", &py_stream_read, py::arg("a"), py::arg("threads") = 1, py::arg("streams") = 4,
           "Sum of a float32 array (read-only stream) read as `streams` parts side by side, on this "
           "thread or (threads > 1, OpenMP builds) on that many threads. Private: used by "

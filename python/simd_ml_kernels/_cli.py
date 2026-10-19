@@ -439,14 +439,36 @@ def _llc_bytes() -> int:
 #   can exceed 100% of the triad (FP32 GEMV: 107-137% in dev runs).
 STREAM_MIN_ARRAY_BYTES = 64 << 20
 STREAM_PROTOCOL = ("float32 arrays of max(4x LLC, 64 MiB) each, same warm-up/reps/clock protocol as the "
-                   "kernels, single thread on the pinned core: read = sum of one array read as 2, 4 and 8 "
-                   "parts side by side (interleaved), 4 bytes per element; stream_read_gbs is the fastest "
-                   "of the three (the roof for read-only kernels such as GEMV); triad a = b + s*c, 12 "
-                   "bytes per element (STREAM convention, no write-allocate; stream_triad_gbs). *_allcore_gbs: "
-                   "OpenMP builds with more than one usable CPU only, else null")
+                   "kernels, single thread on the pinned core: read = sum of one array, 4 bytes per element, "
+                   "read by every read-only loop we have (interleaved): 2, 4, 8 and 16 parts side by side, and "
+                   "with the AVX2 kernels the GEMV row pattern (rows of 4096 floats, 4 or 8 rows side by side, "
+                   "32-byte loads; 8 rows with the next group prefetched); stream_read_gbs is the fastest (the "
+                   "roof for read-only kernels such as GEMV: a lower bound on the core's read limit); triad "
+                   "a = b + s*c, 12 bytes per element (STREAM convention, no write-allocate; stream_triad_gbs). "
+                   "*_allcore_gbs: OpenMP builds with more than one usable CPU only (part sums), else null")
 
 
-STREAM_READ_STREAMS = (2, 4, 8)
+STREAM_READ_STREAMS = (2, 4, 8, 16)
+# The GEMV's own pattern (AVX2 kernels only): rows of 16 KiB (an FP32 row at
+# K = 4096), 4 or 8 rows side by side with 32-byte loads, and 8 rows with the
+# next group prefetched (the Q8_0 GEMV's pattern). Without these the 2-16 part
+# sums read about 5% slower than the FP32 GEMV on 1x4096x11008 (DESIGN.md §2.7).
+STREAM_READ_ROWS = ((4, False), (8, False), (8, True))
+STREAM_ROW_FLOATS = 4096
+
+
+def _read_roof_fns(buf: np.ndarray) -> list[tuple[str, Callable[[], object]]]:
+    """Every read-only loop of the roof, as (name, fn) over buf: the sum read
+    as 2-16 parts side by side, and (with the AVX2 kernels) the GEMV row
+    patterns. The roof is the fastest, so more variants can only lower a
+    kernel's percentage."""
+    fns: list[tuple[str, Callable[[], object]]] = [
+        (f"{s} parts", functools.partial(sk._core._stream_read, buf, 1, s)) for s in STREAM_READ_STREAMS]
+    if "avx2" in sk.build_info()["isa_usable"].split():
+        fns += [(f"{r} rows{' + prefetch' if pf else ''}",
+                 functools.partial(sk._core._stream_read_rows, buf, r, STREAM_ROW_FLOATS, pf))
+                for r, pf in STREAM_READ_ROWS]
+    return fns
 
 
 def _stream(args, results, show) -> dict:
@@ -467,12 +489,12 @@ def _stream(args, results, show) -> dict:
         impl = "simd_ml_kernels" + ("" if th == 1 else f" {th} threads")
         min_ghz = args.min_ghz if th == 1 else None
 
-        def read(s: int, th: int = th) -> Callable[[], object]:
-            return lambda: sk._core._stream_read(b, th, s)
-        stats, clock = _time([read(s) for s in STREAM_READ_STREAMS], args.warmup, args.reps, min_ghz)
+        fns = _read_roof_fns(b) if th == 1 else [
+            (f"{s} parts", functools.partial(sk._core._stream_read, b, th, s)) for s in STREAM_READ_STREAMS]
+        stats, clock = _time([f for _, f in fns], args.warmup, args.reps, min_ghz)
         best = 0.0
-        for s, t in zip(STREAM_READ_STREAMS, stats):
-            r = _record(results, "stream_read", f"{impl} {s} streams", (n,), t, 4.0 * n, "byte", clock)
+        for (name, _), t in zip(fns, stats):
+            r = _record(results, "stream_read", f"{impl} {name}", (n,), t, 4.0 * n, "byte", clock)
             show(r)
             best = max(best, r["gb_per_s"])
         roofs["read" + suffix] = best
@@ -547,9 +569,9 @@ def _gemv_case(results: list, kernel: str, shape: tuple, impls: list, nbytes: di
     """Time one GEMV case: impls interleaved with the read stream on roof_buf.
     nbytes[impl] = bytes that implementation must move. Returns the rows."""
     m, n, k = shape
-    roof_fns = [(s, lambda s=s: sk._core._stream_read(roof_buf, 1, s)) for s in STREAM_READ_STREAMS]
+    roof_fns = _read_roof_fns(roof_buf)
     stats, clock = _time([f for _, f in impls] + [f for _, f in roof_fns], args.warmup, args.reps, args.min_ghz)
-    streams = {str(s): 4.0 * roof_buf.size / t["median_s"] * 1e-9 for (s, _), t in zip(roof_fns, stats[len(impls):])}
+    streams = {s: 4.0 * roof_buf.size / t["median_s"] * 1e-9 for (s, _), t in zip(roof_fns, stats[len(impls):])}
     roof = max(streams.values())
     rows = []
     for (impl, _), t in zip(impls, stats):
@@ -1067,9 +1089,9 @@ def cmd_bench(args: argparse.Namespace) -> int:
                          "min_ghz": args.min_ghz,
                          "stream": STREAM_PROTOCOL,
                          "gemv": "y = x·Wᵀ, one row x, W [N, K]; gb_per_s = (weights + x + y bytes) / median "
-                                 "time (Q8_0: 34 bytes per 32 weights); per-case roof: the read stream (2, 4, 8 "
-                                 "parts) timed interleaved with the case's implementations, roof_read_gbs = the "
-                                 "fastest; pct_stream_read = gb_per_s / roof_read_gbs; pct_stream_triad = "
+                                 "time (Q8_0: 34 bytes per 32 weights); per-case roof: the read-stream loops "
+                                 "(protocol.stream) timed interleaved with the case's implementations, "
+                                 "roof_read_gbs = the fastest; pct_stream_read = gb_per_s / roof_read_gbs; pct_stream_triad = "
                                  "gb_per_s / machine.stream_triad_gbs (once per run); roof_unstable: an "
                                  f"implementation above {ROOF_UNSTABLE_PCT:.0f}% of its case's roof; weights "
                                  "rotate: ceil(2 x LLC / weight bytes) copies (weight_copies, at least 1), the "
