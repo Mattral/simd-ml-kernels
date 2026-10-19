@@ -4,23 +4,25 @@
 **Import**: `import simd_ml_kernels`  
 **Type stubs**: `python/simd_ml_kernels/_core.pyi` (IDE autocompletion)
 
-All kernels operate on **float32 NumPy arrays**, release the **GIL** during computation (threading-safe), and require **C-contiguous** memory layout. Call `numpy.ascontiguousarray(arr)` if needed.
+All kernels operate on **float32 NumPy arrays** (float16, BF16 or uint8/int8 inputs for the low-precision GEMMs, float32 output), release the **GIL** during computation (threading-safe), and require **C-contiguous** memory layout. Call `numpy.ascontiguousarray(arr)` if needed.
 
 ---
 
 ## Linear Algebra
 
-### `sgemm(A, B, C=None, alpha=1.0, beta=0.0) → np.ndarray`
+### `sgemm(A, B, C=None, alpha=1.0, beta=0.0, isa="", *, trans_a=False, trans_b=False) → np.ndarray`
 
-Compute `C = alpha * A @ B + beta * C` (single-precision GEMM).
+Compute `C = alpha * op(A) @ op(B) + beta * C` (single-precision GEMM).
 
 | Parameter | Type | Description |
 |---|---|---|
-| `A` | `ndarray[float32]`, shape `[M, K]` | Left operand |
-| `B` | `ndarray[float32]`, shape `[K, N]` | Right operand |
+| `A` | `ndarray[float32]`, shape `[M, K]` (`[K, M]` with `trans_a`) | Left operand |
+| `B` | `ndarray[float32]`, shape `[K, N]` (`[N, K]` with `trans_b`) | Right operand |
 | `C` | `ndarray[float32]`, shape `[M, N]`, optional | Output (allocated if `None`) |
 | `alpha` | `float` | Scale factor for `A @ B` (default `1.0`) |
 | `beta` | `float` | Scale factor for existing `C` (`0.0` = overwrite) |
+| `isa` | `str` | Kernel table for this call: `""` (default, the one chosen for this CPU), `"scalar"`, `"avx2"`, `"avx512"` (see `GEMMConfig` below) |
+| `trans_a`, `trans_b` | `bool`, keyword-only | Use `A.T` / `B.T` as stored, without a copy |
 
 Returns the `[M, N]` result array (same object as `C` if provided).
 
@@ -115,9 +117,10 @@ class GEMMConfig:
 
 Stores default `alpha`, `beta`, and `isa` for repeated GEMM calls. Tile
 parameters (`tile_m`, `tile_n`, `tile_k`, `mr`, `nr`) are accepted for API
-completeness and are validated (must be positive), but do not currently
-change dispatch — the compiled kernel uses fixed compile-time constants.
-Auto-tuned tile selection is planned (`docs/ROADMAP.md §v0.9`).
+completeness and are validated (must be positive), but they do not change
+anything: the micro-kernel shape is fixed per table and the block sizes come
+from the CPU's caches (`build_info()["sgemm_tile"]`,
+`build_info()["sgemm_blocking"]`; `docs/DESIGN.md` §2.3).
 
 ```python
 gemm = simd_ml_kernels.GEMMConfig(alpha=2.0, beta=0.5, isa="avx2")
@@ -240,7 +243,7 @@ y = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
 # y has zero mean and unit std per row (before affine)
 ```
 
-**Implementation**: 3 passes (mean → variance → normalize) with the sums in double precision to prevent catastrophic cancellation.
+**Implementation**: 3 passes (mean → variance → normalize); the statistics are summed in float lanes, shifted by the row's first element, and added into a double every 1024 elements (`docs/DESIGN.md` §3.5).
 
 ---
 
@@ -278,6 +281,8 @@ features):
 | `isa_flags` | compiler flags of each usable table's units |
 | `runtime_isa` | the table every call uses (same as `detected_isa()`) |
 | `kernel_flags`, `sgemm_tile` | that table's flags and GEMM micro-kernel shape |
+| `sgemm_blocking` | `{kc, mc, nc}` block sizes derived from this core's caches |
+| `u8s8_path` | the path `sgemm_u8s8` runs: `avx512_vnni`, `avx_vnni`, `fp32_convert` or `scalar` |
 | `openmp` | whether GEMM can use more than one thread |
 | `alignment` | allocation alignment of internal buffers |
 
@@ -291,6 +296,17 @@ it.
 
 `True` if this build includes the AVX-512 kernels and this CPU and OS can run
 them (AVX-512F/DQ/BW/VL and OS ZMM state).
+
+### `f16c_available() → bool`
+
+`True` if this CPU has F16C (`vcvtph2ps`), which the AVX2 kernels require.
+`sgemm_f16` also runs without it (scalar kernels).
+
+### `bf16_avx512bf16_available() → bool`
+
+`True` if this CPU has AVX512_BF16 (`vdpbf16ps`). Not required for
+`sgemm_bf16`; the `vdpbf16ps` path is used only where this is `True` and
+`SIMD_ML_BF16_DOT=1` is set (see `GEMMConfig` above).
 
 ### `is_aligned(arr: np.ndarray) → bool`
 

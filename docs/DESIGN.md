@@ -23,8 +23,10 @@ Dispatch src/dispatch/: CPUID + XGETBV, one KernelTable per ISA, selection (§6)
 Kernels  scalar unit   scalar_kernels.cpp                 every kernel, portable C++
          AVX2 units    gemm/avx2_gemm_packed.cpp           FP32/FP16/BF16 GEMM: 6×16 kernel, direct and packed (§2, §4)
                        intrinsic_gelu.cpp, activations/    GeLU, ReLU, SiLU, softmax, LayerNorm
+                       gemm/avxvnni_gemm.cpp               INT8 GEMM with AVX-VNNI (CPUID-gated, §4.2)
          AVX-512 units gemm/avx512_gemm_packed.cpp         FP32/FP16/BF16 GEMM, 12×32 kernel
-                       gemm/avx512bf16_gemm.cpp            BF16 GEMM with vdpbf16ps (CPUID-gated, §4)
+                       gemm/avx512bf16_gemm.cpp            BF16 GEMM with vdpbf16ps (CPUID-gated, opt-in, §4.1)
+                       gemm/avx512vnni_gemm.cpp            INT8 GEMM with AVX512_VNNI (CPUID-gated, §4.2)
            │
 Shared   simd_math.hpp (fast_exp_avx2, tanh_avx2), cache_alloc.hpp (aligned allocation, prefetch)
 ```
@@ -32,7 +34,9 @@ Shared   simd_math.hpp (fast_exp_avx2, tanh_avx2), cache_alloc.hpp (aligned allo
 Every Python entry point validates its arguments (`DTypeError` for dtype,
 `ArgumentError` for shape, contiguity, writeability and values), allocates the
 output if none was given, releases the GIL and calls one kernel through the
-active table. Kernels never throw and never allocate Python objects.
+active table. Kernels never allocate Python objects; the only exception one
+can throw is `std::bad_alloc` while growing the GEMM packing buffers (§2.2),
+which pybind11 raises as `MemoryError`.
 
 ---
 
@@ -192,8 +196,12 @@ and 12 broadcasts feed 24 FMAs (0.58 loads per FMA, 7 cycles of loads on
 2 load ports against 12 of FMAs). It is the row-major view of BLIS's
 Skylake-X SGEMM shape (32×12 column-major). 14×32 (28 accumulators) also fits;
 the row count is one constant. Correctness is checked under Intel SDE
-(`-skx`, `-spr`) and on AVX-512 CI runners; its speed is measured only on real
-AVX-512 hardware (BENCHMARKS.md, "not measured yet" until then).
+(`-skx`, `-spr`) and on AVX-512 CI runners. Speed has been measured on one
+AVX-512 machine, a 2-vCPU Emerald Rapids cloud VM whose clock and neighbours
+are not controlled (BENCHMARKS.md,
+`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`): 87–107% of OpenBLAS for
+N = 128–2048, and below the 90% target at N = 2048 (87%). Bare-metal AVX-512
+is not measured.
 
 ### 2.6 Choosing the table
 
@@ -264,9 +272,13 @@ K = 4096 (FP32) to 12–14 (FP16/BF16); at K = 1024 from 9 (BF16) to 14 (FP32).
 move that cut-off; batched decode is not a target of this work yet.
 
 The AVX-512 table runs the same structure with ZMM registers (row counts
-chosen on the AVX2 core); its speed is measured only on AVX-512 hardware
-(BENCHMARKS.md; pending a cloud run). The scalar table computes the same dot
-products, one accumulator per element.
+chosen on the AVX2 core). Its speed is not measured: the only AVX-512 machine
+available is the cloud VM, which moved between hosts and whose single-core
+memory bandwidth varied from 5.8 to 11 GB/s from run to run (dev runs, not
+in a JSON), so a GEMV percentage of a roof measured once per run would not
+mean anything there. Measuring the roof next to each case (W5 PR2) is meant to
+make such a run usable. The scalar table computes the same dot products, one
+accumulator per element.
 
 **Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_ecc219baa1f2`, one
 P-core; roofs 31.8 GB/s read stream, 29.6 GB/s triad), at 1×4096×4096,
@@ -322,8 +334,14 @@ The error bounds asserted by the tests are in the `gelu` docstring and
 
 ### 3.3 SiLU, ReLU
 
-SiLU uses `σ(x) = 0.5·(1 + tanh(x/2))` with `tanh_avx2`, which needs no
-`exp(−x)` and therefore cannot overflow; the scalar tail uses `1/(1 + exp(−x))`.
+SiLU is `x / (1 + exp(−x))` with `fast_exp_avx2` and a correctly rounded
+`vdivps`; for −x > 88 the denominator is set to +inf, so the result is −0 and
+SiLU(−inf) is NaN, as in PyTorch. An earlier version used
+`x·0.5·(1 + tanh(x/2))`: `tanh_avx2` clamps at ±7.99, so its error grew
+without bound below x = −16 (1e-4 at x = −1000), and `1 + tanh` cancels for
+x ≪ 0. The exp form has a relative bound, `|err| ≤ 1e-35 + 1e-6·|SiLU(x)|`
+for every finite x (tested; an exhaustive sweep measured 2.9e-7 relative), and
+was faster in the dev timing at the top of `silu_avx2.cpp`.
 ReLU is `max(x, 0)`.
 
 ### 3.4 Softmax (`softmax_avx2.cpp`)
@@ -387,6 +405,11 @@ Measured now (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_045918e51839`):
 - Square N = 128–2048: FP16 at 95–100% and BF16 at 99–101% of our FP32 GEMM;
   FP16 1.41–1.46× PyTorch's float16 `matmul`; BF16 0.97–1.16× PyTorch's
   bfloat16 `matmul` (it is slightly ahead at N = 1024 and 2048).
+- On the Emerald Rapids cloud VM (AVX-512 table,
+  `cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`): FP16 at 91–101% and BF16
+  at 99–104% of our FP32 GEMM; FP16 0.89–1.25× PyTorch's float16 `matmul`
+  (it is ahead from N = 512 up); BF16 0.14–0.72× PyTorch's bfloat16 `matmul`
+  (see the `vdpbf16ps` note below for why).
 - 1×4096×4096 with B stored [K, N] (bound by reading B): FP16 at 180% and
   BF16 at 162% of our FP32 GEMM, because B is half the bytes; both lose to
   PyTorch (0.63× and 0.58×; 0.62× for FP16 again in
@@ -486,6 +509,11 @@ x·Wᵀ with W stored [N, K]):
   conversion path, writes it as FP32), which costs as much as using it once.
   A GEMV that reads quantized weights in place, with the dequantization fused
   into the dot product, is W5.
+- `avx512_vnni` on the Emerald Rapids cloud VM
+  (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`): 1.55–2.83× our FP32 GEMM
+  at N = 128–2048, but 0.67–0.75× PyTorch's `quantized.linear` from N = 512
+  up (1.26–2.46× below that), and 0.13× PyTorch for 1×4096×4096. The 12×32
+  VNNI tile has not been tuned on that CPU.
 
 ---
 
@@ -499,7 +527,9 @@ flags and nothing more (`CMakeLists.txt`, "ISA units"):
 | scalar | `-O3` (baseline x86-64: SSE2; or the target's default) | `dispatch/dispatch.cpp`, `kernels/scalar_kernels.cpp` |
 | avx2 | `-mavx2 -mfma -mf16c -ffast-math -fno-finite-math-only` | AVX2 kernels, `kernels_avx2.cpp` |
 | avx512 | `-mavx2 -mfma -mf16c -mavx512f -mavx512dq -mavx512bw -mavx512vl -ffast-math -fno-finite-math-only` | AVX-512 kernels, `kernels_avx512.cpp` |
-| avx512bf16 | the avx512 flags and `-mavx512bf16` (built if the compiler accepts it) | `gemm/avx512bf16_gemm.cpp`; no table of its own: the AVX-512 table calls it after a CPUID check (§4) |
+| avx512bf16 | the avx512 flags and `-mavx512bf16` (built if the compiler accepts it) | `gemm/avx512bf16_gemm.cpp`; no table of its own: the AVX-512 table calls it after a CPUID check and only with `SIMD_ML_BF16_DOT=1` (§4.1) |
+| avxvnni | the avx2 flags and `-mavxvnni` (built if the compiler accepts it) | `gemm/avxvnni_gemm.cpp`; called by the AVX2 table's `sgemm_u8s8` after a CPUID check (§4.2) |
+| avx512vnni | the avx512 flags and `-mavx512vnni` (built if the compiler accepts it) | `gemm/avx512vnni_gemm.cpp`; called by the AVX-512 table's `sgemm_u8s8` after a CPUID check (§4.2) |
 
 The bindings and the C++ tests are compiled like the scalar unit, so the
 extension imports and runs on any x86-64 CPU. `-DSIMD_ML_NATIVE=ON` adds
@@ -544,8 +574,9 @@ kernel on every usable table leaves FTZ and DAZ off in the host process
 ## 6. Runtime dispatch
 
 `src/dispatch/kernels.hpp` defines one `KernelTable` per ISA: function
-pointers for every kernel (FP32/FP16/BF16 GEMM, both GeLUs, ReLU, SiLU,
-softmax row, LayerNorm row), plus the table's name, flags and GEMM tile. A
+pointers for every kernel (FP32/FP16/BF16 GEMM, INT8 GEMM, both GeLUs, ReLU,
+SiLU, softmax row, LayerNorm row), plus the table's name, flags, GEMM tile and
+block sizes. A
 table may point at another table's functions: the AVX-512 table uses the AVX2
 elementwise kernels, because only GEMM has an AVX-512 path.
 
@@ -589,11 +620,12 @@ the core the calling thread runs on.
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | push to main, pull requests | C++ build + ctest (GCC 12, Clang 15, GCC 13); Python 3.10–3.12: install, `selftest`, pytest (with PyTorch CPU), stubtest, examples, bench CLI smoke run, generated tables match JSON; ASan + UBSan (Clang 15) |
+| `ci.yml` | push to main, pull requests | C++ build + ctest (GCC 12, Clang 15, GCC 13); Python 3.10–3.12: install, `selftest`, default table matches the runner's CPU flags, pytest (with PyTorch CPU), stubtest, examples, bench CLI smoke run, generated tables match JSON; ASan + UBSan (Clang 15) |
 | `build-and-test.yml` | push to main, pull requests | GCC 12 with OpenBLAS-linked harnesses; OpenMP build; ASan + UBSan; macOS arm64 scalar build + ctest |
-| `wheels.yml` | pull requests touching the build, manual | cibuildwheel: manylinux_2_28 x86_64 and macOS arm64 wheels, CPython 3.9–3.13, each installed in a clean environment and `selftest`ed. Artifacts only, never published |
-| `bench.yml` | weekly | `python -m simd_ml_kernels bench --json` on a shared runner, uploaded as an artifact; not used for any claim |
-| `guardrail.yml` | push, pull requests, weekly | clang-tidy, pip-audit; report-only |
+| `wheels.yml` | pull requests touching the build, manual, called by `publish.yml` | cibuildwheel: manylinux_2_28 x86_64 and macOS arm64 wheels, CPython 3.9–3.13, and an sdist; each wheel installed in a clean environment and `selftest`ed. On pull requests, artifacts only |
+| `publish.yml` | manual (owner), from `main` | builds through `wheels.yml`, then uploads to TestPyPI or PyPI with Trusted Publishing (no API token). 0.3.0rc1 went to TestPyPI this way; nothing is on PyPI yet |
+| `bench.yml` | weekly, manual | `python -m simd_ml_kernels bench --json` on a shared runner, uploaded as an artifact; not used for any claim |
+| `guardrail.yml` | push, pull requests, weekly | clang-tidy (fails on errors), pip-audit and codespell (report-only), license file check |
 
 ---
 

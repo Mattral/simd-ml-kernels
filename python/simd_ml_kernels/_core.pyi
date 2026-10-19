@@ -1,7 +1,8 @@
 """
 Type stubs for simd_ml_kernels._core, the compiled extension module.
 
-All kernels operate on float32 NumPy arrays and release the GIL during
+All kernels operate on float32 NumPy arrays (float16, BF16 or uint8/int8
+inputs for the low-precision GEMMs, float32 output) and release the GIL during
 computation. Arrays must be C-contiguous; call np.ascontiguousarray() if needed.
 """
 
@@ -266,9 +267,10 @@ def bf16_avx512bf16_available() -> bool:
     Return True if this CPU supports AVX-512 BF16 (vdpbf16ps instruction).
 
     Available on Intel Cooper Lake, Sapphire Rapids and later, and AMD Zen 4
-    and later. Not required for sgemm_bf16; where True, the AVX-512 table's
-    sgemm_bf16 uses vdpbf16ps for packed single-threaded products (speed not
-    measured; BF16 subnormal inputs read as zero).
+    and later. Not required for sgemm_bf16. Where True and SIMD_ML_BF16_DOT=1
+    is set, the AVX-512 table's sgemm_bf16 uses vdpbf16ps for packed
+    single-threaded products (off by default: slower than the conversion
+    path where measured; BF16 subnormal inputs read as zero).
     """
     ...
 
@@ -289,14 +291,15 @@ def sgemm_bf16(
     C = A @ B.T; up to 8 rows of A stream the rows of B in place (decode GEMV).
 
     A and B store Brain Float 16 values (same exponent range as FP32, 7-bit mantissa).
-    Accepts uint16 dtype (explicit bit-cast) or bfloat16 dtype (numpy>=2.0 / ml_dtypes).
+    Accepts uint16 dtype (explicit bit-cast) or the bfloat16 dtype of ml_dtypes.
     Output C is always float32.
 
     Runs on every CPU. BF16→FP32 is exact (zero-extend and shift left by 16),
     so the error bound is the FP32 GEMM's for the BF16 values. The AVX2 and
     AVX-512 tables convert once per element while packing and run the FP32
-    micro-kernel; with AVX512_BF16, packed single-threaded products use
-    vdpbf16ps (BF16 subnormal inputs read as zero, subnormal results flushed).
+    micro-kernel. Opt-in: with AVX512_BF16 and SIMD_ML_BF16_DOT=1, packed
+    single-threaded products use vdpbf16ps (BF16 subnormal inputs read as
+    zero, subnormal results flushed).
 
     Parameters
     ----------

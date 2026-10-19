@@ -31,10 +31,10 @@
 ## v0.4 — Activation Kernels ✅
 - [✅] GeLU: exact erf (default) and tanh variants, `approximate=` as in PyTorch; max abs error ≤ 2e-6 for both (measured 9.5e-7 / 1.5e-6, see `docs/api/python_api.md`). An earlier entry here said "< 2e-7"; the measured error of the tanh variant was 1.2e-6.
 - [✅] ReLU (`_mm256_max_ps`, exact)
-- [✅] SiLU/Swish (`x·sigmoid(x)` via fast tanh, < 2e-7 error)
+- [✅] SiLU/Swish, `x / (1 + exp(−x))` since W3, `|err| ≤ 1e-35 + 1e-6·|ref|` for every finite x. An earlier entry here said "via fast tanh, < 2e-7 error"; that form's error grew without bound below x = −16 (DESIGN.md §3.3).
 - [✅] Softmax (numerically stable, max-subtraction, double accumulation)
-- [✅] LayerNorm (3-pass AVX2, double horizontal accumulation, optional γ/β)
-- [✅] Shared `simd_math.hpp`: production-grade `fast_exp_avx2` + `tanh_avx2`
+- [✅] LayerNorm: two passes for the statistics (float lanes added into a double every 1024 elements) and one to normalize, optional γ/β (DESIGN.md §3.5)
+- [✅] Shared `simd_math.hpp`: `fast_exp_avx2` + `tanh_avx2`
 
 ---
 
@@ -54,10 +54,10 @@
 ## v0.6 — Statistical Benchmarking ✅
 - [✅] `bench_stat.cpp`: wall-clock timing, 95% CI, JSON output, CPU pinning
 - [✅] Benchmark protocol: `python -m simd_ml_kernels bench --json`, committed results, generated tables (docs/BENCHMARKS.md). The earlier `check_regression.py` gate on shared CI runners was removed.
-- [✅] `bench.yml` weekly cron + automated regression check
-- [✅] `docs/BENCHMARKS.md` with roofline analysis and reproducibility instructions
-- [✅] OpenBLAS baseline comparison with real measured data (`-DBENCH_OPENBLAS=ON`,
-      wired into both `bench` and `bench_stat`; see `docs/BENCHMARKS.md §Positioning vs OpenBLAS`)
+- [✅] `bench.yml` weekly run on a shared runner, uploaded as an artifact (no regression gate; not used for claims)
+- [✅] `docs/BENCHMARKS.md`: protocol, reproduction commands and generated tables (GEMV rows as % of measured bandwidth roofs)
+- [✅] OpenBLAS baseline in the same process: NumPy's OpenBLAS in `python -m simd_ml_kernels bench`;
+      `-DBENCH_OPENBLAS=ON` links the system BLAS into `bench_stat` (development only)
 
 ---
 
@@ -89,7 +89,7 @@ spans the full 16-column width, so there is no "second half" to forget by
 construction. Both were verified via standalone hand-computed unit-test
 harnesses run on real AVX-512 hardware before being wired into their
 respective dispatch paths, plus permanent forced-full-coverage regression
-tests in `tests/test_gemm.cpp` and `tests/test_gemm_packed.cpp` that choose
+tests (now in `tests/test_gemm_packed.cpp`) that choose
 M/N dimensions with zero possible edge/tail blocks — so a broken full-block
 kernel cannot be masked by scalar-fallback correctness. Both pass under
 AddressSanitizer + UndefinedBehaviorSanitizer with zero findings.
@@ -102,44 +102,37 @@ That bug is why AVX-512 dispatch was disabled for an entire release cycle —
 `inner_NR` was fixed at 16 (AVX2-only) regardless of detected hardware.
 
 Performance numbers that used to be listed here came from an unpinned,
-shared sandbox with no committed metadata and have been removed. Neither
-machine available now has AVX-512, so the AVX-512 kernels cannot be
-re-measured; see docs/BENCHMARKS.md for what is measured.
+shared sandbox with no committed metadata and have been removed. The AVX-512
+kernels have since been measured on a 2-vCPU Emerald Rapids cloud VM
+(`cloud-xeon-emr-2vcpu_*.json`; FP32, FP16/BF16 and INT8 GEMM and the
+activations); see docs/BENCHMARKS.md.
 
 **Remaining scope (not yet done):**
-- [❌] Tile-size re-tuning for Sapphire Rapids / Zen 4 (larger L2, different
-      port layout) — current MC/KC/NC constants were derived for Skylake-class
-      caches and are not yet re-validated on newer AVX-512 microarchitectures.
-- [✅] AVX-512 BF16/VNNI paths (W4): BF16 `vdpbf16ps` and INT8 AVX512_VNNI,
-      CPUID-gated, correct under SDE `-spr` / `-icx`; speed not measured.
+- [✅] Block sizes (KC/MC/NC) are derived at run time from CPUID leaf 4 of the
+      running core since W3 (DESIGN.md §2.3), not fixed for Skylake-class caches.
+- [❌] Micro-kernel and VNNI tile tuning on an AVX-512 machine: the 12×32
+      shapes were chosen from register and port counts and checked under SDE;
+      the cloud VM measurements were not used to tune them.
+- [✅] AVX-512 BF16/VNNI paths (W4): BF16 `vdpbf16ps` (opt-in) and INT8
+      AVX512_VNNI, CPUID-gated, correct under SDE `-spr` / `-icx`; measured on
+      the Emerald Rapids VM (DESIGN.md §4).
 
-**Since resolved:** `isa=` (in `sgemm()` / `GEMMConfig`) now genuinely forces
-a specific kernel per-call — `set_gemm_isa_override`/`get_gemm_isa_override`
-(thread_local, RAII-guarded around each call so it never leaks into
-subsequent calls) in `avx2_gemm_packed.cpp`, wired through
-`pybind_entry.cpp`. Requesting `isa="avx512"` on hardware without
-AVX-512F+DQ raises `RuntimeError` (checked against
-`gemm_packed_avx512_hardware_available()`, also exposed to Python as
-`simd_ml_kernels.avx512_available()`). `isa="scalar"` is a recognized value
-but raises `RuntimeError` ("not yet implemented") rather than silently
-falling back, since no forced full-matrix scalar path exists yet. Verified
-via a direct C++ test (`test_gemm_isa_override` in
-`tests/test_gemm_packed.cpp`) that proves the override changes
-`gemm_packed_isa_is_avx512()`'s return value in both directions — not
-inferred from numeric equivalence, which could mask a broken override on
-hardware where auto-detect and a forced choice happen to coincide.
+**Since replaced:** `isa=` (in `sgemm()` / `GEMMConfig`) runs the named
+kernel table (`"scalar"`, `"avx2"`, `"avx512"`) for that call; a table this
+build or CPU cannot run raises `RuntimeError` (DESIGN.md §2.6, §6). It used
+to be a thread-local override inside the AVX2 GEMM file, under which
+`isa="scalar"` raised "not yet implemented"; the per-ISA kernel tables of W2
+replaced both.
 
 ---
 
 ## v0.9 — Additional Primitives (Planned)
-- [✅] Skip panel packing below a size threshold (direct unpacked micro-kernel
-      call for small N). `sgemm_direct_avx2`: plain AVX2 FMA loop on original
-      strides, no buffer allocation. Dispatched automatically from `sgemm_packed`
-      when `max(M,N,K) ≤ SMALL_GEMM_THRESHOLD=128`. At N=64, the fixed KC×NC
-      packing buffer (≈2 MB regardless of actual N) was costing more than the
-      arithmetic itself. The direct path fixes this.
-      Tested in `test_gemm_packed.cpp::test_small_gemm_direct_path()` across 8
-      representative shapes including the key N=64 regression case.
+- [✅] Skip panel packing for small products. Since W3 the 6×16 micro-kernel
+      runs on A and B in place for products up to 80³, for N ≤ 16 and for
+      M = 1 (`sgemm_avx2_prefers_direct`, DESIGN.md §2.1), and the packing
+      buffers persist per thread. (The first version, a loop with one FMA
+      chain per output strip below `max(M,N,K) ≤ 128`, was latency-bound: 24%
+      of OpenBLAS at N = 128.) Tested in `tests/test_gemm_packed.cpp`.
 - [✅] BF16 and FP16 GEMM (`sgemm_bf16`, `sgemm_f16` → float32). Since W4 the
       inputs are converted to FP32 once while packing and the FP32 micro-kernels
       run unchanged (DESIGN.md §4); the first versions converted B on every use
@@ -156,21 +149,24 @@ hardware where auto-detect and a forced choice happen to coincide.
 
 Each item is done when its tests, committed benchmark JSON and docs are in.
 
-- **W2 — portable builds** (in review: #17, #18, #19). Per-ISA translation units with explicit flags
+- **W2 — portable builds** (done: #17, #18, #19). Per-ISA translation units with explicit flags
   (baseline scalar, AVX2+FMA+F16C, AVX-512F/DQ/BW/VL) instead of
   `-march=native` (kept as an opt-in for local benchmarking); runtime dispatch
   from CPUID + XGETBV, resolved once; a scalar path for every kernel;
   `-ffast-math` only where tests show it is safe; FTZ/DAZ test; AVX-512
-  correctness under Intel SDE; wheels built with cibuildwheel (not published).
+  correctness under Intel SDE; wheels built with cibuildwheel (0.3.0rc1 is
+  on TestPyPI, not yet on PyPI).
 - **W3 — GEMM.** Done: one register-blocked 6×16 AVX2 kernel for small
   (unpacked) and large (packed) products, blocking from CPUID leaf 4,
   persistent packing buffers (N = 128 went from 24% to 95% of OpenBLAS on the
   reference laptop; BENCHMARKS.md); AVX-512 12×32 micro-kernel with 24
-  accumulators (correct under SDE; speed not measured yet); `trans_a`/`trans_b`
-  in packing; LayerNorm two-pass kept (single-pass Welford measured slower
-  for rows up to 1024 and less accurate). Remaining: AVX-512 measurement on
-  real hardware; OpenMP on by default with a scaling table. Measured on
-  ≥ 2 CPUs.
+  accumulators (correct under SDE; 87–107% of OpenBLAS at N = 128–2048 on the
+  Emerald Rapids cloud VM, `cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`, so
+  below the 90% target at N = 2048); `trans_a`/`trans_b` in packing;
+  LayerNorm two-pass kept (single-pass Welford measured slower for rows up to
+  1024 and less accurate); OpenMP threading as a build option (#24).
+  Remaining: AVX-512 on bare metal; a thread-scaling table on the i9-9900
+  workstation, which decides whether OpenMP becomes the default.
 - **W4 — low precision that is faster than FP32.** Done: BF16/FP16 converted
   at pack time (95–101% of the FP32 GEMM at N = 128–2048, faster where
   reading B dominates; memory savings only on AVX2, which has no 16-bit FMA;
@@ -185,19 +181,23 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
 - **W5 — CPU LLM decode kernels**, judged by achieved GB/s as a % of the
   measured single-core read stream (and STREAM triad) against PyTorch CPU and
   llama.cpp, one PR per kernel family, in this order:
-  1. *Bandwidth roofs and the FP32/FP16/BF16 decode GEMV* (in review): read
+  1. *Bandwidth roofs and the FP32/FP16/BF16 decode GEMV* (done, #32): read
      stream and STREAM triad in `bench`; `x @ W.T` with W [N, K] streamed in
      place for up to 8 rows (`trans_b` for `sgemm_f16`/`sgemm_bf16`);
      DESIGN.md §2.7. On the reference laptop's P-core: FP32 at 97–99% of the
      read stream (1.03–1.05× PyTorch, 1.00–1.20× OpenBLAS sgemv), FP16/BF16
      at 90–99% (1.78–1.92× PyTorch's `F.linear`)
-     (`lnl-226v-wsl_2026-10-18_ecc219baa1f2`). AVX-512 speed: pending a cloud
-     run.
+     (`lnl-226v-wsl_2026-10-18_ecc219baa1f2`). AVX-512 speed: not measured;
+     the cloud VM's single-core bandwidth varied 5.8–11 GB/s between runs
+     (it moved hosts), so a roof measured once per run is not usable there
+     (DESIGN.md §2.7).
   2. Q8_0 weight-only GEMV with fused dequantization (`quantize_q8_0`,
      `gemv_q8_0`; ggml `block_q8_0` layout, group 32; x quantized to Q8 blocks
      once per call, integer dots with VNNI where available), compared with
      llama.cpp `test-backend-ops perf -o MUL_MAT`; `sgemm_u8s8`'s single-row
-     case routed to a row-streaming VNNI path.
+     case routed to a row-streaming VNNI path; the bandwidth roof measured
+     per case instead of once per run (the once-per-run roof drifted by
+     several percent between runs on the laptop).
   3. Q4_0 (`quantize_q4_0`, `gemv_q4_0`; ggml `block_q4_0`, rounding as
      `quantize_row_q4_0_ref`).
   4. Fused RMSNorm and SwiGLU (`silu(gate) * up`) epilogues.
@@ -225,14 +225,18 @@ throughput against PyTorch is in docs/BENCHMARKS.md.)
 ## Known Honest Limitations (never remove this section)
 
 These limitations are explicitly documented to help users understand the gap
-between simd-ml-kernels and production BLAS libraries.
+between simd-ml-kernels and production BLAS libraries. Two rows were removed
+when W3 fixed them: fixed Skylake-class block sizes (now from CPUID leaf 4)
+and small products at 24% of OpenBLAS (93% at N = 128 in
+`lnl-226v-wsl_2026-10-18_ecc219baa1f2`).
 
 | Limitation | Impact | Planned fix |
 |---|---|---|
-| Fixed tile sizes (MC/KC/NC) | Chosen for Skylake-class caches; not derived from the running CPU | W3 |
-| Small matrices (max(M,N,K) ≤ 128) | One FMA chain per output strip: 24% of OpenBLAS at N = 128 on the reference laptop | W3 |
+| FP32 GEMM below OpenBLAS on large AVX-512 products | 87% of OpenBLAS at N = 2048 and 91% at N = 1024 on the Emerald Rapids cloud VM (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`); the 12×32 tile was not tuned there, and no bare-metal AVX-512 result exists | AVX-512 tuning on a controlled machine |
 | Single-threaded default | OpenMP is a build option, off by default; the threaded GEMM (shared B panel, dynamic chunks) has no published scaling numbers yet (needs a non-hybrid 8-core CPU) | W3 |
 | INT8 GEMM: single-threaded; GEMV shapes | No threaded path; one row times a weight matrix runs at 0.46× PyTorch's quantized linear (every call packs all of B), and the FP32 conversion path (CPUs without VNNI) at 0.47× our FP32 GEMM there (DESIGN.md §4.2); AVX512_VNNI on Emerald Rapids: 0.66–0.70× PyTorch at N = 512–2048 (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | W5 (quantized GEMV), AVX-512 VNNI tile tuning |
 | BF16/FP16 GEMM: memory savings only on AVX2 | No 16-bit FMA on AVX2: about the FP32 GEMM's speed on compute-bound shapes; a single row times B stored [K, N] is faster than our FP32 but loses to PyTorch (0.58–0.63×; with W stored [N, K], the decode GEMV, 1.78–1.92× PyTorch, `lnl-226v-wsl_2026-10-18_ecc219baa1f2`); narrow N ≤ 16 shapes pay for converting A (DESIGN.md §4); `vdpbf16ps` measured at 64–73% of our FP32 GEMM on Emerald Rapids, slower than the conversion path (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | [K, N] single row: not planned (models store W [N, K]); `vdpbf16ps` is opt-in (`SIMD_ML_BF16_DOT=1`) |
-| Decode GEMV: one core | Single-threaded, so it is bounded by one core's read bandwidth (31.8 GB/s on the reference laptop), not by DRAM; AVX-512 speed not measured yet; FP32 is level with PyTorch and OpenBLAS (all near that roof); 9–16 rows with W [N, K] now pack W (at most 9% slower than the dot path in dev runs, not in a JSON; DESIGN.md §2.7) | W5 item 6 (opt-in OpenMP GEMV); cloud run for AVX-512 |
+| Decode GEMV: one core | Single-threaded, so it is bounded by one core's read bandwidth (31.8 GB/s on the reference laptop), not by DRAM; AVX-512 speed not measured (the cloud VM's bandwidth varied 5.8–11 GB/s between runs); FP32 is level with PyTorch and OpenBLAS (all near that roof); 9–16 rows with W [N, K] now pack W (at most 9% slower than the dot path in dev runs, not in a JSON; DESIGN.md §2.7) | W5 item 6 (opt-in OpenMP GEMV); roof measured per case (W5 item 2), then an AVX-512 run |
+| BF16 GEMM against PyTorch on AMX CPUs | 0.14–0.72× PyTorch's bfloat16 `matmul` on the Emerald Rapids VM (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`); PyTorch's rate implies AMX tiles, which this library does not use (DESIGN.md §4.1) | not planned |
+| x86 only, no Windows wheels | SIMD kernels are x86-64 only (scalar elsewhere; macOS arm64 wheels are scalar-only); wheels exist for manylinux x86-64 and macOS arm64, CPython 3.9–3.13; elsewhere pip builds the sdist, which needs a C++17 compiler (pip fetches CMake and Ninja) | not planned |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |

@@ -1,21 +1,18 @@
 /**
  * pybind_entry.cpp — Python Bindings via pybind11
  *
- * Exposes SIMD GEMM and activation kernels to Python with NumPy-compatible
- * array access. The binding layer handles:
- *   - shape, dtype, and contiguity validation
- *   - GIL release during computation (allows Python multithreading)
- *   - Aligned temporary buffers when needed
- *   - Clear error messages for common user mistakes
+ * Exposes the GEMM (FP32, FP16/BF16-input, INT8) and activation kernels to
+ * Python on NumPy arrays. Every entry point:
+ *   - checks dtype, shape, C-contiguity and writeability (validate_array,
+ *     check_writeable, output_matrix) and raises DTypeError / ArgumentError
+ *   - allocates the output if none was given
+ *   - releases the GIL and calls one kernel through simd_ml::kernels(), the
+ *     table chosen for this CPU (src/dispatch/)
  *
- * ─── Zero-Copy Strategy ───────────────────────────────────────────────────────
- * pybind11's py::array_t<float, py::array::c_contiguous> descriptor enforces:
- *   1. dtype == float32
- *   2. C-contiguous memory layout (row-major)
- *   3. Direct access to the buffer pointer via .mutable_data() / .data()
- *
- * This means `np.array(..., dtype=np.float32)` passed from Python goes directly
- * to the C++ kernel with no allocation or copy overhead.
+ * ─── Zero copy ────────────────────────────────────────────────────────────────
+ * Arrays are never converted: a float64 or strided input is an error, not a
+ * hidden copy, and a caller's C is written in place. The kernels read the
+ * NumPy buffers directly.
  *
  * ─── Build ────────────────────────────────────────────────────────────────────
  *   pip install -e .       # via scikit-build-core (recommended)
@@ -839,9 +836,9 @@ static bool py_bf16_avx512bf16_available() {
  * GEMMConfig — callable GEMM configuration object (roadmap §9 DX vision).
  *
  * Stores default alpha, beta, and isa values. Tile parameters (tile_m, tile_n,
- * tile_k, mr, nr) are accepted for API completeness and future auto-tuning
- * integration; they do not currently change dispatch (the compiled kernel uses
- * compile-time constants). See ROADMAP.md §v0.9.
+ * tile_k, mr, nr) are accepted and validated but change nothing: the
+ * micro-kernel shape is fixed per table and the block sizes come from CPUID
+ * leaf 4 (dispatch::gemm_blocking, docs/DESIGN.md §2.3).
  *
  * Python usage:
  *   gemm = sk.GEMMConfig(tile_m=128, tile_n=128, tile_k=256, mr=8, nr=8)
@@ -901,15 +898,16 @@ struct GEMMConfig {
 
 PYBIND11_MODULE(_core, m) {
     m.doc() =
-        "simd-ml-kernels: Hand-vectorized AVX2/AVX-512 microkernels for ML workloads.\n\n"
-        "All operations are zero-copy: NumPy float32 array buffers are used directly.\n"
+        "simd-ml-kernels: hand-vectorized x86 SIMD kernels (scalar, AVX2, AVX-512,\n"
+        "VNNI) for GEMM, decode GEMV and ML activations on NumPy arrays.\n\n"
+        "Arrays are never converted: the NumPy buffers are used directly.\n"
         "The GIL is released during computation for threading compatibility.\n\n"
         "Quick start:\n"
         "    import numpy as np, simd_ml_kernels as sk\n"
         "    A = np.random.randn(256, 256).astype(np.float32)\n"
         "    B = np.random.randn(256, 256).astype(np.float32)\n"
         "    C = sk.sgemm(A, B)           # SIMD GEMM\n"
-        "    y = sk.gelu(x)               # Vectorized GeLU\n"
+        "    y = sk.gelu(C)               # Vectorized GeLU\n"
         "    print(sk.build_info())       # ISA and build details\n";
 
     // PyErr_NewException accepts a tuple of bases, giving each error two
@@ -1073,8 +1071,9 @@ Useful for checking before requesting isa='avx512' explicitly:
 
     m.def("bf16_avx512bf16_available", &py_bf16_avx512bf16_available,
           "Return True if this CPU supports AVX-512 BF16 (vdpbf16ps). Not required for "
-          "sgemm_bf16; where it is True, the AVX-512 table's sgemm_bf16 uses vdpbf16ps "
-          "for packed single-threaded products (speed not measured; see sgemm_bf16).");
+          "sgemm_bf16; where it is True and SIMD_ML_BF16_DOT=1 is set, the AVX-512 table's "
+          "sgemm_bf16 uses vdpbf16ps for packed single-threaded products (off by default: "
+          "slower than the conversion path where measured; see sgemm_bf16).");
 
     m.def("sgemm_bf16", &py_sgemm_bf16,
           py::arg("A"), py::arg("B"),

@@ -16,7 +16,8 @@ under **Changed** with a migration note.
   registers, no packing) on the scalar, AVX2 and AVX-512 tables. Measured on
   the reference laptop's P-core: FP16/BF16 at 90–99% of the single-core read
   bandwidth and 1.78–1.92× PyTorch's `F.linear`; FP32 at 97–99%, 1.03–1.05×
-  PyTorch. AVX-512: correct under SDE, speed not measured. docs/DESIGN.md §2.7.
+  PyTorch. AVX-512: correct under SDE, speed not measured (the only AVX-512
+  machine, a cloud VM, gave 5.8–11 GB/s between runs). docs/DESIGN.md §2.7.
 - `python -m simd_ml_kernels bench`: memory-bandwidth roofs (a read-only
   stream and the STREAM triad, arrays of at least 4× the last-level cache,
   single core; `machine.stream_read_gbs`, `machine.stream_triad_gbs`) and
@@ -30,6 +31,12 @@ under **Changed** with a migration note.
   K = 4096 (docs/DESIGN.md §2.7). The scalar table computes x·Wᵀ as dot
   products along rows. Results change only by rounding (a different
   summation order, within the documented bound).
+- Documentation: README rewritten for readers outside ML systems (what the
+  library is for and not for, install from TestPyPI, a decode example, what
+  each measurement means); README links are absolute so they work on PyPI;
+  stale claims fixed across the docs and docstrings (AVX-512 results from the
+  cloud VM, SiLU and LayerNorm methods, the BF16 `vdpbf16ps` opt-in, the
+  package description).
 
 ## 0.3.0rc1 — 2026-10-18
 
@@ -43,7 +50,9 @@ under **Changed** with a migration note.
   Measured with AVX-VNNI on the reference laptop: 2.39–3.68× the FP32 GEMM and
   1.66–2.04× PyTorch's `quantized.linear` at N = 128–2048; a single row times
   a 4096×4096 matrix loses to PyTorch (0.46×); the conversion path runs at
-  the FP32 GEMM's speed. AVX512_VNNI: correct under SDE, speed not measured.
+  the FP32 GEMM's speed. AVX512_VNNI: correct under SDE; on a 2-vCPU Emerald
+  Rapids cloud VM 1.43–2.75× the FP32 GEMM but 0.66–0.70× PyTorch from
+  N = 512 up (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`).
   docs/DESIGN.md §4.2.
 - `sgemm(..., trans_a=False, trans_b=False)` (keyword-only): C = alpha·op(A)·op(B)
   + beta·C with op(X) = X or Xᵀ, as BLAS transa/transb. A stored `[K, M]` /
