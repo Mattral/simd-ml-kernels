@@ -13,6 +13,17 @@ under **Changed** with a migration note.
   file, `lnl-226v-wsl_2026-10-19_290b91baad26.json`, keeps it as recorded).
 
 ### Added
+- **`quantize_q4_0(W)`** and **`gemv_q4_0(x, Wq, N, K)`**: decode GEMV on
+  weights in ggml's Q4_0 format (`block_q4_0`, byte-identical: float16
+  scale + 16 bytes of 4-bit values; quantization as `quantize_row_q4_0_ref`,
+  checked against blocks written by llama.cpp v0.7.0). x is quantized to Q8
+  blocks once per call, as for `gemv_q8_0`; exact integer block dot
+  products, two weight rows per register; same paths as
+  `build_info()['q8_0_path']`. K % 32 != 0 raises `ArgumentError`.
+  docs/DESIGN.md §2.9.
+- `python -m simd_ml_kernels bench`: Q4_0 GEMV cases (`--cases q4_0`) against
+  our Q8_0 and FP32 GEMV, PyTorch's FP32 `F.linear` on the dequantized
+  weights and ggml's Q4_0 MUL_MAT on one thread.
 - **`quantize_q8_0(W)`** and **`gemv_q8_0(x, Wq, N, K)`**: decode GEMV on
   weights in ggml's Q8_0 format (`block_q8_0`, byte-identical: float16 scale
   + 32 int8 per block; quantization as `quantize_row_q8_0_ref`). x is
