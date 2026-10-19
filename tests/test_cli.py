@@ -1,6 +1,7 @@
 """python -m simd_ml_kernels {info,selftest}."""
 
 import json
+import re
 import subprocess
 import sys
 
@@ -33,6 +34,16 @@ def test_selftest_reports_exceptions_as_failures(monkeypatch, capsys):
     monkeypatch.setattr(_cli.sk, "silu", boom)
     assert _cli.main(["selftest"]) == 1
     assert "kernel crashed" in capsys.readouterr().out
+
+
+def test_git_commit_is_a_bare_hash():
+    """build_info()["git_commit"]: the first 12 hex digits of the commit built,
+    "-dirty" if tracked files had local changes (CMakeLists.txt); "unknown"
+    only for a build without git (an sdist)."""
+    commit = simd_ml_kernels.build_info()["git_commit"]
+    if commit == "unknown":
+        pytest.skip("built without git (sdist): git_commit is 'unknown'")
+    assert re.fullmatch(r"[0-9a-f]{12}(-dirty)?", commit), commit
 
 
 def test_info_json_has_build_and_cpu_fields(capsys):

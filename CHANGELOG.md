@@ -6,6 +6,12 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
+### Fixed
+- `build_info()["git_commit"]` is the bare 12-digit commit hash again (plus
+  `-dirty` for local changes). Since the v0.3.0 tag, CMake's `git describe`
+  had returned `v0.3.0-<n>-g<hash>`; benchmark JSONs recorded that form (one
+  file, `lnl-226v-wsl_2026-10-19_290b91baad26.json`, keeps it as recorded).
+
 ### Added
 - **`quantize_q8_0(W)`** and **`gemv_q8_0(x, Wq, N, K)`**: decode GEMV on
   weights in ggml's Q8_0 format (`block_q8_0`, byte-identical: float16 scale
