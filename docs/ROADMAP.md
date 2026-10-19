@@ -194,13 +194,16 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
      the cloud VM's single-core bandwidth varied 5.8–11 GB/s between runs
      (it moved hosts), so a roof measured once per run is not usable there
      (DESIGN.md §2.7).
-  2. Q8_0 weight-only GEMV with fused dequantization (`quantize_q8_0`,
-     `gemv_q8_0`; ggml `block_q8_0` layout, group 32; x quantized to Q8 blocks
-     once per call, integer dots with VNNI where available), compared with
-     llama.cpp `test-backend-ops perf -o MUL_MAT`; `sgemm_u8s8`'s single-row
-     case routed to a row-streaming VNNI path; the bandwidth roof measured
-     per case instead of once per run (the once-per-run roof drifted by
-     several percent between runs on the laptop).
+  2. *Q8_0 GEMV* (done, W5 PR2): `quantize_q8_0` / `gemv_q8_0` (ggml
+     `block_q8_0`, byte-identical; x quantized once per call; `vpdpbusd`,
+     `vpmaddubsw`), `sgemm_u8s8`'s single row read in place, the read roof
+     measured in each case (fastest read-only loop, including the GEMV row
+     pattern; `roof_unstable` above 105%). Laptop (`lnl-226v-wsl_2026-10-19_290b91baad26`): 92–95% of the
+     roof, 1.46–1.82× ggml's Q8_0 MUL_MAT on one thread, 3.49–3.61× our FP32
+     GEMV; `sgemm_u8s8` 1×4096×4096 at 1.36× PyTorch (was 0.46×). DESIGN.md
+     §2.8. Open: FP32 GEMV 1×4096×11008 still above 105% of its roof (109.6%
+     in that run, not shown): the roof is a lower bound, and a tighter one
+     (or a protocol for it) is a later item; AVX-512 GEMV run.
   3. Q4_0 (`quantize_q4_0`, `gemv_q4_0`; ggml `block_q4_0`, rounding as
      `quantize_row_q4_0_ref`).
   4. Fused RMSNorm and SwiGLU (`silu(gate) * up`) epilogues.
@@ -237,9 +240,10 @@ and small products at 24% of OpenBLAS (93% at N = 128 in
 |---|---|---|
 | FP32 GEMM below OpenBLAS on large AVX-512 products | 87% of OpenBLAS at N = 2048 and 91% at N = 1024 on the Emerald Rapids cloud VM (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`); the 12×32 tile was not tuned there, and no bare-metal AVX-512 result exists | AVX-512 tuning on a controlled machine |
 | Single-threaded default | OpenMP is a build option, off by default; the threaded GEMM (shared B panel, dynamic chunks) has no published scaling numbers yet (needs a non-hybrid 8-core CPU) | W3 |
-| INT8 GEMM: single-threaded; GEMV shapes | No threaded path; one row times a weight matrix runs at 0.46× PyTorch's quantized linear (every call packs all of B), and the FP32 conversion path (CPUs without VNNI) at 0.47× our FP32 GEMM there (DESIGN.md §4.2); AVX512_VNNI on Emerald Rapids: 0.66–0.70× PyTorch at N = 512–2048 (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | W5 (quantized GEMV), AVX-512 VNNI tile tuning |
+| INT8 GEMM: single-threaded | No threaded path; AVX512_VNNI on Emerald Rapids: 0.66–0.70× PyTorch at N = 512–2048 (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`). One row times a weight matrix now reads it in place (1.36× PyTorch at 1×4096×4096 on the laptop, `lnl-226v-wsl_2026-10-19_290b91baad26`; was 0.46×) | AVX-512 VNNI tile tuning |
 | BF16/FP16 GEMM: memory savings only on AVX2 | No 16-bit FMA on AVX2: about the FP32 GEMM's speed on compute-bound shapes; a single row times B stored [K, N] is faster than our FP32 but loses to PyTorch (0.58–0.63×; with W stored [N, K], the decode GEMV, 1.78–1.92× PyTorch, `lnl-226v-wsl_2026-10-18_ecc219baa1f2`); narrow N ≤ 16 shapes pay for converting A (DESIGN.md §4); `vdpbf16ps` measured at 64–73% of our FP32 GEMM on Emerald Rapids, slower than the conversion path (`cloud-xeon-emr-2vcpu_2026-10-18_9029f1566ddb`) | [K, N] single row: not planned (models store W [N, K]); `vdpbf16ps` is opt-in (`SIMD_ML_BF16_DOT=1`) |
-| Decode GEMV: one core | Single-threaded, so it is bounded by one core's read bandwidth (31.8 GB/s on the reference laptop), not by DRAM; AVX-512 speed not measured (the cloud VM's bandwidth varied 5.8–11 GB/s between runs); FP32 is level with PyTorch and OpenBLAS (all near that roof); 9–16 rows with W [N, K] now pack W (at most 9% slower than the dot path in dev runs, not in a JSON; DESIGN.md §2.7) | W5 item 6 (opt-in OpenMP GEMV); roof measured per case (W5 item 2), then an AVX-512 run |
+| Decode GEMV: one core | Single-threaded, so it is bounded by one core's read bandwidth (32–36 GB/s read roof on the reference laptop), not by DRAM; AVX-512 speed not measured (the cloud VM's bandwidth varied 5.8–11 GB/s between runs); FP32 is level with PyTorch and OpenBLAS (all near that roof); 9–16 rows with W [N, K] now pack W (at most 9% slower than the dot path in dev runs, not in a JSON; DESIGN.md §2.7) | W5 item 6 (opt-in OpenMP GEMV); an AVX-512 run with the per-case roof |
+| Read roof is a lower bound | The roof is the fastest read-only loop we have (part sums and the GEMV row pattern); the FP32 GEMV still read 109.6% of it at 1×4096×11008 (`lnl-226v-wsl_2026-10-19_290b91baad26`), so that case is `roof_unstable` and not shown | A tighter single-core read roof, or a protocol for it (after W5 PR2) |
 | BF16 GEMM against PyTorch on AMX CPUs | 0.14–0.72× PyTorch's bfloat16 `matmul` on the Emerald Rapids VM (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`); PyTorch's rate implies AMX tiles, which this library does not use (DESIGN.md §4.1) | not planned |
 | x86 only, no Windows wheels | SIMD kernels are x86-64 only (scalar elsewhere; macOS arm64 wheels are scalar-only); wheels exist for manylinux x86-64 and macOS arm64, CPython 3.9–3.13; elsewhere pip builds the sdist, which needs a C++17 compiler (pip fetches CMake and Ninja) | not planned |
 | No NUMA-aware allocation | Throughput degrades on multi-socket systems | Milestone 9 |

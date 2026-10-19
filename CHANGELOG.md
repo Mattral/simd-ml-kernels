@@ -13,7 +13,11 @@ under **Changed** with a migration note.
   quantized to Q8 blocks once per call (float32 scales); exact integer
   block dot products with `vpdpbusd` (AVX-VNNI, AVX512_VNNI) or
   `vpmaddubsw` (AVX2), FP32 sums; `build_info()['q8_0_path']`. K % 32 != 0
-  raises `ArgumentError`. docs/DESIGN.md §2.8. RESULTS_CHANGELOG_Q8
+  raises `ArgumentError`. docs/DESIGN.md §2.8. Measured on the reference laptop's P-core
+  (`lnl-226v-wsl_2026-10-19_290b91baad26`): 92–95% of the read roof at 1×4096×4096,
+  1×4096×11008 and 1×2048×8192; 3.49–3.61× our FP32 GEMV, 1.77–2.05× our
+  BF16 GEMV, and 1.46–1.82× ggml's Q8_0 MUL_MAT (llama.cpp v0.7.0, one
+  thread, `test-backend-ops perf`).
 - `python -m simd_ml_kernels bench`: Q8_0 GEMV cases against our FP32/BF16
   GEMV, PyTorch's FP32 `F.linear` on the dequantized weights and, when
   `SIMD_ML_GGML_TEST_BACKEND_OPS` names llama.cpp's `test-backend-ops`,
@@ -22,7 +26,8 @@ under **Changed** with a migration note.
 ### Changed
 - `sgemm_u8s8` with one row of A and `trans_b=True` (x·Wᵀ for one token)
   reads B in place instead of packing it, on every x86 path (exact integer
-  sums; same results within the documented bound). RESULTS_CHANGELOG_U8S8
+  sums; same results within the documented bound). At 1×4096×4096 on the
+  laptop: 1.36× PyTorch's quantized linear, was 0.46× (`lnl-226v-wsl_2026-10-19_290b91baad26`).
 - `bench`: each GEMV case measures its own read roof (the read stream timed
   interleaved with the case); `pct_stream_read` is relative to it
   (`roof_read_gbs`). A case with an implementation above 105% of its own roof
