@@ -220,13 +220,27 @@ if(pybind11_FOUND)
     # Build metadata reported by build_info() and `python -m simd_ml_kernels
     # info`, and recorded in benchmark JSON. The commit is taken when CMake
     # configures, so a build directory reused across commits reports the
-    # commit it was configured at; "-dirty" marks uncommitted changes.
+    # commit it was configured at: the first 12 hex digits of HEAD (exactly
+    # 12; `git describe` gave "v0.3.0-4-g<hash>" once a tag existed), plus
+    # "-dirty" if tracked files differ from HEAD (`git status` refreshes the
+    # index first, so a touched but unchanged file does not count, as with
+    # `describe --dirty`). Without git (an sdist build): "unknown".
     execute_process(
-        COMMAND git describe --always --dirty --abbrev=12
+        COMMAND git rev-parse HEAD
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        OUTPUT_VARIABLE _simd_ml_git OUTPUT_STRIP_TRAILING_WHITESPACE
+        OUTPUT_VARIABLE _simd_ml_head OUTPUT_STRIP_TRAILING_WHITESPACE
         RESULT_VARIABLE _simd_ml_git_rc ERROR_QUIET)
-    if(NOT _simd_ml_git_rc EQUAL 0 OR NOT _simd_ml_git)
+    if(_simd_ml_git_rc EQUAL 0 AND _simd_ml_head MATCHES "^[0-9a-f]+$")
+        string(SUBSTRING "${_simd_ml_head}" 0 12 _simd_ml_git)
+        execute_process(
+            COMMAND git status --porcelain --untracked-files=no
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE _simd_ml_git_status OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _simd_ml_status_rc ERROR_QUIET)
+        if(NOT _simd_ml_status_rc EQUAL 0 OR NOT _simd_ml_git_status STREQUAL "")
+            string(APPEND _simd_ml_git "-dirty")
+        endif()
+    else()
         set(_simd_ml_git "unknown")
     endif()
     target_compile_definitions(simd_ml_kernels_core PRIVATE
