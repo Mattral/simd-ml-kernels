@@ -4,6 +4,13 @@ All notable user-visible changes. The project follows semantic versioning;
 before 1.0, minor versions may contain breaking changes, which are listed
 under **Changed** with a migration note.
 
+## Unreleased
+
+### Changed
+- docs/ROADMAP.md: milestones renamed from "v0.2 … v1.0" to "Milestone 1 … 9".
+  They were work stages, not package versions, and their names collided with
+  real versions (the old "v0.3" milestone is not package 0.3.0).
+
 ## 0.3.0 — 2026-10-19
 
 First release on PyPI (`pip install simd-ml-kernels`); 0.3.0rc1 was on
