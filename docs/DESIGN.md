@@ -58,12 +58,11 @@ same code runs
 `N ≤ 16` (one panel of columns) and for `M = 1` (each element of B is used
 once, so packing it costs as much as using it). With `trans_a` the direct
 path only swaps A's strides. With `trans_b` B has no contiguous rows of N, so
-the kernel cannot read it in place: for `M ≤ 16` a third path computes dot
-products along rows of A and B (4 rows of B at a time, 8 accumulators, masked
-K tail), otherwise B is packed. The dot path is well ahead of packing, and of
-OpenBLAS's own `transb` GEMM, for a few rows (decode-style `x @ W.T`); the
-measurement is in `choose_path`. The cut-off was measured with
-both paths on the same kernel; the numbers are in the function's comment.
+the kernel cannot read it in place: for `M ≤ 8` a third path computes dot
+products along rows of A and B (the decode GEMV, §2.7), otherwise B is
+packed. The dot path is well ahead of packing, and of OpenBLAS's own
+`transb` GEMM, for a few rows (decode-style `x @ W.T`). The cut-off was
+measured with both paths on the same core; the numbers are in `choose_path`.
 Row and column remainders use the same kernel with fewer rows (a template
 parameter, 1-6) and masked B loads and C accesses (`n < 16`), so nothing
 outside C's `M × N` window is read or written.
@@ -204,6 +203,83 @@ AVX2 direct path. `sgemm(..., isa="scalar" | "avx2" | "avx512")` runs a given
 table for one call and raises if this build or CPU cannot run it. The scalar
 table's GEMM is a row-by-row loop with no blocking.
 
+### 2.7 Decode GEMV: x·Wᵀ for one or a few rows
+
+Generating one token multiplies one activation row x by every weight matrix
+W of the model (`torch.nn.Linear` layout, `[N, K]`): `sgemm(x, W, trans_b=True)`,
+`sgemm_f16(...)`, `sgemm_bf16(...)` with M = 1. Each weight is used once, so
+the time is the time to read W from DRAM; arithmetic intensity is 2 flop per
+weight (0.5 flop/byte in FP32, 1 in FP16/BF16), far below what a core can
+compute while it waits. ("Dev runs" below are timings on the reference
+laptop's P-core that decided a design choice; they are not in a JSON. The
+published numbers are in BENCHMARKS.md.)
+
+**The roof is read bandwidth.** `bench` measures two roofs on the pinned core,
+over arrays of at least 4× the last-level cache (64 MiB minimum), and reports
+every GEMV row as a percentage of both:
+
+- *read stream*: the sum of one large float32 array, 4 bytes per element,
+  nothing written, read as 2, 4 and 8 parts side by side (as the GEMV reads 4
+  or 8 rows of W at once); the roof is the fastest of the three, which can
+  only lower a kernel's percentage. This is the primary roof for a GEMV,
+  which only reads its big operand. Dev runs on the reference laptop: one
+  stream reached 25–29 GB/s, 2–8 streams 30–34 GB/s. It is a measurement,
+  not a hardware limit: runs vary by several percent, so a kernel within
+  about ±10% of 100% is at the roof.
+- *STREAM triad*: `a = b + s·c`, 12 bytes per element (STREAM's convention).
+  The store's read-for-ownership is real traffic that the convention does not
+  count, so a read-only kernel can exceed 100% of the triad: our FP32 GEMV ran
+  at 107–137% of it in dev runs, which is why it is not the GEMV's roof.
+
+**One core does not saturate DRAM.** A core reaches its bandwidth limit
+through the misses it can keep in flight (its fill buffers and prefetchers),
+not through the memory controller's limit; all cores together read several
+times more. So the single-threaded GEMV is judged against the single-core
+roofs, and an all-core triad and read stream are recorded (OpenMP builds that
+may use more than one CPU) for the threaded GEMV planned after the quantized
+ones, which will be judged against those.
+
+**Structure** (`dot_rows` / `gemm_dot_trans_b` in `avx2_gemm_packed.cpp` and
+`avx512_gemm_packed.cpp`). W is never packed: packing copies all of W once per
+call, which costs as much as using it (packed path at M = 1: 6–10 GB/s in dev
+runs against 30–34 for the row-streaming path). Instead R rows of W are
+walked together along K, R sequential streams for the hardware prefetchers;
+each step reads 16 values per row (AVX2; 32 on AVX-512) into 2 accumulators
+per row (one per row for R > 4 on AVX2, which has 16 registers). R = 4 for
+FP32 and 8 for FP16/BF16, whose 32-byte row steps would otherwise keep half
+as many bytes in flight (dev runs, 1×4096×4096 FP16: 28–31 GB/s with 4 rows,
+31–34 with 8, level with FP32). FP16 and BF16 rows are converted in registers
+(`vcvtph2ps`, or zero-extend and shift), so W is read at 2 bytes per element
+and the result has the FP32 bound of §4.1. x is FP32 (FP16/BF16 x is converted
+once per call, K values); each R-row block of W is reused from L1/L2 for every
+row of x. K tails use masked loads (AVX2 FP32, AVX-512) or a copied tail
+(AVX2 16-bit), so nothing past a row is read. Software prefetch 256–1024 bytes
+ahead on every row changed nothing beyond run-to-run noise, so there is none.
+
+**Cut-off.** With more rows of x, every row re-reads the current R-row block
+from cache with 2 loads per FMA, and packing B wins from about 9 rows at
+K = 4096 (FP32) to 12–14 (FP16/BF16); at K = 1024 from 9 (BF16) to 14 (FP32).
+`kDotRowsMax` = 8 wins or ties in every measured case; the numbers are in
+`choose_path`. A kernel that reuses each W vector for several rows of x would
+move that cut-off; batched decode is not a target of this work yet.
+
+The AVX-512 table runs the same structure with ZMM registers (row counts
+chosen on the AVX2 core); its speed is measured only on AVX-512 hardware
+(BENCHMARKS.md; pending a cloud run). The scalar table computes the same dot
+products, one accumulator per element.
+
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_ecc219baa1f2`, one
+P-core; roofs 31.8 GB/s read stream, 29.6 GB/s triad), at 1×4096×4096,
+1×4096×11008 and 1×2048×8192:
+
+- FP32: 31.1–31.4 GB/s, 97–99% of the read stream; 1.03–1.05× PyTorch's
+  `F.linear` and 1.00–1.20× OpenBLAS's sgemv. All three read at about the
+  roof, so FP32 has little left to gain on one core.
+- FP16 and BF16: 28.7–31.4 GB/s, 90–99% of the read stream; 1.78–1.92×
+  PyTorch's `F.linear` on the same 16-bit weights, which reads at 15.5–17.5
+  GB/s (49–55% of the read stream). Half the bytes of FP32 at about the same
+  GB/s, so close to half the time of our FP32 GEMV.
+
 ---
 
 ## 3. Elementwise kernels and normalization
@@ -311,10 +387,13 @@ Measured now (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_045918e51839`):
 - Square N = 128–2048: FP16 at 95–100% and BF16 at 99–101% of our FP32 GEMM;
   FP16 1.41–1.46× PyTorch's float16 `matmul`; BF16 0.97–1.16× PyTorch's
   bfloat16 `matmul` (it is slightly ahead at N = 1024 and 2048).
-- 1×4096×4096 (one row times a weight matrix, bound by reading B): FP16 at
-  180% and BF16 at 162% of our FP32 GEMM, because B is half the bytes; both
-  lose to PyTorch (0.63× and 0.58×). The single-row path walks B in 16-column
-  strips down all of K for FP32 too; a GEMV that streams rows of B is W5.
+- 1×4096×4096 with B stored [K, N] (bound by reading B): FP16 at 180% and
+  BF16 at 162% of our FP32 GEMM, because B is half the bytes; both lose to
+  PyTorch (0.63× and 0.58×; 0.62× for FP16 again in
+  `lnl-226v-wsl_2026-10-18_ecc219baa1f2`). That path walks B in 16-column
+  strips down all of K. With the weights stored [N, K] (`trans_b=True`, the
+  `torch.nn.Linear` layout a model uses) the decode GEMV of §2.7 reads at
+  90–99% of the read stream, 1.78–1.92× PyTorch's `F.linear`.
 
 Memory: A and B are stored at 2 bytes per element instead of 4. The packing
 buffers are FP32 and the same size as for the FP32 GEMM (per thread, at most

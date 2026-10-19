@@ -66,9 +66,14 @@ def sgemm_f16(
     alpha: float = 1.0,
     beta: float = 0.0,
     C: Optional[NDArray[np.float32]] = None,
+    *,
+    trans_b: bool = False,
 ) -> NDArray[np.float32]:
     """
-    FP16-input GEMM: C[float32] = alpha * A[float16] @ B[float16] + beta * C[float32]
+    FP16-input GEMM: C[float32] = alpha * A[float16] @ op(B)[float16] + beta * C[float32]
+
+    trans_b=True: B is stored [N, K] (torch.nn.Linear's weight layout) and
+    C = A @ B.T; up to 8 rows of A stream the rows of B in place (decode GEMV).
 
     A and B must have dtype=np.float16 (IEEE 754 half-precision, 16-bit).
     Output C is always float32 — FP16 accumulation loses precision at K > 64.
@@ -274,9 +279,14 @@ def sgemm_bf16(
     alpha: float = 1.0,
     beta: float = 0.0,
     C: Optional[NDArray[np.float32]] = None,
+    *,
+    trans_b: bool = False,
 ) -> NDArray[np.float32]:
     """
-    BF16-input GEMM: C[float32] = alpha * A[bfloat16] @ B[bfloat16] + beta * C[float32]
+    BF16-input GEMM: C[float32] = alpha * A[bfloat16] @ op(B)[bfloat16] + beta * C[float32]
+
+    trans_b=True: B is stored [N, K] (torch.nn.Linear's weight layout) and
+    C = A @ B.T; up to 8 rows of A stream the rows of B in place (decode GEMV).
 
     A and B store Brain Float 16 values (same exponent range as FP32, 7-bit mantissa).
     Accepts uint16 dtype (explicit bit-cast) or bfloat16 dtype (numpy>=2.0 / ml_dtypes).
@@ -340,6 +350,14 @@ def is_aligned(arr: np.ndarray) -> bool:
 
 def _measure_core_ghz(seconds: float = 0.05) -> float: ...
 def _cpu_caches() -> list[dict[str, int | str]]: ...
+def _stream_triad(
+    a: NDArray[np.float32],
+    b: NDArray[np.float32],
+    c: NDArray[np.float32],
+    s: float,
+    threads: int = 1,
+) -> None: ...
+def _stream_read(a: NDArray[np.float32], threads: int = 1, streams: int = 4) -> float: ...
 def _set_isa(isa: str) -> None: ...
 def _sgemm_u8s8_convert(
     A: NDArray[np.uint8],

@@ -166,6 +166,62 @@ def int8_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows) + _excluded_note(doc, excluded)
 
 
+GEMV = [("gemv_fp32", "FP32"), ("gemv_fp16", "FP16"), ("gemv_bf16", "BF16")]
+
+
+def _pct(v) -> str:
+    return f"{v:.0f}%" if v is not None else "not measured"
+
+
+def gemv_table(doc: dict, detail: bool) -> str:
+    """Decode GEMV y = x·Wᵀ: GB/s, % of the read-only stream (the roof for a
+    read-only kernel) and of the STREAM triad, and speed against PyTorch's
+    F.linear (and NumPy's sgemv for FP32) on the same weights."""
+    rows = ["| weights | M×N×K | simd-ml-kernels µs | GB/s | % of read stream | % of triad |"
+            " PyTorch GB/s | ours / PyTorch | OpenBLAS sgemv GB/s | ours / OpenBLAS |"
+            + (" IQR µs (ours) | IQR µs (PyTorch) | weight copies |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "") + "---:|"]
+    excluded = []
+    for kernel, label in GEMV:
+        by_shape: dict[tuple, dict] = {}
+        for r in doc["results"]:
+            if r["kernel"] == kernel:
+                by_shape.setdefault(tuple(r["shape"]), {})[r["impl"]] = r
+        for shape in sorted(by_shape, key=lambda s: (s[1] * s[2], s)):
+            impls = by_shape[shape]
+            o = impls.get(OURS)
+            t = next((v for k, v in impls.items() if k.startswith("torch")), None)
+            b = next((v for k, v in impls.items() if k.startswith("numpy")), None)
+            if o is None:
+                continue
+            shp = "×".join(str(s) for s in shape)
+            if _throttled(o, t, b):
+                excluded.append((f"{label} {shp}", o))
+                continue
+            tg = f"{t['gb_per_s']:.1f}" if t else "not measured"
+            tr = f"{o['gb_per_s'] / t['gb_per_s']:.2f}×" if t else "—"
+            bg = f"{b['gb_per_s']:.1f}" if b else "—"
+            br = f"{o['gb_per_s'] / b['gb_per_s']:.2f}×" if b else "—"
+            line = (f"| {label} | {shp} | {o['median_s'] * 1e6:.0f} | {o['gb_per_s']:.1f} |"
+                    f" {_pct(o.get('pct_stream_read'))} | {_pct(o.get('pct_stream_triad'))} |"
+                    f" {tg} | {tr} | {bg} | {br} |")
+            if detail:
+                ti = f"{t['p25_s'] * 1e6:.0f}–{t['p75_s'] * 1e6:.0f}" if t else "—"
+                line += f" {o['p25_s'] * 1e6:.0f}–{o['p75_s'] * 1e6:.0f} | {ti} | {o.get('weight_copies', 1)} |"
+            rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded)
+
+
+def _roofs(doc: dict) -> str:
+    m = doc["machine"]
+    def gbs(key):
+        v = m.get(key)
+        return f"{v:.1f} GB/s" if v is not None else "not measured"
+    return (f"single-core read stream {gbs('stream_read_gbs')}, STREAM triad {gbs('stream_triad_gbs')} "
+            f"(all-core: read {gbs('stream_read_allcore_gbs')}, triad {gbs('stream_triad_allcore_gbs')})")
+
+
 ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm"]
 
 
@@ -220,6 +276,12 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
                        f"path `{path}` (PyTorch: `torch.ops.quantized.linear`, prepacked weights, "
                        "which returns requantized uint8)\n")
             out.append(int8_table(d, detail) + "\n")
+        if any(r["kernel"] in dict(GEMV) for r in d["results"]):
+            out.append("**Decode GEMV y = x·Wᵀ (one row x, W [N, K] as torch.nn.Linear stores it), FP32 output, "
+                       f"single thread**; bandwidth roofs: {_roofs(d)}. GB/s counts the weights, x and y. "
+                       "(PyTorch: `F.linear` on the same weights in their dtype, which returns that dtype; "
+                       "OpenBLAS: NumPy's matrix-vector product, FP32 only)\n")
+            out.append(gemv_table(d, detail) + "\n")
         out.append("**Activations and normalization, out-of-place, single thread**\n")
         out.append(act_table(d, detail) + "\n")
     return "\n".join(out).rstrip() + "\n"

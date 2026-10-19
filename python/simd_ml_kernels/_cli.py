@@ -95,7 +95,7 @@ def _gemm_check(run: Callable, to_input: Callable) -> Callable[[], tuple]:
         rng = np.random.default_rng(0)
         worst, detail = 0.0, ""
         # 1x1x1, tails of the 6x16 tile, the unpacked paths (small products;
-        # M <= 4 with trans_b) and the packed path.
+        # M <= 8 with trans_b) and the packed path.
         for m, k, n in [(1, 1, 1), (7, 9, 5), (3, 70, 33), (33, 17, 65), (130, 129, 131)]:
             a = rng.standard_normal((m, k)).astype(np.float32)
             b = rng.standard_normal((k, n)).astype(np.float32)
@@ -215,6 +215,8 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
         ("sgemm trans_a", _gemm_check(
             lambda a, b: sk.sgemm(np.ascontiguousarray(a.T), b, trans_a=True), _as_f32)),
         ("sgemm_bf16", _gemm_check(lambda a, b: sk.sgemm_bf16(a, b), _as_bf16)),
+        ("sgemm_bf16 tb", _gemm_check(
+            lambda a, b: sk.sgemm_bf16(a, np.ascontiguousarray(b.T), trans_b=True), _as_bf16)),
         ("sgemm_u8s8", _u8s8_check(lambda a, b, s, zp, bs, tb: sk.sgemm_u8s8(a, b, s, zp, bs, trans_b=tb))),
         ("gelu (exact)", _elementwise_check(sk.gelu, _gelu_erf, atol=2e-6)),
         ("gelu (tanh)", _elementwise_check(lambda x: sk.gelu(x, approximate="tanh"),
@@ -226,6 +228,8 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
         ("layer_norm", _layer_norm_check),
     ]
     checks.insert(1, ("sgemm_f16", _gemm_check(lambda a, b: sk.sgemm_f16(a, b), _as_f16)))
+    checks.insert(2, ("sgemm_f16 tb", _gemm_check(
+        lambda a, b: sk.sgemm_f16(a, np.ascontiguousarray(b.T), trans_b=True), _as_f16)))
     return checks
 
 
@@ -342,18 +346,147 @@ def _time(fns: list[Callable[[], object]], warmup: int, reps: int,
                    "below_min_ghz": bool(min_ghz is not None and c.min() < min_ghz)}
 
 
-def _record(results, kernel, impl, shape, t, work, unit, clock):
+def _record(results, kernel, impl, shape, t, work, unit, clock, nbytes=None, roofs=None):
+    """One result row. unit: "flop" (GEMM), "elem" (elementwise) or "byte"
+    (STREAM). nbytes: bytes a memory-bound case must move (GEMV: the weights,
+    x and y), recorded as gb_per_s and, against roofs (_stream), as
+    pct_stream_read (read-only stream, the GEMV's roof) and pct_stream_triad."""
     ghz = clock["median"]
     r = {"kernel": kernel, "impl": impl, "shape": list(shape), **t, "core_ghz": clock}
     rate = work / t["median_s"]
     if unit == "flop":
         r["gflops"] = rate * 1e-9
         r["flop_per_cycle"] = rate / (ghz * 1e9) if ghz == ghz else None
+    elif unit == "byte":
+        r["gb_per_s"] = rate * 1e-9
+        r["byte_per_cycle"] = rate / (ghz * 1e9) if ghz == ghz else None
     else:
         r["gelem_per_s"] = rate * 1e-9
         r["elem_per_cycle"] = rate / (ghz * 1e9) if ghz == ghz else None
+    if nbytes is not None:
+        r["bytes"] = int(nbytes)
+        r["gb_per_s"] = nbytes / t["median_s"] * 1e-9
+        for key in ("read", "triad"):
+            roof = (roofs or {}).get(key)
+            r["pct_stream_" + key] = 100.0 * r["gb_per_s"] / roof if roof else None
     results.append(r)
     return r
+
+
+def _llc_bytes() -> int:
+    """Size of the largest (last-level) data or unified cache of this core,
+    from CPUID leaf 4 / 0x8000001D; 0 if unknown (non-x86)."""
+    sizes = [int(c["size_kib"]) * 1024 for c in sk._core._cpu_caches() if c["type"] in ("D", "U")]
+    return max(sizes, default=0)
+
+
+# Bandwidth roofs, over float32 arrays each at least 4x the last-level cache
+# (STREAM's rule; never a fixed size: one cloud VM reports a 260 MB LLC) and at
+# least 64 MiB:
+# - read: sum of one array, 4 bytes per element, nothing written. The roof for
+#   kernels that only read their big operand (GEMV weights).
+# - triad (McCalpin's STREAM): a = b + s*c, 12 bytes per element counted (two
+#   loads, one store; STREAM convention, no write-allocate). The stored line's
+#   read-for-ownership is real traffic but not counted, so a read-only kernel
+#   can exceed 100% of the triad (FP32 GEMV: 107-137% in dev runs).
+STREAM_MIN_ARRAY_BYTES = 64 << 20
+STREAM_PROTOCOL = ("float32 arrays of max(4x LLC, 64 MiB) each, same warm-up/reps/clock protocol as the "
+                   "kernels, single thread on the pinned core: read = sum of one array read as 2, 4 and 8 "
+                   "parts side by side (interleaved), 4 bytes per element; stream_read_gbs is the fastest "
+                   "of the three (the roof for read-only kernels such as GEMV); triad a = b + s*c, 12 "
+                   "bytes per element (STREAM convention, no write-allocate; stream_triad_gbs). *_allcore_gbs: "
+                   "OpenMP builds with more than one usable CPU only, else null")
+
+
+STREAM_READ_STREAMS = (2, 4, 8)
+
+
+def _stream(args, results, show) -> dict:
+    """Time the read-only stream (read as 2, 4 and 8 parts side by side,
+    interleaved; the roof is the fastest, which can only lower a kernel's
+    percentage) and the triad, on one thread and (OpenMP builds, more than one
+    usable CPU) on all of them. Returns the GB/s as {"read", "triad",
+    "read_allcore", "triad_allcore"} (None if not run)."""
+    n = max(4 * _llc_bytes(), STREAM_MIN_ARRAY_BYTES) // 4
+    a = np.zeros(n, np.float32)
+    b = np.full(n, 1.0, np.float32)
+    c = np.full(n, 2.0, np.float32)
+    threads = len(_pinned_cpus() or [])
+    allcore = bool(sk.build_info().get("openmp")) and threads > 1
+    roofs: dict = {}
+    for th in [1] + ([threads] if allcore else []):
+        suffix = "" if th == 1 else "_allcore"
+        impl = "simd_ml_kernels" + ("" if th == 1 else f" {th} threads")
+        min_ghz = args.min_ghz if th == 1 else None
+
+        def read(s: int, th: int = th) -> Callable[[], object]:
+            return lambda: sk._core._stream_read(b, th, s)
+        stats, clock = _time([read(s) for s in STREAM_READ_STREAMS], args.warmup, args.reps, min_ghz)
+        best = 0.0
+        for s, t in zip(STREAM_READ_STREAMS, stats):
+            r = _record(results, "stream_read", f"{impl} {s} streams", (n,), t, 4.0 * n, "byte", clock)
+            show(r)
+            best = max(best, r["gb_per_s"])
+        roofs["read" + suffix] = best
+
+        def triad(th: int = th) -> None:
+            sk._core._stream_triad(a, b, c, 3.0, th)
+        stats, clock = _time([triad], args.warmup, args.reps, min_ghz)
+        r = _record(results, "stream_triad", impl, (n,), stats[0], 12.0 * n, "byte", clock)
+        show(r)
+        roofs["triad" + suffix] = r["gb_per_s"]
+    roofs.setdefault("read_allcore", None)
+    roofs.setdefault("triad_allcore", None)
+    return roofs
+
+
+class _Rotor:
+    """Index of the next weight copy, shared by every implementation of a
+    case, so that consecutive calls (of any library) read different copies.
+    With enough copies to exceed twice the last-level cache, no call finds its
+    weights in cache, as in a decode step where every layer's weights were
+    evicted by the layers before it; with weights already that large, one copy."""
+
+    def __init__(self, copies: int):
+        self.copies, self.i = copies, 0
+
+    def __call__(self) -> int:
+        self.i = (self.i + 1) % self.copies
+        return self.i
+
+
+def _gemv_impls(fn: Callable, x: np.ndarray, x32: np.ndarray, ws: list, c: np.ndarray, kernel: str,
+                torch: Any) -> list[tuple[str, Callable[[], object]]]:
+    """The implementations of one GEMV case, all reading the same weight
+    buffers ws in the same rotation: ours, NumPy's sgemv (FP32 only) and
+    PyTorch's F.linear (tensors that share ws's memory)."""
+    rot = _Rotor(len(ws))
+
+    def ours() -> object:
+        return fn(x, ws[rot()], C=c, trans_b=True)
+
+    def numpy_sgemv() -> object:
+        return np.matmul(x32[0], ws[rot()].T, out=c[0])
+
+    impls: list[tuple[str, Callable[[], object]]] = [("simd_ml_kernels", ours)]
+    if kernel == "gemv_fp32":
+        impls.append(("numpy/" + str(_blas_info()["name"]) + " sgemv", numpy_sgemv))
+    if torch is not None:
+        tdtype = {"gemv_fp32": torch.float32, "gemv_fp16": torch.float16, "gemv_bf16": torch.bfloat16}[kernel]
+        tws = [torch.from_numpy(w).view(tdtype) for w in ws]   # same buffers, no copy
+        xt = torch.from_numpy(x).view(tdtype)
+
+        def torch_linear() -> object:
+            return torch.nn.functional.linear(xt, tws[rot()])
+
+        impls.append((f"torch {torch.__version__} {str(tdtype).replace('torch.', '')} F.linear", torch_linear))
+    return impls
+
+
+# y = W·x for one token: W [N, K] as torch.nn.Linear stores it. M×N×K:
+# 4096×4096 (Llama-7B attention projection), 4096×11008 (Llama-7B MLP down
+# projection), 2048×8192 (Llama-3.2-1B MLP down projection).
+GEMV_SHAPES = [(1, 4096, 4096), (1, 4096, 11008), (1, 2048, 8192)]
 
 
 def _pin_malloc() -> str | None:
@@ -401,12 +534,21 @@ def cmd_bench(args: argparse.Namespace) -> int:
     rng = np.random.default_rng(0)
     results: list[dict] = []
     def show(r):
-        rate = (f"{r['gflops']:8.1f} GFLOP/s ({r['flop_per_cycle'] or float('nan'):.1f}/cycle)"
-                if "gflops" in r else
-                f"{r['gelem_per_s']:8.3f} Gelem/s ({r['elem_per_cycle'] or float('nan'):.3f}/cycle)")
+        if "gflops" in r:
+            rate = f"{r['gflops']:8.1f} GFLOP/s ({r['flop_per_cycle'] or float('nan'):.1f}/cycle)"
+        elif "gelem_per_s" in r:
+            rate = f"{r['gelem_per_s']:8.3f} Gelem/s ({r['elem_per_cycle'] or float('nan'):.3f}/cycle)"
+        else:
+            rate = ""
+        if "gb_per_s" in r:
+            pr, pt = r.get("pct_stream_read"), r.get("pct_stream_triad")
+            rate += f" {r['gb_per_s']:7.2f} GB/s" + (f" ({pr:.0f}% read, {pt:.0f}% triad)" if pr and pt else "")
         print(f"  {r['kernel']:<16} {r['impl']:<16} {str(tuple(r['shape'])):<16} "
               f"median {r['median_s'] * 1e3:9.3f} ms  {rate}  @ {r['core_ghz']['median']:.2f} GHz "
               f"[{r['core_ghz']['min']:.2f}-{r['core_ghz']['max']:.2f}, attempts {r['core_ghz']['attempts']}]")
+
+    # Bandwidth roofs first: the GEMV rows below are reported as % of them.
+    roofs = _stream(args, results, show)
 
     for n in args.sizes:
         a = rng.standard_normal((n, n)).astype(np.float32)
@@ -474,6 +616,40 @@ def cmd_bench(args: argparse.Namespace) -> int:
         for (impl, _), t in zip(impls, stats):
             show(_record(results, "sgemm_u8s8", impl, (m, n, k), t, 2.0 * m * n * k, "flop", clock))
 
+    # Decode GEMV: y = x·Wᵀ for one row x, W [N, K] (torch.nn.Linear layout),
+    # FP32 / FP16 / BF16 weights, FP32 output. Bound by reading W, so reported
+    # as GB/s (weights + x + y) and % of the single-core read stream (the roof
+    # for a read-only kernel) and of the STREAM triad. Baselines
+    # on the same buffers: PyTorch's F.linear in the weights' dtype (oneDNN;
+    # 16-bit output for 16-bit inputs) and, for FP32, NumPy's matrix-vector
+    # product (BLAS sgemv). Weight copies rotate (_Rotor) so no call finds its
+    # weights in the last-level cache.
+    llc = _llc_bytes()
+    for m, n, k in GEMV_SHAPES:
+        w32 = rng.standard_normal((n, k)).astype(np.float32)
+        x32 = rng.standard_normal((m, k)).astype(np.float32)
+        c = np.empty((m, n), np.float32)
+        for kernel, esize in (("gemv_fp32", 4), ("gemv_fp16", 2), ("gemv_bf16", 2)):
+            copies = max(1, -(-2 * llc // (n * k * esize)))
+            if kernel == "gemv_fp32":
+                ws, x = [w32.copy() for _ in range(copies)], x32
+            elif kernel == "gemv_fp16":
+                ws, x = [w32.astype(np.float16) for _ in range(copies)], x32.astype(np.float16)
+            else:
+                ws = [(w32.view(np.uint32) >> 16).astype(np.uint16) for _ in range(copies)]
+                x = (x32.view(np.uint32) >> 16).astype(np.uint16)
+            fns: dict[str, Callable[..., Any]] = {"gemv_fp32": sk.sgemm, "gemv_fp16": sk.sgemm_f16,
+                                                  "gemv_bf16": sk.sgemm_bf16}
+            impls = _gemv_impls(fns[kernel], x, x32, ws, c, kernel, torch)
+            nbytes = n * k * esize + m * k * esize + m * n * 4
+            stats, clock = _time([f for _, f in impls], args.warmup, args.reps, args.min_ghz)
+            for (impl, _), t in zip(impls, stats):
+                r = _record(results, kernel, impl, (m, n, k), t, 2.0 * m * n * k, "flop", clock,
+                            nbytes=nbytes, roofs=roofs)
+                r["weight_copies"] = copies
+                show(r)
+            del ws, impls
+
     x = rng.standard_normal(args.elems).astype(np.float32)
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)
     g = rng.standard_normal(1024).astype(np.float32)
@@ -521,6 +697,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
                 "logical_cpus": os.cpu_count(),
                 "os": platform.platform(),
                 "note": args.note,
+                "stream_read_gbs": roofs["read"],
+                "stream_triad_gbs": roofs["triad"],
+                "stream_read_allcore_gbs": roofs["read_allcore"],
+                "stream_triad_allcore_gbs": roofs["triad_allcore"],
             },
             "build": info_dict()["build"],
             "baselines": {"numpy": np.__version__, "blas": _blas_info(),
@@ -533,6 +713,12 @@ def cmd_bench(args: argparse.Namespace) -> int:
                                   "add-reg-reg chain, 1 cycle/add) before, every 5 rounds and "
                                   "after each case; per-cycle rates use the median",
                          "min_ghz": args.min_ghz,
+                         "stream": STREAM_PROTOCOL,
+                         "gemv": "y = x·Wᵀ, one row x, W [N, K]; gb_per_s = (weights + x + y bytes) / median "
+                                 "time; pct_stream_read / pct_stream_triad = gb_per_s / machine.stream_read_gbs "
+                                 "/ stream_triad_gbs; weights rotate: ceil(2 x LLC / weight bytes) copies "
+                                 "(weight_copies, at least 1), the next copy on every call of any "
+                                 "implementation, so no call finds its weights in the last-level cache",
                          "malloc": malloc or "not pinned (allocator defaults)"},
             "command": " ".join(["python -m simd_ml_kernels"] + (args.argv or [])),
             "python": platform.python_version(),

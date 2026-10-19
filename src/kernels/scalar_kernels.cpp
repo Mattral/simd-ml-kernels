@@ -61,6 +61,26 @@ void gemm_rows(int M, int N, int K, float alpha, const T* A, int lda, const T* B
     }
 }
 
+// C += alpha * A·Bᵀ with B stored N×K (x·Wᵀ): one dot product along contiguous
+// rows of A and B per element of C, as the SIMD tables' GEMV does.
+template <typename T, typename Load>
+void gemm_rows_tb(int M, int N, int K, float alpha, const T* A, int lda, const T* B, int ldb,
+                  float beta, float* C, int ldc, Load load) {
+    if (M <= 0 || N <= 0 || K < 0) return;
+    scale_c(C, M, N, ldc, beta);
+    if (K == 0) return;
+    for (int i = 0; i < M; ++i) {
+        const T* a = A + static_cast<std::size_t>(i) * lda;
+        float* c = C + static_cast<std::size_t>(i) * ldc;
+        for (int j = 0; j < N; ++j) {
+            const T* b = B + static_cast<std::size_t>(j) * ldb;
+            float acc = 0.0f;
+            for (int p = 0; p < K; ++p) acc += load(a[p]) * load(b[p]);
+            c[j] += alpha * acc;
+        }
+    }
+}
+
 float bits_to_float(std::uint32_t u) {
     float f;
     std::memcpy(&f, &u, sizeof f);
@@ -91,6 +111,10 @@ void sgemm_scalar(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
         gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, [](float v) { return v; });
         return;
     }
+    if (!trans_a) {
+        gemm_rows_tb(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, [](float v) { return v; });
+        return;
+    }
     // op(A)(i, p), op(B)(p, j) with BLAS transposes; same summation order as gemm_rows.
     const auto a_at = [&](int i, int p) {
         return trans_a ? A[static_cast<std::size_t>(p) * lda + i] : A[static_cast<std::size_t>(i) * lda + p];
@@ -111,9 +135,12 @@ void sgemm_scalar(bool trans_a, bool trans_b, int M, int N, int K, float alpha,
     }
 }
 
-void sgemm_f16_scalar(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+void sgemm_f16_scalar(bool trans_b, int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                       const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
-    gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, half_to_float);
+    if (trans_b)
+        gemm_rows_tb(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, half_to_float);
+    else
+        gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, half_to_float);
 }
 
 // INT8 GEMM (gemm/int8_gemm.hpp): exact int64 sums, one rounding at the end.
@@ -140,10 +167,13 @@ void sgemm_u8s8_scalar(bool trans_b, int M, int N, int K, const std::uint8_t* A,
     }
 }
 
-void sgemm_bf16_scalar(int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
+void sgemm_bf16_scalar(bool trans_b, int M, int N, int K, float alpha, const std::uint16_t* A, int lda,
                        const std::uint16_t* B, int ldb, float beta, float* C, int ldc) {
-    gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc,
-              [](std::uint16_t v) { return bits_to_float(static_cast<std::uint32_t>(v) << 16); });
+    const auto load = [](std::uint16_t v) { return bits_to_float(static_cast<std::uint32_t>(v) << 16); };
+    if (trans_b)
+        gemm_rows_tb(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, load);
+    else
+        gemm_rows(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, load);
 }
 
 void gelu_tanh_scalar(const float* in, float* out, std::size_t n) {
