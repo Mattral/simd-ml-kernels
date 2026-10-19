@@ -956,15 +956,15 @@ def cmd_bench(args: argparse.Namespace) -> int:
     for m, n, k in GEMV_SHAPES if "q8_0" in args.cases else []:
         w32 = rng.standard_normal((n, k)).astype(np.float32)
         x32 = rng.standard_normal((m, k)).astype(np.float32)
-        wq = sk.quantize_q8_0(w32)
-        dw, qw = q8_0_blocks(wq, n, k)
+        wq8 = sk.quantize_q8_0(w32)
+        dw, qw = q8_0_blocks(wq8, n, k)
         wdq = (qw.astype(np.float32) * dw.astype(np.float32)[:, :, None]).reshape(n, k)
         x1 = np.ascontiguousarray(x32[0])
         # End-to-end error against the unquantized product x·Wᵀ (float64), and
         # the part due to the weights alone (FP32 product on the dequantized
         # weights); the rest is x's 8-bit quantization.
         y_exact = w32.astype(np.float64) @ x1.astype(np.float64)
-        y_q = sk.gemv_q8_0(x1, wq, n, k).astype(np.float64)
+        y_q = sk.gemv_q8_0(x1, wq8, n, k).astype(np.float64)
         y_w = wdq.astype(np.float64) @ x1.astype(np.float64)
 
         def _err(yv: np.ndarray) -> dict:
@@ -978,7 +978,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         qcopies = max(1, -(-2 * llc // qbytes))
         fcopies = max(1, -(-2 * llc // (n * k * 4)))
         bcopies = max(1, -(-2 * llc // (n * k * 2)))
-        wqs = [wq.copy() for _ in range(qcopies)]
+        wqs = [wq8.copy() for _ in range(qcopies)]
         wfs = [wdq.copy() for _ in range(fcopies)]
         wbs = [(wdq.view(np.uint32) >> 16).astype(np.uint16) for _ in range(bcopies)]
         xb = (x32.view(np.uint32) >> 16).astype(np.uint16)
