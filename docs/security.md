@@ -123,8 +123,8 @@ and does not block.
 - Wheels and the sdist are built and selftested by `wheels.yml` on GitHub-hosted
   runners and uploaded only by the manual `publish.yml`, from `main`, with
   PyPI Trusted Publishing (OIDC; no API token or repository secret). The upload
-  action also generates PEP 740 attestations for the files. 0.3.0rc1 was
-  published this way to TestPyPI; nothing is on PyPI yet.
+  action also generates PEP 740 attestations for the files. 0.3.0rc1
+  (TestPyPI) and 0.3.0 (PyPI) were published this way.
 
 **Not yet implemented**:
 - SBOM (Software Bill of Materials) generation

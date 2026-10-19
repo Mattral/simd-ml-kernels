@@ -623,7 +623,7 @@ the core the calling thread runs on.
 | `ci.yml` | push to main, pull requests | C++ build + ctest (GCC 12, Clang 15, GCC 13); Python 3.10–3.12: install, `selftest`, default table matches the runner's CPU flags, pytest (with PyTorch CPU), stubtest, examples, bench CLI smoke run, generated tables match JSON; ASan + UBSan (Clang 15) |
 | `build-and-test.yml` | push to main, pull requests | GCC 12 with OpenBLAS-linked harnesses; OpenMP build; ASan + UBSan; macOS arm64 scalar build + ctest |
 | `wheels.yml` | pull requests touching the build, manual, called by `publish.yml` | cibuildwheel: manylinux_2_28 x86_64 and macOS arm64 wheels, CPython 3.9–3.13, and an sdist; each wheel installed in a clean environment and `selftest`ed. On pull requests, artifacts only |
-| `publish.yml` | manual (owner), from `main` | builds through `wheels.yml`, then uploads to TestPyPI or PyPI with Trusted Publishing (no API token). 0.3.0rc1 went to TestPyPI this way; nothing is on PyPI yet |
+| `publish.yml` | manual (owner), from `main` | builds through `wheels.yml`, then uploads to TestPyPI or PyPI with Trusted Publishing (no API token). 0.3.0rc1 (TestPyPI) and 0.3.0 were published this way |
 | `bench.yml` | weekly, manual | `python -m simd_ml_kernels bench --json` on a shared runner, uploaded as an artifact; not used for any claim |
 | `guardrail.yml` | push, pull requests, weekly | clang-tidy (fails on errors), pip-audit and codespell (report-only), license file check |
 

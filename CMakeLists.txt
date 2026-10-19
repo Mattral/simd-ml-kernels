@@ -3,7 +3,7 @@ project(simd_ml_kernels VERSION 0.3.0 LANGUAGES CXX)
 # CMake's VERSION is numeric only; the PEP 440 pre-release suffix of
 # pyproject.toml's version goes here ("" for a release). build_info()["version"]
 # is "${PROJECT_VERSION}${SIMD_ML_PRERELEASE}" and must equal the package version.
-set(SIMD_ML_PRERELEASE "rc1")
+set(SIMD_ML_PRERELEASE "")
 
 # Must be included before any use of CMAKE_INSTALL_INCLUDEDIR / LIBDIR / etc.
 # (used in target_include_directories() below and in the install() rules further down).
