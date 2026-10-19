@@ -478,14 +478,14 @@ investigated.
 - AVX-512 on bare metal: the only AVX-512 results (FP32, FP16/BF16 and INT8
   GEMM, activations) are from a 2-vCPU Emerald Rapids cloud VM
   (`cloud-xeon-emr-2vcpu`), where clocks and neighbours are not controlled.
-- The decode GEMV (FP32/FP16/BF16 and Q8_0) and the bandwidth roofs on
+- The decode GEMV (FP32/FP16/BF16, Q8_0, Q4_0) and the bandwidth roofs on
   AVX-512 hardware: on the cloud VM the single-core bandwidth varied from 5.8
   to 11 GB/s between runs (the VM moved hosts; dev runs, not in a JSON). The
   roof is now measured per case; an AVX-512 run with it has not been done.
 - The decode GEMV with more than one thread (no threaded GEMV yet), and the
   all-core roofs (recorded only by OpenMP builds; no published run has one).
-- The Q8_0 GEMV without VNNI (`avx2` path, `vpmaddubsw`): the laptop has
-  AVX-VNNI, so only that path is timed.
+- The Q8_0 and Q4_0 GEMVs without VNNI (`avx2` path, `vpmaddubsw`): the
+  laptop has AVX-VNNI, so only that path is timed.
 - Multi-threaded GEMM scaling, including FP16/BF16 and INT8 (INT8 has no
   threaded path). Waits for the i9-9900 workstation (8 cores, not hybrid).
 - The workstation (i9-9900): no results yet.

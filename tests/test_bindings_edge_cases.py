@@ -259,7 +259,7 @@ class TestSgemmU8S8Arguments:
 
     def test_path_reported(self):
         assert simd_ml_kernels.build_info()["u8s8_path"] in ("avx512_vnni", "avx_vnni", "fp32_convert", "scalar")
-        assert simd_ml_kernels.build_info()["q8_0_path"] in ("avx512_vnni", "avx_vnni", "avx2", "scalar")
+        assert simd_ml_kernels.build_info()["q8_0_path"] in ("avx512_vnni", "avx_vnni", "avx2", "scalar")   # also gemv_q4_0
 
 
 class TestEmptyAndSingleElement:
@@ -679,6 +679,56 @@ class TestQ8_0Args:
             g(np.ones(63, np.float32), wq, 3, 63)
         with pytest.raises(simd_ml_kernels.ArgumentError, match="bytes"):
             g(x, wq, 4, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):
+            g(x[None, :], wq, 3, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):
+            g(np.ones(32, np.float32), wq, 3, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match=">= 0"):
+            g(x, wq, -1, 64)
+        with pytest.raises(simd_ml_kernels.DTypeError, match="uint8"):
+            g(x, wq.view(np.int8), 3, 64)
+        with pytest.raises(simd_ml_kernels.DTypeError):
+            g(x.astype(np.float64), wq, 3, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
+            g(x, np.ascontiguousarray(np.stack([wq, wq], axis=1))[:, 0], 3, 64)
+
+
+class TestQ4_0Args:
+    """quantize_q4_0 / gemv_q4_0 reject every input they would otherwise misread."""
+
+    def test_quantize_rejects(self):
+        q = simd_ml_kernels.quantize_q4_0
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="multiple of 32"):
+            q(np.ones((2, 33), np.float32))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="multiple of 32"):
+            q(np.ones(16, np.float32))
+        with pytest.raises(simd_ml_kernels.DTypeError):
+            q(np.ones((2, 32), np.float64))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="C-contiguous"):
+            q(np.ones((32, 64), np.float32).T)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="at least 1 dimension"):
+            q(np.array(1.0, np.float32))
+        for bad in (np.nan, np.inf, -np.inf, 8.0 * 65520.0, -8.0 * 65520.0):
+            w = np.ones((2, 64), np.float32)
+            w[1, 40] = bad
+            with pytest.raises(simd_ml_kernels.ArgumentError, match="finite"):
+                q(w)
+        w = np.ones((1, 32), np.float32)
+        w[0, 3] = -8.0 * 65504.0     # the largest float16 scale: accepted
+        assert q(w).shape == (1, 18)
+        assert q(np.ones((0, 64), np.float32)).shape == (0, 36)
+
+    def test_gemv_rejects(self):
+        g = simd_ml_kernels.gemv_q4_0
+        x = np.ones(64, np.float32)
+        wq = simd_ml_kernels.quantize_q4_0(np.ones((3, 64), np.float32))
+        assert g(x, wq, 3, 64).shape == (3,)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="multiple of 32"):
+            g(np.ones(63, np.float32), wq, 3, 63)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="bytes"):
+            g(x, wq, 4, 64)
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="bytes"):
+            g(x, simd_ml_kernels.quantize_q8_0(np.ones((3, 64), np.float32)), 3, 64)   # Q8_0 blocks
         with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):
             g(x[None, :], wq, 3, 64)
         with pytest.raises(simd_ml_kernels.ArgumentError, match="1-D"):

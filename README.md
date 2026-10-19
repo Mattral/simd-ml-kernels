@@ -90,6 +90,8 @@ The terms used there:
   shown as a second reference.
 - **Q8_0**: llama.cpp/ggml's 8-bit weight format: blocks of 32 int8 values
   with one FP16 scale, 34 bytes per 32 weights (1.0625 bytes each).
+- **Q4_0**: ggml's 4-bit weight format: blocks of 32 4-bit values (two per
+  byte) with one FP16 scale, 18 bytes per 32 weights (0.5625 bytes each).
 - **FP16 / BF16 / INT8**: weight formats of 2, 2 and 1 bytes instead of
   FP32's 4. FP16 is IEEE half precision; BF16 keeps FP32's exponent range with
   8 bits of precision; INT8 stores integers with one scale per output column.
@@ -147,6 +149,7 @@ is in
 | **Decode GEMV** (`x @ W.T`: `sgemm` / `sgemm_f16` / `sgemm_bf16` with `trans_b=True`, ≤ 8 rows) | same files (`dot_rows`) | W [N, K] read in place, 4 (FP32) or 8 (FP16/BF16) rows at a time, 16-bit weights converted in registers; bound by memory bandwidth, reported as GB/s and % of the measured read stream and STREAM triad |
 | **INT8 GEMM** (`sgemm_u8s8`) | `gemm/avxvnni_gemm.cpp`, `gemm/avx512vnni_gemm.cpp`, `gemm/int8_rows.hpp` | uint8 × int8 with per-column scales, FP32 output; `vpdpbusd` (AVX-VNNI, AVX512_VNNI), exact int32 sums per K block; FP32 conversion path without VNNI; one row with `trans_b` reads B in place |
 | **Q8_0 decode GEMV** (`quantize_q8_0`, `gemv_q8_0`) | `quant/q8_0_scalar.cpp`, `quant/q8_0_rows.hpp` | Weights in ggml's `block_q8_0` (byte-identical; 34 bytes per 32), x quantized to Q8 once per call; exact integer block dots (`vpdpbusd` with ggml's sign trick, `vpmaddubsw` without VNNI), FP32 sums; 8 rows read in place, next rows prefetched |
+| **Q4_0 decode GEMV** (`quantize_q4_0`, `gemv_q4_0`) | `quant/q4_0_scalar.cpp`, `quant/q4_0_rows.hpp` | Weights in ggml's `block_q4_0` (byte-identical; 18 bytes per 32), x quantized to Q8 once per call; two rows per register, nibbles as `vpdpbusd`'s unsigned operand with −8·Σx as its start (no sign trick), FP32 sums; 8 rows read in place, next rows prefetched |
 | **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |

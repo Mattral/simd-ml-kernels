@@ -16,6 +16,7 @@
 #include "../dispatch/kernels.hpp"
 #include "activations/activations.hpp"
 #include "intrinsic_gelu.hpp"
+#include "quant/q4_0.hpp"
 #include "quant/q8_0.hpp"
 
 #include <algorithm>
@@ -259,6 +260,7 @@ const KernelTable& kernel_table_scalar() noexcept {
     static const KernelTable t = {
         Isa::scalar, "scalar", SIMD_ML_UNIT_FLAGS, "row x 1 (no blocking)", &sgemm_blocking_scalar,
         &sgemm_scalar, &sgemm_f16_scalar, &sgemm_bf16_scalar, &sgemm_u8s8_scalar, &quant::gemv_q8_0_scalar,
+        &quant::gemv_q4_0_scalar,
         &gelu_forward_scalar, &gelu_tanh_scalar,
         &relu_scalar, &silu_scalar, &softmax_row_scalar, &layer_norm_scalar,
     };

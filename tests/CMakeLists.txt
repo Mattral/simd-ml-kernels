@@ -19,6 +19,7 @@ set(TEST_SRCS
     test_gemm_lowp.cpp
     test_gemm_int8.cpp
     test_q8_0.cpp
+    test_q4_0.cpp
     test_activations.cpp
     test_threads.cpp
 )

@@ -371,6 +371,34 @@ def gemv_q8_0(x: NDArray[np.float32], Wq: NDArray[np.uint8], N: int, K: int) -> 
     ...
 
 
+def quantize_q4_0(W: NDArray[np.float32]) -> NDArray[np.uint8]:
+    """
+    Quantize float32 weights [..., K] (K % 32 == 0) to ggml's Q4_0 blocks,
+    byte-identical to block_q4_0: per 32 values a float16 scale d = max/-8
+    (max: the value of largest magnitude, little-endian), then 16 bytes of
+    4-bit q = min(15, trunc(w/d + 8.5)), values j and 16 + j in the low and
+    high nibble of byte j, as ggml's quantize_row_q4_0_ref; value =
+    d*(q - 8). Returns uint8 [..., K // 32 * 18].
+
+    Raises ArgumentError if K % 32 != 0, or W has a NaN, an infinity, or a
+    block whose scale overflows float16 (|w| >= 524160).
+    """
+    ...
+
+
+def gemv_q4_0(x: NDArray[np.float32], Wq: NDArray[np.uint8], N: int, K: int) -> NDArray[np.float32]:
+    """
+    y[n] = sum_k x[k] * W[n, k] for W [N, K] given as quantize_q4_0 blocks
+    (Wq: N*K/32*18 uint8), x float32 [K]. x is quantized to Q8 blocks once
+    per call (float32 scales); integer block dot products (vpdpbusd /
+    vpmaddubsw / scalar; the path build_info()['q8_0_path'] names), float32
+    sums. Error bound against the exact sum of the quantized operands:
+    2*(K/32 + 4)*2^-24 * sum_b |dw_b*dx_b| * sum_i |(qw - 8)*qx|. x with
+    NaN or an infinity: all NaN. Single-threaded. Returns float32 [N].
+    """
+    ...
+
+
 def is_aligned(arr: np.ndarray) -> bool:
     """Return True if the array's data buffer is 64-byte aligned."""
     ...

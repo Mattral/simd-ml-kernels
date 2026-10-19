@@ -36,7 +36,7 @@ Pitfalls:
 - `SIMD_ML_BF16_DOT=1` opts `sgemm_bf16` into the `vdpbf16ps` path (AVX512_BF16
   CPUs; off by default, slower where measured).
 - `SIMD_ML_GGML_TEST_BACKEND_OPS=<llama.cpp>/build/bin/test-backend-ops` adds ggml's
-  Q8_0 MUL_MAT to `bench` (and the ggml byte-comparison test); unset: "not measured".
+  Q8_0 and Q4_0 MUL_MAT to `bench` (and the ggml byte-comparison tests); unset: "not measured".
 - `SIMD_ML_ISA=scalar|avx2` caps the kernel table, e.g. to benchmark AVX2 on
   an AVX-512 machine. AVX-512 without AVX-512 hardware: run under Intel SDE,
   `sde64 -skx -- python -m simd_ml_kernels selftest` (or `-nhm` for no AVX).
@@ -55,6 +55,8 @@ src/kernels/gemm/int8_gemm.hpp, *vnni_gemm.cpp  INT8 GEMM (uint8 x int8, per-col
                                              int8_rows.hpp: its M = 1, trans_b row-streaming path
 src/kernels/quant/q8_0*                      ggml Q8_0 quantization (scalar unit, no fast-math) and gemv_q8_0
                                              (q8_0_rows.hpp: the YMM loop; avx2 / avxvnni / avx512vnni units)
+src/kernels/quant/q4_0*                      ggml Q4_0 quantization and gemv_q4_0 (q4_0_rows.hpp: two rows per
+                                             YMM; x through the Q8_0 driver gemv_q8_0_run)
 src/kernels/gemm/naive_gemm.hpp              scalar reference GEMM (tests)
 src/kernels/intrinsic_gelu.*                 GeLU exact (erf) and tanh (AVX2)
 src/kernels/activations/                     relu, silu, softmax, layer_norm (AVX2; + activations.hpp)
@@ -67,6 +69,7 @@ python/simd_kernels/                         deprecated import alias (removed in
 tests/test_*.cpp                             C++ tests: one binary, simd_tests, each suite run on every usable table
 tests/check_isa_units.py                     ctest isa_units: no out-of-ISA instruction or shared inline code in a unit
 tests/test_*.py                              float64 references, edge cases, CLI, stubs
+tests/data/                                  fixtures from other projects (q4_0: llama.cpp's own blocks)
 benchmarks/results/*.json                    committed benchmark results; make_tables.py renders them
 examples/                                    short runnable scripts, run in CI
 ```
@@ -155,7 +158,7 @@ protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc, stream, 
 results[] kernel, impl, shape, median_s, p25_s, p75_s, min_s, reps,
           core_ghz {median, min, max, samples, attempts, below_min_ghz},
           gflops + flop_per_cycle (GEMM; GEMV also bytes, gb_per_s, pct_stream_{read,triad},
-          weight_copies, roof_read_gbs, roof_unstable; Q8_0: err_vs_fp32; ggml rows: time_s,
+          weight_copies, roof_read_gbs, roof_unstable; Q8_0/Q4_0: err_vs_fp32; ggml rows: time_s,
           runs, threads_max/timed, command) | gelem_per_s + elem_per_cycle (elementwise) | gb_per_s (stream_*)
 ```
 

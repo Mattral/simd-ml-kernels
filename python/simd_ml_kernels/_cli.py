@@ -166,6 +166,46 @@ def q8_0_reference(x: np.ndarray, wq: np.ndarray, n: int, k: int) -> tuple[np.nd
             (np.abs(prod).sum(axis=2).astype(np.float64) * np.abs(sc)).sum(axis=1))
 
 
+def q4_0_blocks(wq: np.ndarray, n: int, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Split Q4_0 bytes (quantize_q4_0) of W [n, k] into the float16 scales as
+    float64 [n, k/32] and the signed quants q - 8 as int8 [n, k/32, 32]
+    (low nibbles: values 0-15, high nibbles: 16-31)."""
+    b = np.ascontiguousarray(wq).reshape(n, k // 32, 18)
+    d = np.ascontiguousarray(b[:, :, :2]).view("<f2")[:, :, 0].astype(np.float64)
+    qs = b[:, :, 2:]
+    q = np.concatenate([qs & 0x0F, qs >> 4], axis=2).astype(np.int8) - np.int8(8)
+    return d, q
+
+
+def q4_0_reference(x: np.ndarray, wq: np.ndarray, n: int, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """gemv_q4_0's result taken exactly (float64) from the same quantized
+    operands (W's Q4_0 blocks, x's Q8 quants and float32 scales), and its
+    bound's magnitude sum_b |dw_b*dx_b| * sum_i |(qw - 8)*qx|. Int64 sums."""
+    dw, qw = q4_0_blocks(wq, n, k)
+    _, qx = q8_0_blocks(sk.quantize_q8_0(x), 1, k)
+    sc = dw * q8_0_x_scales(x).astype(np.float64)[None, :]
+    prod = qw.astype(np.int64) * qx.astype(np.int64)
+    return ((prod.sum(axis=2).astype(np.float64) * sc).sum(axis=1),
+            (np.abs(prod).sum(axis=2).astype(np.float64) * np.abs(sc)).sum(axis=1))
+
+
+def _q4_0_check():
+    """gemv_q4_0 against the exact sum of its quantized operands, with the
+    documented bound 2*(K/32 + 4)*u*sum_b |dw*dx|*sum |(qw - 8)*qx|."""
+    rng = np.random.default_rng(5)
+    worst, detail = 0.0, ""
+    for n, k in [(1, 32), (7, 64), (9, 96), (17, 320), (33, 4096)]:
+        w = rng.standard_normal((n, k)).astype(np.float32)
+        x = rng.standard_normal(k).astype(np.float32)
+        wq = sk.quantize_q4_0(w)
+        ref, mag = q4_0_reference(x, wq, n, k)
+        y = sk.gemv_q4_0(x, wq, n, k).astype(np.float64)
+        ratio = np.max(np.abs(y - ref) / (2 * (k // 32 + 4) * U32 * mag + 1e-300))
+        if ratio > worst:
+            worst, detail = float(ratio), f"N={n} K={k}"
+    return worst, 1.0, f"max err / (2*(K/32+4)*u*sum|dw dx||(qw-8) qx|), worst at {detail}"
+
+
 def _q8_0_check():
     """gemv_q8_0 against the exact sum of its quantized operands, with the
     documented bound 2*(K/32 + 4)*u*sum_b |dw*dx|*sum |qw*qx|."""
@@ -265,6 +305,7 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
             lambda a, b: sk.sgemm_bf16(a, np.ascontiguousarray(b.T), trans_b=True), _as_bf16)),
         ("sgemm_u8s8", _u8s8_check(lambda a, b, s, zp, bs, tb: sk.sgemm_u8s8(a, b, s, zp, bs, trans_b=tb))),
         ("gemv_q8_0", _q8_0_check),
+        ("gemv_q4_0", _q4_0_check),
         ("gelu (exact)", _elementwise_check(sk.gelu, _gelu_erf, atol=2e-6)),
         ("gelu (tanh)", _elementwise_check(lambda x: sk.gelu(x, approximate="tanh"),
                                            _gelu_tanh, atol=2e-6)),
@@ -317,7 +358,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 # out-of-place API users call), except GEMM, which writes into a preallocated C.
 
 BENCH_SCHEMA = "simd-ml-kernels-bench/1"
-BENCH_CASES = ("sgemm", "lowp", "int8", "gemv", "q8_0", "act")
+BENCH_CASES = ("sgemm", "lowp", "int8", "gemv", "q8_0", "q4_0", "act")
 THREAD_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
 # Variables that change which kernel runs; recorded with the thread ones.
 KERNEL_ENV = ("SIMD_ML_ISA", "SIMD_ML_BF16_DOT")
@@ -714,20 +755,26 @@ def _watch_threads(p) -> dict:
             "wall_s": end}
 
 
-def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace) -> dict:
-    """Run test-backend-ops perf on one Q8_0 MUL_MAT [n, k] x [k, 1], GGML_RUNS
-    times, on our CPUs with one thread. Returns the measurement (or why not)."""
+# ggml type id and bytes per 32-value block of the weight formats we compare.
+GGML_TYPES = {"q8_0": (8, 34), "q4_0": (2, 18)}
+
+
+def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace, fmt: str = "q8_0") -> dict:
+    """Run test-backend-ops perf on one MUL_MAT [n, k] (fmt: q8_0 or q4_0
+    weights) x [k, 1] (f32), GGML_RUNS times, on our CPUs with one thread.
+    Returns the measurement (or why not)."""
     import subprocess
     import tempfile
 
-    row = k // 32 * 34
-    line = (f"{info['ggml_op_mul_mat']} 0 {n} 1 1 1 0 2 8 {k} {n} 1 1 34 {row} {row * n} {row * n} "
+    tid, bb = GGML_TYPES[fmt]
+    row = k // 32 * bb
+    line = (f"{info['ggml_op_mul_mat']} 0 {n} 1 1 1 0 2 {tid} {k} {n} 1 1 {bb} {row} {row * n} {row * n} "
             f"0 {k} 1 1 1 4 {4 * k} {4 * k} {4 * k} -")
     cpus = _pinned_cpus() or []
     env = dict(os.environ, OMP_THREAD_LIMIT="1")
     out: dict = {"test_file_line": line, "env": {"OMP_THREAD_LIMIT": "1"}}
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "mul_mat_q8_0.txt")
+        path = os.path.join(tmp, f"mul_mat_{fmt}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(line + "\n")
         cmd = ([] if not cpus else ["taskset", "-c", ",".join(map(str, cpus))]) + \
@@ -952,7 +999,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     # weights from DRAM (rotated qcp); then ggml's own Q8_0 MUL_MAT when
     # SIMD_ML_GGML_TEST_BACKEND_OPS points at llama.cpp's test-backend-ops.
     ggml_bin = os.environ.get(GGML_ENV)
-    ggml = _ggml_info(ggml_bin) if ggml_bin and "q8_0" in args.cases else None
+    ggml = _ggml_info(ggml_bin) if ggml_bin and ("q8_0" in args.cases or "q4_0" in args.cases) else None
     for m, n, k in GEMV_SHAPES if "q8_0" in args.cases else []:
         w32 = rng.standard_normal((n, k)).astype(np.float32)
         x32 = rng.standard_normal((m, k)).astype(np.float32)
@@ -1022,6 +1069,79 @@ def cmd_bench(args: argparse.Namespace) -> int:
                          f"({row['pct_stream_read']:.0f}% read)" if "time_s" in row else row.get("not_measured", "")))
         del wqs, wfs, wbs, impls
 
+    # Q4_0 decode GEMV (gemv_q4_0: ggml block_q4_0 weights, 18 bytes per 32;
+    # x quantized to Q8 inside) on the same shapes, interleaved with our Q8_0
+    # GEMV (Q8_0 blocks of the same W), our FP32 GEMV and PyTorch's FP32
+    # F.linear on the dequantized Q4_0 weights, each reading its own weights
+    # from DRAM (rotated copies); then ggml's own Q4_0 MUL_MAT.
+    for m, n, k in GEMV_SHAPES if "q4_0" in args.cases else []:
+        w32 = rng.standard_normal((n, k)).astype(np.float32)
+        x32 = rng.standard_normal((m, k)).astype(np.float32)
+        wq4 = sk.quantize_q4_0(w32)
+        wq8 = sk.quantize_q8_0(w32)
+        dw, qw = q4_0_blocks(wq4, n, k)
+        wdq = (qw.astype(np.float32) * dw.astype(np.float32)[:, :, None]).reshape(n, k)
+        x1 = np.ascontiguousarray(x32[0])
+        # End-to-end error against x·Wᵀ (float64); weights_only: FP32 product
+        # on the dequantized Q4_0 weights; the rest is x's 8-bit quantization.
+        y_exact = w32.astype(np.float64) @ x1.astype(np.float64)
+        y_q = sk.gemv_q4_0(x1, wq4, n, k).astype(np.float64)
+        y_w = wdq.astype(np.float64) @ x1.astype(np.float64)
+
+        def _err4(yv: np.ndarray) -> dict:
+            d = yv - y_exact
+            return {"rel_l2": float(np.linalg.norm(d) / np.linalg.norm(y_exact)),
+                    "max_abs_over_max_abs": float(np.abs(d).max() / np.abs(y_exact).max())}
+        err = {"data": "W and x standard normal (numpy default_rng(0) stream)",
+               "gemv_q4_0": _err4(y_q), "weights_only": _err4(y_w)}
+        del w32, dw, qw, y_exact, y_q, y_w
+        q4bytes, q8bytes = n * k * 18 // 32, n * k * 34 // 32
+        c4 = max(1, -(-2 * llc // q4bytes))
+        c8 = max(1, -(-2 * llc // q8bytes))
+        cf = max(1, -(-2 * llc // (n * k * 4)))
+        w4s = [wq4.copy() for _ in range(c4)]
+        w8s = [wq8.copy() for _ in range(c8)]
+        wfs = [wdq.copy() for _ in range(cf)]
+        c = np.empty((m, n), np.float32)
+        r4, r8, rf = _Rotor(c4), _Rotor(c8), _Rotor(cf)
+        impls = [("simd_ml_kernels", lambda: sk.gemv_q4_0(x1, w4s[r4()], n, k)),
+                 ("simd_ml_kernels q8_0", lambda: sk.gemv_q8_0(x1, w8s[r8()], n, k)),
+                 ("simd_ml_kernels fp32", lambda: sk.sgemm(x32, wfs[rf()], C=c, trans_b=True))]
+        qnb = {"simd_ml_kernels": q4bytes + 4 * k + 4 * n,
+               "simd_ml_kernels q8_0": q8bytes + 4 * k + 4 * n,
+               "simd_ml_kernels fp32": 4 * n * k + 4 * k + 4 * n}
+        if torch is not None:
+            tws = [torch.from_numpy(w) for w in wfs]
+            xt = torch.from_numpy(x32)
+            name = f"torch {torch.__version__} float32 F.linear (dequantized weights)"
+            impls.append((name, lambda: torch.nn.functional.linear(xt, tws[rf()])))
+            qnb[name] = qnb["simd_ml_kernels fp32"]
+        case_rows = _gemv_case(results, "gemv_q4_0", (m, n, k), impls, qnb, roof_buf, roofs["triad"], args)
+        cps = {"simd_ml_kernels": c4, "simd_ml_kernels q8_0": c8}
+        for row in case_rows:
+            row["weight_copies"] = cps.get(row["impl"], cf)
+        case_rows[0]["err_vs_fp32"] = err
+        if ggml is not None:
+            gres = _ggml_case(ggml, n, k, args, "q4_0")
+            row = {"kernel": "gemv_q4_0", "impl": "ggml test-backend-ops", "shape": [m, n, k], **gres}
+            if "time_s" in gres:
+                row["bytes"] = qnb["simd_ml_kernels"]
+                row["gb_per_s"] = row["bytes"] / gres["time_s"] * 1e-9
+                row["roof_read_gbs"] = case_rows[0]["roof_read_gbs"]
+                row["pct_stream_read"] = 100.0 * row["gb_per_s"] / row["roof_read_gbs"]
+                row["pct_stream_triad"] = 100.0 * row["gb_per_s"] / roofs["triad"] if roofs["triad"] else None
+            results.append(row)
+            case_rows.append(row)
+        _mark_roof_unstable(case_rows)
+        for row in case_rows:
+            if "median_s" in row:
+                show(row)
+            else:
+                print(f"  gemv_q4_0        ggml             {str((m, n, k)):<16} "
+                      + (f"{row['time_s'] * 1e3:9.3f} ms (mean, own timing)  {row['gb_per_s']:7.2f} GB/s "
+                         f"({row['pct_stream_read']:.0f}% read)" if "time_s" in row else row.get("not_measured", "")))
+        del w4s, w8s, wfs, impls
+
     x = rng.standard_normal(args.elems).astype(np.float32)
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)
     g = rng.standard_normal(1024).astype(np.float32)
@@ -1078,7 +1198,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
             "baselines": {"numpy": np.__version__, "blas": _blas_info(),
                           "torch": None if torch is None else torch.__version__,
                           "ggml": ggml if ggml is not None else
-                          f"not measured ({GGML_ENV} not set)" if not ggml_bin else "not measured (no q8_0 cases)"},
+                          f"not measured ({GGML_ENV} not set)" if not ggml_bin else "not measured (no q8_0 or q4_0 cases)"},
             "env": {k: os.environ.get(k) for k in THREAD_ENV + KERNEL_ENV},
             "protocol": {"warmup": args.warmup, "reps": args.reps,
                          "statistic": "median; p25/p75 = interquartile range",
@@ -1089,7 +1209,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
                          "min_ghz": args.min_ghz,
                          "stream": STREAM_PROTOCOL,
                          "gemv": "y = x·Wᵀ, one row x, W [N, K]; gb_per_s = (weights + x + y bytes) / median "
-                                 "time (Q8_0: 34 bytes per 32 weights); per-case roof: the read-stream loops "
+                                 "time (Q8_0: 34 bytes per 32 weights, Q4_0: 18); per-case roof: the read-stream loops "
                                  "(protocol.stream) timed interleaved with the case's implementations, "
                                  "roof_read_gbs = the fastest; pct_stream_read = gb_per_s / roof_read_gbs; pct_stream_triad = "
                                  "gb_per_s / machine.stream_triad_gbs (once per run); roof_unstable: an "
