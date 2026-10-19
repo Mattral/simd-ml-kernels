@@ -1,11 +1,14 @@
 # simd-ml-kernels — Roadmap
 
+Milestones are numbered work stages, not package versions. Package versions
+and their contents are in [CHANGELOG.md](https://github.com/Mattral/simd-ml-kernels/blob/main/CHANGELOG.md).
+
 ## Legend
 ✅ Complete and verified   ⚠️ Partial / in progress   ❌ Not started
 
 ---
 
-## v0.2 — Correctness & Measurement Foundation ✅
+## Milestone 1 — Correctness & Measurement Foundation ✅
 - [✅] Precision test targets compiled without `-ffast-math`
 - [✅] Buffer contiguity and dtype validation in Python bindings
 - [✅] `tests/test_bindings_edge_cases.py` — rejects non-contiguous NumPy arrays
@@ -16,7 +19,7 @@
 
 ---
 
-## v0.3 — True GEMM Microkernel ✅
+## Milestone 2 — True GEMM Microkernel ✅
 - [✅] B panel packing (`pack_b_panel`)
 - [✅] A panel packing (`pack_a_panel`)
 - [✅] AVX2 8×8 micro-kernel with 8 YMM accumulators (`inner_kernel_8x8`). Replaced in W3 by 6×16 (12 accumulators), chosen by measurement (DESIGN.md §2.5).
@@ -28,7 +31,7 @@
 
 ---
 
-## v0.4 — Activation Kernels ✅
+## Milestone 3 — Activation Kernels ✅
 - [✅] GeLU: exact erf (default) and tanh variants, `approximate=` as in PyTorch; max abs error ≤ 2e-6 for both (measured 9.5e-7 / 1.5e-6, see `docs/api/python_api.md`). An earlier entry here said "< 2e-7"; the measured error of the tanh variant was 1.2e-6.
 - [✅] ReLU (`_mm256_max_ps`, exact)
 - [✅] SiLU/Swish, `x / (1 + exp(−x))` since W3, `|err| ≤ 1e-35 + 1e-6·|ref|` for every finite x. An earlier entry here said "via fast tanh, < 2e-7 error"; that form's error grew without bound below x = −16 (DESIGN.md §3.3).
@@ -38,7 +41,7 @@
 
 ---
 
-## v0.5 — Python Integration & Developer Experience ✅
+## Milestone 4 — Python Integration & Developer Experience ✅
 - [✅] pybind11 bindings for all kernels: `sgemm`, `gelu`, `relu`, `silu`, `softmax`, `layer_norm`
 - [✅] GIL release during all kernel calls (threading-safe)
 - [✅] Python type stubs (`python/simd_ml_kernels/_core.pyi`) for IDE autocompletion
@@ -51,7 +54,7 @@
 
 ---
 
-## v0.6 — Statistical Benchmarking ✅
+## Milestone 5 — Statistical Benchmarking ✅
 - [✅] `bench_stat.cpp`: wall-clock timing, 95% CI, JSON output, CPU pinning
 - [✅] Benchmark protocol: `python -m simd_ml_kernels bench --json`, committed results, generated tables (docs/BENCHMARKS.md). The earlier `check_regression.py` gate on shared CI runners was removed.
 - [✅] `bench.yml` weekly run on a shared runner, uploaded as an artifact (no regression gate; not used for claims)
@@ -61,7 +64,7 @@
 
 ---
 
-## v0.7 — Engineering Polish ✅
+## Milestone 6 — Engineering Polish ✅
 - [✅] ODR violation resolved: the test binary links one kernel library. (An earlier entry here said it was resolved by excluding avx_matmul.cpp from a second, non-fast-math "precision" library; that library still duplicated every other kernel and was never actually linked in, so tests ran the -ffast-math build. Removed in favour of linking only the shipped library.)
 - [✅] AVX-512 dispatch bug fixed (inner_NR=32 misaligned with 6×16 kernel)
 - [✅] All build warnings addressed
@@ -71,7 +74,7 @@
 
 ---
 
-## v0.8 — AVX-512 Full Kernel ✅
+## Milestone 7 — AVX-512 Full Kernel ✅
 
 **Both GEMM kernels now have correct, tested, dispatched AVX-512 support:**
 
@@ -126,7 +129,7 @@ replaced both.
 
 ---
 
-## v0.9 — Additional Primitives (Planned)
+## Milestone 8 — Additional Primitives (Planned)
 - [✅] Skip panel packing for small products. Since W3 the 6×16 micro-kernel
       runs on A and B in place for products up to 80³, for N ≤ 16 and for
       M = 1 (`sgemm_avx2_prefers_direct`, DESIGN.md §2.1), and the packing
@@ -207,7 +210,7 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
 
 ---
 
-## v1.0 — NUMA and Multi-socket (Planned)
+## Milestone 9 — NUMA and Multi-socket (Planned)
 - [❌] NUMA-aware packing buffer allocation
 - [❌] Multi-socket OpenMP with NUMA-local thread-private buffers
 - [❌] Benchmark against OpenBLAS multi-threaded on dual-socket systems
@@ -239,4 +242,4 @@ and small products at 24% of OpenBLAS (93% at N = 128 in
 | Decode GEMV: one core | Single-threaded, so it is bounded by one core's read bandwidth (31.8 GB/s on the reference laptop), not by DRAM; AVX-512 speed not measured (the cloud VM's bandwidth varied 5.8–11 GB/s between runs); FP32 is level with PyTorch and OpenBLAS (all near that roof); 9–16 rows with W [N, K] now pack W (at most 9% slower than the dot path in dev runs, not in a JSON; DESIGN.md §2.7) | W5 item 6 (opt-in OpenMP GEMV); roof measured per case (W5 item 2), then an AVX-512 run |
 | BF16 GEMM against PyTorch on AMX CPUs | 0.14–0.72× PyTorch's bfloat16 `matmul` on the Emerald Rapids VM (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`); PyTorch's rate implies AMX tiles, which this library does not use (DESIGN.md §4.1) | not planned |
 | x86 only, no Windows wheels | SIMD kernels are x86-64 only (scalar elsewhere; macOS arm64 wheels are scalar-only); wheels exist for manylinux x86-64 and macOS arm64, CPython 3.9–3.13; elsewhere pip builds the sdist, which needs a C++17 compiler (pip fetches CMake and Ninja) | not planned |
-| No NUMA-aware allocation | Throughput degrades on multi-socket systems | v1.0 |
+| No NUMA-aware allocation | Throughput degrades on multi-socket systems | Milestone 9 |
