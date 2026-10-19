@@ -13,6 +13,7 @@ int run_gelu_tests();
 int run_gemm_packed_tests();
 int run_lowp_gemm_tests();
 int run_int8_gemm_tests();
+int run_q8_0_tests();
 int run_activation_tests();
 int run_thread_tests();
 
@@ -25,6 +26,7 @@ int main() {
     result |= run_gemm_packed_tests();
     result |= run_lowp_gemm_tests();
     result |= run_int8_gemm_tests();
+    result |= run_q8_0_tests();
     result |= run_activation_tests();
     result |= run_thread_tests();
     std::printf("\n%s\n", result == 0 ? "=== ALL TESTS PASSED ===" : "=== SOME TESTS FAILED ===");

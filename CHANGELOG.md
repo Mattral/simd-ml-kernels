@@ -6,7 +6,28 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
+### Added
+- **`quantize_q8_0(W)`** and **`gemv_q8_0(x, Wq, N, K)`**: decode GEMV on
+  weights in ggml's Q8_0 format (`block_q8_0`, byte-identical: float16 scale
+  + 32 int8 per block; quantization as `quantize_row_q8_0_ref`). x is
+  quantized to Q8 blocks once per call (float32 scales); exact integer
+  block dot products with `vpdpbusd` (AVX-VNNI, AVX512_VNNI) or
+  `vpmaddubsw` (AVX2), FP32 sums; `build_info()['q8_0_path']`. K % 32 != 0
+  raises `ArgumentError`. docs/DESIGN.md §2.8. RESULTS_CHANGELOG_Q8
+- `python -m simd_ml_kernels bench`: Q8_0 GEMV cases against our FP32/BF16
+  GEMV, PyTorch's FP32 `F.linear` on the dequantized weights and, when
+  `SIMD_ML_GGML_TEST_BACKEND_OPS` names llama.cpp's `test-backend-ops`,
+  ggml's Q8_0 MUL_MAT on one thread; `--cases` to run a subset (development).
+
 ### Changed
+- `sgemm_u8s8` with one row of A and `trans_b=True` (x·Wᵀ for one token)
+  reads B in place instead of packing it, on every x86 path (exact integer
+  sums; same results within the documented bound). RESULTS_CHANGELOG_U8S8
+- `bench`: each GEMV case measures its own read roof (the read stream timed
+  interleaved with the case); `pct_stream_read` is relative to it
+  (`roof_read_gbs`). A case with an implementation above 105% of its own roof
+  is marked `roof_unstable` and not shown in the tables. The triad stays once
+  per run.
 - docs/ROADMAP.md: milestones renamed from "v0.2 … v1.0" to "Milestone 1 … 9".
   They were work stages, not package versions, and their names collided with
   real versions (the old "v0.3" milestone is not package 0.3.0).

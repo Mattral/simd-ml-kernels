@@ -49,6 +49,7 @@
 #include "bf16_gemm.hpp"
 #include "f16_gemm.hpp"
 #include "int8_gemm.hpp"
+#include "int8_rows.hpp"
 #include "cache_alloc.hpp"
 #include "../../dispatch/cpuid.hpp"
 
@@ -779,17 +780,48 @@ void sgemm_bf16_avx2(bool trans_b, int M, int N, int K, float alpha, const std::
     sgemm_lowp<BF16>(trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
+namespace {
+
+/**
+ * int8_rows.hpp step without VNNI: a − zp and b widened to int16, vpmaddwd
+ * (exact; vpmaddubsw would saturate). For one row times B [N, K].
+ */
+struct StepInt16 {
+    using Zp = __m256i;
+    struct A { __m256i lo, hi; };
+    static Zp zero_point(int zp) noexcept { return _mm256_set1_epi16(static_cast<short>(zp)); }
+    static A load_a(const std::uint8_t* p, Zp z) noexcept {
+        return {_mm256_sub_epi16(_mm256_cvtepu8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p))), z),
+                _mm256_sub_epi16(_mm256_cvtepu8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 16))), z)};
+    }
+    static SIMD_ML_ALWAYS_INLINE void step(const A& a, __m256i b, __m256i& ab, __m256i&) noexcept {
+        const __m256i lo = _mm256_madd_epi16(a.lo, _mm256_cvtepi8_epi16(_mm256_castsi256_si128(b)));
+        const __m256i hi = _mm256_madd_epi16(a.hi, _mm256_cvtepi8_epi16(_mm256_extracti128_si256(b, 1)));
+        ab = _mm256_add_epi32(ab, _mm256_add_epi32(lo, hi));
+    }
+    static long long finish(__m256i ab, __m256i, int) noexcept { return hsum_epi32_to_i64(ab); }
+};
+
+constexpr int kU8S8Rows = 4;
+
+}  // namespace
+
 /**
  * INT8 without VNNI: A − zero point and B are converted to FP32 while packing
  * (exact: |values| <= 255), the FP32 loops and 6×16 kernel compute the sums,
  * then each column is scaled by a_scale·b_scales[j]. The same work as the FP32
  * GEMM plus the conversion, so this is a memory saving (1-byte operands), not
- * a speed-up; the VNNI paths are the fast ones.
+ * a speed-up; the VNNI paths are the fast ones. One row with B [N, K]
+ * (M == 1, trans_b) streams B in place with int16 dots instead (int8_rows.hpp).
  */
 void sgemm_u8s8_convert_avx2(bool trans_b, int M, int N, int K, const std::uint8_t* A, int lda,
                              int a_zero_point, const std::int8_t* B, int ldb, float a_scale,
                              const float* b_scales, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K < 0) return;
+    if (M == 1 && trans_b) {   // one row x·Wᵀ: stream B in place (int8_rows.hpp)
+        u8s8_rows<StepInt16, kU8S8Rows>(N, K, A, a_zero_point, B, ldb, a_scale, b_scales, C);
+        return;
+    }
     scale_matrix_c(C, M, N, ldc, 0.0f);
     if (K > 0)
         packed(M, N, K, 1.0f,

@@ -58,6 +58,7 @@
 #include "../kernels/gemm/f16_gemm.hpp"
 #include "../kernels/gemm/bf16_gemm.hpp"
 #include "../kernels/gemm/int8_gemm.hpp"
+#include "../kernels/quant/q8_0.hpp"
 #include "../kernels/intrinsic_gelu.hpp"
 #include "../kernels/cache_alloc.hpp"
 #include "../dispatch/kernels.hpp"
@@ -436,6 +437,7 @@ static py::dict build_info() {
     info["compiler"]        = SIMD_ML_COMPILER;
     info["kernel_flags"]    = active.flags;      // flags of that table's units
     info["u8s8_path"]       = simd_ml::gemm::u8s8_path();  // sgemm_u8s8: avx512_vnni | avx_vnni | fp32_convert | scalar
+    info["q8_0_path"]       = simd_ml::quant::q8_0_path(); // gemv_q8_0: avx512_vnni | avx_vnni | avx2 | scalar
     return info;
 }
 
@@ -827,6 +829,69 @@ static py::array_t<float> py_sgemm_u8s8_convert(py::array A, py::array B, float 
     throw std::runtime_error("_sgemm_u8s8_convert needs the AVX2 kernels (this CPU or build has none)");
 }
 
+// ─── Binding: quantize_q8_0 / gemv_q8_0 ─────────────────────────────────────
+/**
+ * quantize_q8_0(W) -> np.ndarray[uint8]: W [..., K] float32 into ggml Q8_0
+ * blocks, shape [..., K/32*34] (quant/q8_0.hpp).
+ */
+static py::array py_quantize_q8_0(py::array W) {
+    validate_array(W, "W");
+    if (W.ndim() < 1) throw ArgumentError("W must have at least 1 dimension (rows of K values)");
+    const py::ssize_t K = W.shape(W.ndim() - 1);
+    if (K % simd_ml::quant::kQ8_0Values != 0)
+        throw ArgumentError("K (the last dimension of W) must be a multiple of 32 (got " + std::to_string(K) + ")");
+    if (K > std::numeric_limits<int>::max())
+        throw ArgumentError("K is too large");
+    const py::ssize_t rows = K == 0 ? 0 : W.size() / K;
+    if (rows > std::numeric_limits<int>::max()) throw ArgumentError("W has too many rows");
+    std::vector<py::ssize_t> shape(W.shape(), W.shape() + W.ndim());
+    shape.back() = static_cast<py::ssize_t>(simd_ml::quant::q8_0_row_bytes(static_cast<int>(K)));
+    py::array_t<std::uint8_t> out(shape);
+    const auto* w = static_cast<const float*>(W.data());
+    std::uint8_t* o = out.mutable_data();
+    bool ok;
+    {
+        py::gil_scoped_release release;
+        ok = simd_ml::quant::quantize_q8_0_rows(w, static_cast<int>(rows), static_cast<int>(K), o);
+    }
+    if (!ok)
+        throw ArgumentError("W must be finite, with |W| below 127 * 65520 = 8321040 (a block scale "
+                            "max|w|/127 must fit float16)");
+    return out;
+}
+
+/**
+ * gemv_q8_0(x, Wq, N, K) -> np.ndarray[float32] [N]: y = x · Wᵀ with W given
+ * as quantize_q8_0 blocks; x is quantized to Q8 blocks inside.
+ */
+static py::array_t<float> py_gemv_q8_0(py::array x, py::array Wq, py::ssize_t N, py::ssize_t K) {
+    validate_array(x, "x");
+    const auto dt = Wq.dtype();
+    if (dt.kind() != 'u' || dt.itemsize() != 1)
+        throw DTypeError("Wq must be uint8 (blocks from quantize_q8_0; dtype=np.uint8)");
+    check_contiguous(Wq, "Wq");
+    if (N < 0 || K < 0) throw ArgumentError("N and K must be >= 0");
+    if (K % simd_ml::quant::kQ8_0Values != 0)
+        throw ArgumentError("K must be a multiple of 32 (got " + std::to_string(K) + ")");
+    if (N > std::numeric_limits<int>::max() || K > std::numeric_limits<int>::max())
+        throw ArgumentError("N or K is too large");
+    if (x.ndim() != 1 || x.shape(0) != K)
+        throw ArgumentError("x must be 1-D with K = " + std::to_string(K) + " elements");
+    const auto row = static_cast<py::ssize_t>(simd_ml::quant::q8_0_row_bytes(static_cast<int>(K)));
+    if (Wq.size() != N * row)
+        throw ArgumentError("Wq must hold N*K/32*34 = " + std::to_string(N * row) + " bytes (got " +
+                            std::to_string(Wq.size()) + ")");
+    py::array_t<float> y(N);
+    const auto* xp = static_cast<const float*>(x.data());
+    const auto* wp = static_cast<const std::uint8_t*>(Wq.data());
+    float* yp = y.mutable_data();
+    {
+        py::gil_scoped_release release;
+        simd_ml::kernels().gemv_q8_0(static_cast<int>(N), static_cast<int>(K), xp, wp, yp);
+    }
+    return y;
+}
+
 static bool py_bf16_avx512bf16_available() {
     return simd_ml::gemm::bf16_avx512bf16_available();
 }
@@ -1185,6 +1250,76 @@ Example
 >>> C = sk.sgemm_f16(A, B)   # float32 output
 )doc");
 
+    m.def("quantize_q8_0", &py_quantize_q8_0, py::arg("W"),
+          R"doc(
+Quantize float32 weights to ggml's Q8_0 blocks (byte-identical to block_q8_0).
+
+Each run of 32 values along the last axis becomes one 34-byte block: a
+float16 scale d (little-endian) then 32 int8 quants q, value = d * q. As
+ggml's quantize_row_q8_0_ref: d = max|w| / 127 in float32, q = roundf(w / d)
+(half away from zero; q = 0 if d = 0), and the stored scale is d rounded to
+float16 (nearest, ties to even). One exception, where ggml's C code is
+undefined: a block with max|w| below 127 / FLT_MAX stores q = 0 (its scale
+is float16 zero either way).
+
+Dequantization error per value: |w - d16*q| <= d*(0.5 + 127*2^-11) + 2^-25
+when d16 = float16(d) is a normal float16 (|w| >= 127*2^-14 in the block);
+for smaller blocks the float16 subnormal spacing, 2^-24, sets the error.
+
+Parameters
+----------
+W : ndarray[float32], shape [..., K], C-contiguous, K a multiple of 32;
+    finite, |W| < 8321040 (a scale above 65504 does not fit float16)
+
+Returns
+-------
+ndarray[uint8], shape [..., K // 32 * 34]: the rows' blocks, rows in order
+
+Raises
+------
+ArgumentError if K % 32 != 0, or W has a NaN, an infinity, or a block whose
+scale overflows float16.
+
+Example
+-------
+>>> import numpy as np, simd_ml_kernels as sk
+>>> W = np.random.randn(4096, 4096).astype(np.float32)   # [out, in]
+>>> Wq = sk.quantize_q8_0(W)                             # uint8 [4096, 4352]
+>>> x = np.random.randn(4096).astype(np.float32)
+>>> y = sk.gemv_q8_0(x, Wq, 4096, 4096)                  # ≈ W @ x, float32 [4096]
+)doc");
+    m.def("gemv_q8_0", &py_gemv_q8_0, py::arg("x"), py::arg("Wq"), py::arg("N"), py::arg("K"),
+          R"doc(
+Decode GEMV on Q8_0 weights: y[n] = sum_k x[k] * W[n, k], W from quantize_q8_0.
+
+x is quantized once per call to Q8 blocks with the same rule (int8 quants
+equal to quantize_q8_0(x)'s; the scale dx = max|x|/127 is kept in float32,
+not rounded to float16), and each block's dot product is an exact integer
+sum (AVX-512 VNNI / AVX-VNNI vpdpbusd, AVX2 vpmaddubsw, or scalar;
+build_info()['q8_0_path']), scaled by float16(dw) * dx and summed in
+float32. Error bound, every path, against that sum taken exactly:
+|y - y_exact| <= 2*(K/32 + 4)*2^-24 * sum_b |dw_b*dx_b| * sum_i |qw*qx|.
+The quantization of W and x adds the error of 8-bit weights and
+activations (docs/DESIGN.md §2.8). x with a NaN or an infinity gives NaN
+everywhere. Single-threaded.
+
+Parameters
+----------
+x  : ndarray[float32], shape [K], C-contiguous
+Wq : ndarray[uint8], N*K/32*34 bytes (any shape), C-contiguous: the blocks
+     of W [N, K] as quantize_q8_0 returns them
+N  : int, rows of W (outputs)
+K  : int, columns of W, a multiple of 32
+
+Returns
+-------
+ndarray[float32], shape [N]
+
+Raises
+------
+ArgumentError if K % 32 != 0 or the sizes do not match; DTypeError if x is
+not float32 or Wq not uint8.
+)doc");
     m.def("sgemm_u8s8", &py_sgemm_u8s8,
           py::arg("A"), py::arg("B"), py::arg("a_scale"), py::arg("a_zero_point"), py::arg("b_scales"),
           py::arg("C") = py::none(), py::kw_only(), py::arg("trans_b") = false,
@@ -1198,10 +1333,12 @@ The result is float32 (not requantized); C is overwritten.
 
 Paths, chosen once from CPUID (build_info()['u8s8_path']):
   avx_vnni / avx512_vnni: vpdpbusd, exact int32 sums within each K block of
-      up to 4096 values, blocks accumulated in float32;
+      up to 4096 values, blocks accumulated in float32; one row of A with
+      trans_b (M = 1) reads B in place with exact integer sums instead;
   fp32_convert (AVX2 without VNNI): inputs converted to float32 while
       packing, then the FP32 GEMM kernel: about the FP32 GEMM's speed with a
-      quarter of its operand memory;
+      quarter of its operand memory (M = 1 with trans_b: int16 dot products
+      reading B in place);
   scalar: exact int64 sums.
 Error bound, every path: |C - C_exact| <= 2*(K+2)*2^-24 * |a_scale*b_scales[j]|
 * sum_k |A[i,k] - a_zero_point| * |B[k,j]|. Single-threaded.

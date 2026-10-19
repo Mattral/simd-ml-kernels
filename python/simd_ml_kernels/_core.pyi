@@ -338,8 +338,35 @@ def sgemm_u8s8(
     Paths (build_info()['u8s8_path']): avx_vnni / avx512_vnni (vpdpbusd, exact
     int32 sums per K block), fp32_convert (AVX2 without VNNI: about the FP32
     GEMM's speed, a quarter of its operand memory), scalar (exact int64 sums).
+    One row of A with trans_b (M = 1) reads B in place on every x86 path.
     Error bound: |C - C_exact| <= 2*(K+2)*2^-24 * |a_scale*b_scales[j]| *
     sum_k |A[i,k] - a_zero_point| * |B[k,j]|. Single-threaded.
+    """
+    ...
+
+
+def quantize_q8_0(W: NDArray[np.float32]) -> NDArray[np.uint8]:
+    """
+    Quantize float32 weights [..., K] (K % 32 == 0) to ggml's Q8_0 blocks,
+    byte-identical to block_q8_0: per 32 values a float16 scale
+    d = max|w|/127 (little-endian), then 32 int8 q = roundf(w/d), as ggml's
+    quantize_row_q8_0_ref. Returns uint8 [..., K // 32 * 34].
+
+    Raises ArgumentError if K % 32 != 0, or W has a NaN, an infinity, or a
+    block whose scale overflows float16 (|w| >= 8321040).
+    """
+    ...
+
+
+def gemv_q8_0(x: NDArray[np.float32], Wq: NDArray[np.uint8], N: int, K: int) -> NDArray[np.float32]:
+    """
+    y[n] = sum_k x[k] * W[n, k] for W [N, K] given as quantize_q8_0 blocks
+    (Wq: N*K/32*34 uint8), x float32 [K]. x is quantized to Q8 blocks once
+    per call (float32 scales); integer block dot products (vpdpbusd /
+    vpmaddubsw / scalar; build_info()['q8_0_path']), float32 sums. Error
+    bound against the exact sum of the quantized operands:
+    2*(K/32 + 4)*2^-24 * sum_b |dw_b*dx_b| * sum_i |qw*qx|. x with NaN or
+    an infinity: all NaN. Single-threaded. Returns float32 [N].
     """
     ...
 

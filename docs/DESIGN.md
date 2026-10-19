@@ -224,7 +224,13 @@ published numbers are in BENCHMARKS.md.)
 
 **The roof is read bandwidth.** `bench` measures two roofs on the pinned core,
 over arrays of at least 4× the last-level cache (64 MiB minimum), and reports
-every GEMV row as a percentage of both:
+every GEMV row as a percentage of both. The read stream is timed inside each
+GEMV case, interleaved with its implementations, and that case's fastest
+stream is its roof (`roof_read_gbs`); the triad is measured once per run. A
+roof measured once per run drifted by several percent between runs on the
+laptop, which moved every percentage with it. A case where any implementation
+exceeds 105% of its own roof is marked `roof_unstable` and not published
+(make_tables.py lists it under "Not shown", as for `--min-ghz`):
 
 - *read stream*: the sum of one large float32 array, 4 bytes per element,
   nothing written, read as 2, 4 and 8 parts side by side (as the GEMV reads 4
@@ -276,12 +282,13 @@ chosen on the AVX2 core). Its speed is not measured: the only AVX-512 machine
 available is the cloud VM, which moved between hosts and whose single-core
 memory bandwidth varied from 5.8 to 11 GB/s from run to run (dev runs, not
 in a JSON), so a GEMV percentage of a roof measured once per run would not
-mean anything there. Measuring the roof next to each case (W5 PR2) is meant to
-make such a run usable. The scalar table computes the same dot products, one
+mean anything there; the per-case roof is meant to make such a run usable (not
+run there yet). The scalar table computes the same dot products, one
 accumulator per element.
 
 **Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_ecc219baa1f2`, one
-P-core; roofs 31.8 GB/s read stream, 29.6 GB/s triad), at 1×4096×4096,
+P-core; roofs measured once per run, before the per-case roof: 31.8 GB/s read
+stream, 29.6 GB/s triad), at 1×4096×4096,
 1×4096×11008 and 1×2048×8192:
 
 - FP32: 31.1–31.4 GB/s, 97–99% of the read stream; 1.03–1.05× PyTorch's
@@ -291,6 +298,94 @@ P-core; roofs 31.8 GB/s read stream, 29.6 GB/s triad), at 1×4096×4096,
   PyTorch's `F.linear` on the same 16-bit weights, which reads at 15.5–17.5
   GB/s (49–55% of the read stream). Half the bytes of FP32 at about the same
   GB/s, so close to half the time of our FP32 GEMV.
+
+### 2.8 Q8_0 decode GEMV (`gemv_q8_0`)
+
+`quantize_q8_0(W)` stores W [N, K] in ggml's Q8_0 format, byte for byte
+`block_q8_0`: each run of 32 weights is a 34-byte block, a binary16 scale
+d = max|w|/127 then 32 int8 quants q = roundf(w/d), as
+`quantize_row_q8_0_ref` (tested against ggml's own function when
+`SIMD_ML_GGML_LIB` or `SIMD_ML_GGML_TEST_BACKEND_OPS` points at a llama.cpp
+build, and against a NumPy port always). The quantization runs in the scalar
+unit, without `-ffast-math`, so `amax / 127` and `w · (1/d)` round exactly as
+the C reference does. One case differs: where 1/d overflows (max|w| below
+127/FLT_MAX), ggml converts ±inf to int8, which C leaves undefined; we store
+q = 0 (the binary16 scale is 0 there anyway). The bytes are 34/32 = 1.0625
+per weight, 27% of FP32 and 53% of FP16/BF16.
+
+**x is quantized once per call** to the same blocks (its quants equal
+`quantize_q8_0(x)`'s), but its scale dx = max|x|/127 stays FP32: rounding it
+to binary16, as ggml does, would add error and can underflow for small
+activations or overflow above 8.3·10⁶, for no saving (K values against N·K
+weights). The quantization is in the scalar unit (exact IEEE arithmetic, see
+above); for K = 11008 it is under 0.1% of the bytes the GEMV reads.
+
+**Dot product per block.** y[n] = Σ_b fp16(dw)·dx·Σ_i qw·qx: the 32-term
+integer sum is exact (|Σ| ≤ 32·127² < 2²⁴, so also exact as FP32), then one
+multiply by the scale product and one FMA into an 8-lane FP32 accumulator
+per row. Both operands are signed, but `vpdpbusd` and `vpmaddubsw` multiply
+unsigned by signed bytes. Two ways out: ggml's sign trick, |x|·sign(w, x) =
+x·w per byte (`vpabsb`, `vpsignb`), or the offset trick `sgemm_u8s8` uses
+for its zero point, (x + 128)·w = x·w + 128·w, which needs Σw per block (one
+more `vpdpbusd` against ones per row and block). We use the sign trick: |x|
+is computed once per x block and shared by all rows, and `vpsignb` is one
+instruction per 32 weights, the same count as the offset's extra dot but
+without a per-block correction. It is exact because Q8_0 never stores −128
+(|w/d| ≤ 127), so |x| fits a byte and `vpsignb` never negates −128, and on
+AVX2 without VNNI `vpmaddubsw`'s int16 pair sums stay at most 2·127² = 32258
+(no saturation). Instructions per block and row: one unaligned 32-byte load
+(34-byte stride: about half the loads split a cache line), `vpsignb`, the dot
+(`vpdpbusd`; `vpmaddubsw` + `vpmaddwd` on AVX2), `vcvtdq2ps`, the scale
+(`vpbroadcastw` + `vcvtph2ps`, one `vmulps` by dx) and one FMA: 8–10 µops for
+34 bytes. At the laptop's read roof (about 32 GB/s at 4.3 GHz, 7.5 bytes per
+cycle) one block arrives every 4.5 cycles, so the loop needs about 2 µops per
+cycle of an 8-wide core: memory, not instructions, sets the speed.
+
+**Structure** (`q8_0_rows.hpp`, one copy per unit with that unit's dot): 8
+rows walked together along K, as the FP32 GEMV (§2.7), with x's block
+(x, |x|, dx) loaded once per 8 rows. Dev runs (AVX-VNNI, % of the read roof
+measured next to them, no software prefetch): 1 row 50–63%, 2 rows 55–63%,
+4 rows 60–76%, 8 rows 70–91%. One row at a time is ggml's structure
+(`ggml_vec_dot_q8_0_q8_0` per output) and runs at about ggml's speed (below).
+Unlike the FP32 GEMV, software prefetch helps here: one `prefetcht0` per two
+blocks for the same row of the *next* 8-row group took the three shapes from
+67–91% to 90–100% of the roof in dev runs (8192×2048, rows of 2176 bytes,
+gained most: 67–72% to 90–93%); prefetching 512 or 1024 bytes ahead in the
+same row changed nothing. A row is only 34–68 cache lines long here, so a new
+group's 8 streams otherwise start cold every few microseconds.
+
+Paths (`build_info()["q8_0_path"]`): `avx_vnni` (VEX `vpdpbusd`), `avx2`
+(`vpmaddubsw` + `vpmaddwd`), `avx512_vnni` (EVEX `vpdpbusd` on YMM: a ZMM
+register would need two loads and a lane insert per two blocks plus a
+per-lane scale vector, in a loop bound by memory; correct under SDE, speed
+not measured), `scalar` (exact int sums per block). All single-threaded.
+
+**Error.** Against the exact sum of the quantized operands (every path,
+tested): |y − y64| ≤ 2·(K/32 + 4)·u·Σ_b |dw·dx|·Σ_i |qw·qx|. Against the FP32
+product x·Wᵀ, the quantization of both operands dominates; per weight
+|w − ŵ| ≤ d·(0.5 + 2⁻¹⁶ + 127·2⁻¹¹) = 0.5621·d (rounding w/d, then d to a
+normal binary16) and |x − x̂| ≤ 0.5001·dx, so |y − x·Wᵀ| ≤
+Σ_b [0.5622·dw·Σ|x| + 0.5001·dx·Σ|ŵ|] plus the kernel bound (tested on
+standard-normal data). Measured on the benchmark's standard-normal W and x
+(`err_vs_fp32` in the JSON): RESULTS_ERR.
+
+**ggml baseline.** llama.cpp's `test-backend-ops perf` runs one MUL_MAT
+(q8_0 × f32, m = N, n = 1, k = K) given as a `--test-file` line, built
+CPU-only Release with default flags (`GGML_NATIVE`, OpenMP, llamafile and
+repack on; test-backend-ops does not use the repacked weight buffers). It
+has no thread option and asks for hardware_concurrency()/2 threads, so it
+runs with `OMP_THREAD_LIMIT=1` under `taskset` on our core. Thread check, in
+the last 1.0 s before it exits (inside its ≥ 1 s timed loop): at most one
+thread, and threads other than the main one at most 5% of its CPU time
+(process minus main-thread ticks from /proc, which also counts threads that
+lived between samples). Its `threads_max` is 5 and its other threads use
+7–26% of the main thread's CPU over the whole run: 4 test-data threads per
+tensor (`init_tensor_uniform`), all before timing; in the timed window, one
+thread. It times its own way (the op repeated on the same tensors for ≥ 1 s,
+mean per run; we take the median of three such runs), so it is a separate
+column, not interleaved with ours.
+
+**Measured** (BENCHMARKS.md, RESULTS_FILE): RESULTS_MEASURED
 
 ---
 
@@ -493,6 +588,17 @@ OpenBLAS's float64 matmul of these integers was wrong).
 table and AVX512_VNNI), `avx_vnni`, `fp32_convert` or `scalar`. All paths are
 single-threaded.
 
+**One row with B [N, K]** (M = 1, `trans_b`: x·Wᵀ for one token) skips the
+packing on every x86 path (`int8_rows.hpp`): the rows of B are read in place,
+4 at a time (8 on AVX512_VNNI, which has 32 registers for the two int32
+accumulators per row), with the next 4-row group's same row prefetched as in
+the Q8_0 GEMV (§2.8). Σ a·b and Σ b come from two `vpdpbusd` per 32 bytes
+(A is uint8 and B int8: the instruction's own operand order, no sign trick);
+without VNNI, a − zp and b are widened to int16 and multiplied with
+`vpmaddwd` (exact). Lanes are int32 and K is summed in chunks of 2¹⁸ (one
+step adds at most 130560 to a lane), each chunk's lanes into int64, so the
+sum is exact; the bound above holds. Results: below.
+
 Measured (BENCHMARKS.md, `lnl-226v-wsl_2026-10-18_19aeaf83cd36`; `avx_vnni`,
 x·Wᵀ with W stored [N, K]):
 
@@ -503,12 +609,11 @@ x·Wᵀ with W stored [N, K]):
   so the fraction of peak, is not measured.
 - The FP32 conversion path (what a CPU without VNNI runs) at 0.95–1.03× our
   FP32 GEMM: memory savings at FP32 speed, no gain in time.
-- 1×4096×4096 (one row times a weight matrix): 1.15× our FP32 (its
-  dot-product path, §2.1) but **0.46× PyTorch**; the conversion path is
-  **0.47× our FP32** there. Every call packs all of B (and, for the
-  conversion path, writes it as FP32), which costs as much as using it once.
-  A GEMV that reads quantized weights in place, with the dequantization fused
-  into the dot product, is W5.
+- 1×4096×4096 (one row times a weight matrix), before the row path: 1.15× our
+  FP32 (its dot-product path, §2.1) but **0.46× PyTorch**; the conversion
+  path **0.47× our FP32**. Every call packed all of B (and, for the
+  conversion path, wrote it as FP32), which costs as much as using it once.
+  With the row path: RESULTS_U8S8.
 - `avx512_vnni` on the Emerald Rapids cloud VM
   (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`): 1.55–2.83× our FP32 GEMM
   at N = 128–2048, but 0.67–0.75× PyTorch's `quantized.linear` from N = 512

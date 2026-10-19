@@ -66,6 +66,20 @@ def _throttled(*rs: dict | None) -> bool:
     return any(r is not None and r["core_ghz"].get("below_min_ghz") for r in rs)
 
 
+def _unstable(*rs: dict | None) -> bool:
+    """A GEMV case where an implementation read faster than 105% of the case's
+    own read roof (measured in the case): the roof was not reliable there."""
+    return any(r is not None and r.get("roof_unstable") for r in rs)
+
+
+def _unstable_note(cases: list[tuple[str, dict]]) -> str:
+    if not cases:
+        return ""
+    items = ", ".join(f"{name} (roof {r['roof_read_gbs']:.1f} GB/s)" for name, r in cases)
+    return (f"\nNot shown: {items}. An implementation ran above 105% of the read roof measured in the same "
+            "case (`roof_unstable`), so the roof was not reliable there; the numbers remain in the JSON.")
+
+
 def _excluded_note(doc: dict, cases: list[tuple[str, dict]]) -> str:
     if not cases:
         return ""
@@ -177,12 +191,16 @@ def gemv_table(doc: dict, detail: bool) -> str:
     """Decode GEMV y = x·Wᵀ: GB/s, % of the read-only stream (the roof for a
     read-only kernel) and of the STREAM triad, and speed against PyTorch's
     F.linear (and NumPy's sgemv for FP32) on the same weights."""
-    rows = ["| weights | M×N×K | simd-ml-kernels µs | GB/s | % of read stream | % of triad |"
+    per_case = doc["protocol"].get("gemv_roof") == "per case"
+    rows = ["| weights | M×N×K | simd-ml-kernels µs | GB/s | % of read " + ("roof" if per_case else "stream")
+            + " | % of triad |"
             " PyTorch GB/s | ours / PyTorch | OpenBLAS sgemv GB/s | ours / OpenBLAS |"
             + (" IQR µs (ours) | IQR µs (PyTorch) | weight copies |" if detail else "")
+            + (" read roof GB/s |" if detail and per_case else "")
             + " core GHz median (min–max) |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "") + "---:|"]
-    excluded = []
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "")
+            + ("---:|" if detail and per_case else "") + "---:|"]
+    excluded, unstable = [], []
     for kernel, label in GEMV:
         by_shape: dict[tuple, dict] = {}
         for r in doc["results"]:
@@ -199,6 +217,9 @@ def gemv_table(doc: dict, detail: bool) -> str:
             if _throttled(o, t, b):
                 excluded.append((f"{label} {shp}", o))
                 continue
+            if _unstable(o, t, b):
+                unstable.append((f"{label} {shp}", o))
+                continue
             tg = f"{t['gb_per_s']:.1f}" if t else "not measured"
             tr = f"{o['gb_per_s'] / t['gb_per_s']:.2f}×" if t else "—"
             bg = f"{b['gb_per_s']:.1f}" if b else "—"
@@ -209,8 +230,66 @@ def gemv_table(doc: dict, detail: bool) -> str:
             if detail:
                 ti = f"{t['p25_s'] * 1e6:.0f}–{t['p75_s'] * 1e6:.0f}" if t else "—"
                 line += f" {o['p25_s'] * 1e6:.0f}–{o['p75_s'] * 1e6:.0f} | {ti} | {o.get('weight_copies', 1)} |"
+                if per_case:
+                    line += f" {o['roof_read_gbs']:.1f} |"
             rows.append(line + f" {_clk(o)} |")
-    return "\n".join(rows) + _excluded_note(doc, excluded)
+    return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
+
+
+def q8_0_table(doc: dict, detail: bool) -> str:
+    """Q8_0 decode GEMV (gemv_q8_0): GB/s (34 bytes per 32 weights), % of the
+    case's read roof, time against our FP32 / BF16 GEMV and PyTorch's FP32
+    F.linear on the dequantized weights (interleaved in the case), and ggml's
+    test-backend-ops (its own timing, run after the case)."""
+    rows = ["| M×N×K | simd-ml-kernels µs | GB/s | % of read roof | × our FP32 GEMV | × our BF16 GEMV |"
+            " PyTorch FP32 µs | ours / PyTorch | ggml µs (own timing) | ggml GB/s | ggml % of roof | ours / ggml |"
+            + (" IQR µs (ours) | read roof GB/s | ggml threads (max / timed) |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "") + "---:|"]
+    by_shape: dict[tuple, dict] = {}
+    for r in doc["results"]:
+        if r["kernel"] == "gemv_q8_0":
+            by_shape.setdefault(tuple(r["shape"]), {})[r["impl"]] = r
+    excluded, unstable = [], []
+    for shape in sorted(by_shape, key=lambda s: (s[1] * s[2], s)):
+        impls = by_shape[shape]
+        o, f, b = impls.get(OURS), impls.get(OURS + " fp32"), impls.get(OURS + " bf16")
+        t = next((v for k, v in impls.items() if k.startswith("torch")), None)
+        g = impls.get("ggml test-backend-ops")
+        if o is None or f is None or b is None:
+            continue
+        shp = "×".join(str(s) for s in shape)
+        if _throttled(o, f, b, t) or (g is not None and "core_ghz" in g and _throttled(g)):
+            excluded.append((shp, o))
+            continue
+        if _unstable(o, f, b, t, g):
+            unstable.append((shp, o))
+            continue
+        us = o["median_s"]
+        tt = f"{t['median_s'] * 1e6:.0f}" if t else "not measured"
+        tr = f"{t['median_s'] / us:.2f}×" if t else "—"
+        if g is not None and "time_s" in g:
+            gt, gg, gp, gr = (f"{g['time_s'] * 1e6:.0f}", f"{g['gb_per_s']:.1f}", f"{g['pct_stream_read']:.0f}%",
+                              f"{g['time_s'] / us:.2f}×")
+        else:
+            gt, gg, gp, gr = (g or {}).get("not_measured", "not measured"), "—", "—", "—"
+        line = (f"| {shp} | {us * 1e6:.0f} | {o['gb_per_s']:.1f} | {o['pct_stream_read']:.0f}% |"
+                f" {f['median_s'] / us:.2f}× | {b['median_s'] / us:.2f}× | {tt} | {tr} | {gt} | {gg} | {gp} | {gr} |")
+        if detail:
+            th = f"{g['threads_max']} / {g['threads_timed']}" if g is not None and "threads_timed" in g else "—"
+            line += f" {o['p25_s'] * 1e6:.0f}–{o['p75_s'] * 1e6:.0f} | {o['roof_read_gbs']:.1f} | {th} |"
+        rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
+
+
+def _ggml_source(doc: dict) -> str:
+    g = doc["baselines"].get("ggml")
+    if not isinstance(g, dict):
+        return g or "not measured"
+    return (f"llama.cpp {g['tag']} (`{(g['commit'] or '')[:7]}`), `test-backend-ops perf` MUL_MAT q8_0 × f32, "
+            f"one thread (OMP_THREAD_LIMIT=1, GGML_OPENMP={g['cmake'].get('GGML_OPENMP')}, "
+            f"GGML_NATIVE={g['cmake'].get('GGML_NATIVE')}), median of {g['runs_per_case']} runs of its own "
+            "mean over ≥ 1 s on the same weights (not interleaved)")
 
 
 def _roofs(doc: dict) -> str:
@@ -277,11 +356,20 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
                        "which returns requantized uint8)\n")
             out.append(int8_table(d, detail) + "\n")
         if any(r["kernel"] in dict(GEMV) for r in d["results"]):
+            roof = ("read roof: the read stream timed in each case, interleaved with it; STREAM triad of the run: "
+                    f"{_roofs(d)}" if d["protocol"].get("gemv_roof") == "per case" else f"bandwidth roofs: {_roofs(d)}")
             out.append("**Decode GEMV y = x·Wᵀ (one row x, W [N, K] as torch.nn.Linear stores it), FP32 output, "
-                       f"single thread**; bandwidth roofs: {_roofs(d)}. GB/s counts the weights, x and y. "
+                       f"single thread**; {roof}. GB/s counts the weights, x and y. "
                        "(PyTorch: `F.linear` on the same weights in their dtype, which returns that dtype; "
                        "OpenBLAS: NumPy's matrix-vector product, FP32 only)\n")
             out.append(gemv_table(d, detail) + "\n")
+        if any(r["kernel"] == "gemv_q8_0" for r in d["results"]):
+            path = d["build"].get("q8_0_path", "not recorded")
+            out.append(f"**Q8_0 decode GEMV** (`gemv_q8_0`: ggml block_q8_0 weights, 34 bytes per 32, x quantized "
+                       f"to Q8 inside), path `{path}`, single thread; GB/s counts the weights, x and y; × columns: "
+                       "time of that GEMV / ours, in the same interleaved case. PyTorch: FP32 `F.linear` on the "
+                       "dequantized weights, not a quantized kernel. ggml: " + _ggml_source(d) + ".\n")
+            out.append(q8_0_table(d, detail) + "\n")
         out.append("**Activations and normalization, out-of-place, single thread**\n")
         out.append(act_table(d, detail) + "\n")
     return "\n".join(out).rstrip() + "\n"
