@@ -65,13 +65,7 @@ For any new kernel, include at the top of the file:
 
 **Correctness before performance**
 
-Every optimised path must have a scalar reference in the same file that documents the mathematical operation. Tests compare against the reference.
-
-```cpp
-// REQUIRED for any new kernel:
-void my_kernel_avx2(const float* in, float* out, int n);   // fast path
-void my_kernel_scalar(const float* in, float* out, int n); // oracle
-```
+Every kernel has a portable scalar version in `src/kernels/scalar_kernels.cpp` (the scalar table, which also runs on CPUs without AVX2 and on non-x86 targets), and every table is tested against a float64 reference with an explicit tolerance (AGENTS.md, rules 4–6). SIMD versions live in their own ISA units and are reached only through the kernel tables.
 
 **Memory**
 
@@ -79,7 +73,7 @@ All buffers must use `make_aligned_array<T>()` from `cache_alloc.hpp` (64-byte a
 
 **Error handling**
 
-Kernels do not throw. Input validation happens at the Python binding layer (`pybind_entry.cpp`). Internal preconditions use `assert()` (stripped by `-DNDEBUG` in production builds).
+Kernels report no errors; the only exception one may throw is `std::bad_alloc` while growing the GEMM packing buffers. Input validation happens at the Python binding layer (`pybind_entry.cpp`). Internal preconditions use `assert()` (stripped by `-DNDEBUG`, which every Release unit is built with).
 
 **Warnings**
 
@@ -115,7 +109,7 @@ Always use the shared `assert_close(actual, ref, rtol, atol, label=...)`
 helper in `tests/test_precision.py`, which implements the combined
 `|diff| <= atol + rtol*|ref|` criterion (the same one `np.allclose` uses).
 Pick `atol` based on the kernel's documented absolute error bound near zero
-(typically `1e-5` to `1e-6` for the tanh-based activations in this project).
+(typically `1e-5` to `1e-6` for the activations in this project).
 
 ---
 
@@ -139,7 +133,7 @@ GEMM tile variants (`MR`, `NR`, `MC`, `KC`, `NC`) require special care:
    - Why is this the right approach? (Link to design doc or issue)
    - What correctness guarantees does it maintain?
    - What are the measured performance effects (if any)?
-3. **CI must pass.** Every workflow (ci.yml, guardrail.yml) must be green. The weekly bench.yml is not required to be green for a PR (it only runs on schedule), but the change must not be expected to cause a regression.
+3. **CI must pass.** Every workflow that runs on the pull request (ci.yml, build-and-test.yml, guardrail.yml, and wheels.yml when the build changes) must be green. The weekly bench.yml does not run on pull requests and is not used for any claim.
 4. **No force-pushes** to main after merging.
 
 ---

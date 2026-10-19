@@ -301,7 +301,10 @@ def main() -> int:
     docs = load()
     targets = {
         "README.md": ("results-summary",
-                      section(docs, detail=False, link_prefix="", latest_only=True)),
+                      # Absolute: README.md is also the project page on PyPI,
+                      # where relative links do not resolve.
+                      section(docs, detail=False, latest_only=True,
+                              link_prefix="https://github.com/Mattral/simd-ml-kernels/blob/main/")),
         "docs/BENCHMARKS.md": ("results-detail",
                                section(docs, detail=True, link_prefix="../", latest_only=False)),
     }

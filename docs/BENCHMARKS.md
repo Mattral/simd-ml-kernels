@@ -400,16 +400,22 @@ investigated.
 
 ## What is not measured yet
 
-- AVX-512 on bare metal: the only AVX-512 results are from a 2-vCPU cloud VM
+- AVX-512 on bare metal: the only AVX-512 results (FP32, FP16/BF16 and INT8
+  GEMM, activations) are from a 2-vCPU Emerald Rapids cloud VM
   (`cloud-xeon-emr-2vcpu`), where clocks and neighbours are not controlled.
-- FP16/BF16 GEMM with more than one thread.
-- The decode GEMV on AVX-512 hardware (pending a cloud run) and with more than
-  one thread (no threaded GEMV yet); llama.cpp/ggml as a GEMV baseline (comes
-  with the quantized GEMV).
-- Multi-threaded GEMM scaling (W3).
-- The workstation (i9-9900).
+- The decode GEMV and the bandwidth roofs on AVX-512 hardware: on the cloud VM
+  the single-core bandwidth varied from 5.8 to 11 GB/s between runs (the VM
+  moved hosts; dev runs, not in a JSON), so a roof measured once per run
+  would not describe the GEMV cases. Waits for the roof to be measured per
+  case (W5).
+- The decode GEMV with more than one thread (no threaded GEMV yet), and the
+  all-core roofs (recorded only by OpenMP builds; no published run has one).
+- llama.cpp/ggml as a GEMV baseline (comes with the quantized GEMV, W5).
+- Multi-threaded GEMM scaling, including FP16/BF16 and INT8 (INT8 has no
+  threaded path). Waits for the i9-9900 workstation (8 cores, not hybrid).
+- The workstation (i9-9900): no results yet.
 - Fraction of theoretical peak: the per-cycle numbers above are measured, but
-  the peak FMA throughput of the core has not been measured on this machine.
+  the peak FMA (and `vpdpbusd`) throughput of the cores has not been measured.
 
 ## C++ harnesses
 
