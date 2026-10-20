@@ -17,7 +17,7 @@ environments are never mixed in one table.
 | Clock | The core clock is sampled on the benchmark thread (5 ms chain of dependent register-register integer adds, 1 add/cycle) before each case, after every 5 timed rounds and after the case; per-cycle rates use the median sample, and the tables show the min–max. One sample after the case was not enough: in one run it read 3.07 GHz for a case that would then have reached 37.8 flop/cycle, above the 32 flop/cycle an AVX2 core with two 256-bit FMA pipes can execute. With `--min-ghz`, a case with any sample below that value is repeated (up to 3 attempts). A case that is still below it after the last attempt (`below_min_ghz` in the JSON) is left out of the tables here and in the README; a "Not shown" line under the table names it with its clock, and its numbers stay only in the JSON. An add-*immediate* chain is not used: Golden Cove-class cores fold it in the renamer (it measured 22 "GHz"). On the Lunar Lake laptop the add chain agrees with a 3-cycle `imul` chain within 2% on a P-core (4.35 vs 4.37–4.43 GHz). |
 | Baselines | Same process, same inputs. GEMM: NumPy `matmul` (OpenBLAS), writing into a preallocated C, as `sgemm` does. FP16/BF16-input GEMM: our FP32 GEMM on the same values, and PyTorch's `torch.matmul` on float16 / bfloat16 tensors (it returns float16 / bfloat16; ours returns float32). INT8 GEMM (x·Wᵀ, W stored [N, K]): our FP32 GEMM on float32 operands of the same shape, our FP32 conversion path (what CPUs without VNNI run), and PyTorch's `torch.ops.quantized.linear` on the default engine with weights prepacked once (it returns requantized uint8; ours returns float32). Activations: PyTorch CPU `torch.nn.functional` (oneDNN where it applies); out-of-place for both libraries, so both include allocating the output. |
 | Bandwidth roofs | Before the kernels, on the pinned core, over float32 arrays of max(4× LLC, 64 MiB) each (the LLC size from CPUID; one cloud VM reports 260 MB, so the size is never fixed): a read-only stream, the fastest read-only loop we have over one array (4 bytes per element): its sum read as 2, 4, 8 and 16 parts side by side and, with the AVX2 kernels, in the GEMV's own pattern (rows of 16 KiB, 4 or 8 rows walked together with 32-byte loads; 8 rows with the next group prefetched); `machine.stream_read_gbs` is the fastest variant, so it can only lower a kernel's percentage, and it is a lower bound on the core's read limit, and the STREAM triad `a = b + s·c` (12 bytes per element, STREAM's convention without the stores' read-for-ownership; `machine.stream_triad_gbs`). The read stream is the roof for the GEMV, which only reads its weights; a read-only kernel can exceed 100% of the triad. One core cannot saturate DRAM, so these single-core roofs are the ones the single-threaded kernels are judged against (DESIGN.md §2.7); all-core values (`*_allcore_gbs`) are recorded only by OpenMP builds allowed to use more than one CPU. |
-| GEMV cases | y = x·Wᵀ, one row x, W [N, K] (`torch.nn.Linear` layout), FP32 / FP16 / BF16 and Q8_0 weights (34 bytes per 32). GB/s counts the weights, x and y. Each case times the read stream (2, 4, 8 parts) interleaved with its implementations; the fastest is the case's roof (`roof_read_gbs`), and `pct_stream_read` divides by it (runs before the per-case roof, `protocol.gemv_roof` absent, divide by `machine.stream_read_gbs`); `pct_stream_triad` divides by the run's triad. A case with an implementation above 105% of its own roof is `roof_unstable` and not shown in the tables. Q8_0 cases also run our FP32 and BF16 GEMV, PyTorch's FP32 `F.linear` on the dequantized weights (not a quantized kernel), and ggml (next row). Weights rotate: ceil(2 × LLC / weight bytes) copies (at least 1; `weight_copies` in the JSON), the next copy on every call of any implementation, so no call finds its weights in the last-level cache (on the laptop's 8 MiB L3 every shape needs one copy; on a 260 MB LLC a 32 MiB matrix needs 17). Baselines on the same buffers: PyTorch `F.linear` in the weights' dtype (returns that dtype; ours returns float32) and, for FP32, NumPy's matrix-vector product (OpenBLAS sgemv). |
+| GEMV cases | y = x·Wᵀ, one row x, W [N, K] (`torch.nn.Linear` layout), FP32 / FP16 / BF16 and Q8_0 weights (34 bytes per 32). GB/s counts the weights, x and y. Each case times the read stream (2, 4, 8 parts) interleaved with its implementations; the fastest is the case's roof (`roof_read_gbs`), and `pct_stream_read` divides by it (runs before the per-case roof, `protocol.gemv_roof` absent, divide by `machine.stream_read_gbs`); `pct_stream_triad` divides by the run's triad. A case with an implementation reading rotated weights above 105% of its own roof is `roof_unstable` and not shown in the tables. Q8_0 cases also run our FP32 and BF16 GEMV, PyTorch's FP32 `F.linear` on the dequantized weights (not a quantized kernel), and ggml (next row). Weights rotate: ceil(2 × LLC / weight bytes) copies (at least 1; `weight_copies` in the JSON), the next copy on every call of any implementation, so no call finds its weights in the last-level cache (on the laptop's 8 MiB L3 every shape needs one copy; on a 260 MB LLC a 32 MiB matrix needs 17). Baselines on the same buffers: PyTorch `F.linear` in the weights' dtype (returns that dtype; ours returns float32) and, for FP32, NumPy's matrix-vector product (OpenBLAS sgemv). |
 | ggml (Q8_0) | When `SIMD_ML_GGML_TEST_BACKEND_OPS` points at llama.cpp's `test-backend-ops`: its `perf` mode on one MUL_MAT (q8_0 × f32, m = N, n = 1, k = K, a `--test-file` line), with `OMP_THREAD_LIMIT=1` and `taskset` on the bench's CPUs, after the interleaved case. A run counts if, in its last 1.0 s (inside its ≥ 1 s timed loop), at most one thread existed and the other threads used at most 5% of the main thread's CPU time (`threads_timed`, `cpu_ticks.timed_window`; DESIGN.md §2.8 has the observed numbers). Its own statistic: mean per run over ≥ 1 s on the same weights; `time_s` is the median of 3 such runs. The JSON records tag, commit, CMake settings, `llama_print_system_info()`, command and test-file line (`baselines.ggml`). Without the variable: "not measured". |
 | Allocation | On Linux, `bench` fixes glibc malloc's thresholds (`mallopt`: blocks below 32 MiB from the heap, heap never trimmed; recorded as `protocol.malloc`), so allocating an output reuses warm pages in every case. With glibc's dynamic defaults the mmap threshold depends on which large blocks were freed earlier: after the FP16/BF16 GEMM cases each 4 MiB activation output became a fresh mmap, page-faulted in on every call, and both libraries' activations measured 2–9× slower (SiLU 0.31–0.41 Gelem/s instead of about 3 for ours, 0.6–0.7 instead of about 2.2 for PyTorch). |
 | Metadata | CPU model, core label, pinned CPUs, caches of that core (CPUID leaf 4), OS, compiler, kernel flags, git commit, NumPy/BLAS/PyTorch versions, thread env vars, command, UTC timestamp. |
@@ -566,6 +566,98 @@ show which core type ran a thread. The JSON's note says how placement was
 checked. Why each step: docs/DESIGN.md §2.10.
 
 <!-- BEGIN GENERATED: threads-detail -->
+#### lnl-226v-wsl, 2026-10-20, commit `38cd710929a3`, 1/2/4 threads
+
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPUs 0-3 (the 4 P-cores; the 4 LP E-cores excluded), 1/2/4 threads; Python 3.12.3, GNU 13.3.0, commit `38cd710929a3`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-20T08:58:42+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-20_38cd710929a3_threads.json`](../benchmarks/results/lnl-226v-wsl_2026-10-20_38cd710929a3_threads.json); CPUs [0, 1, 2, 3].
+
+**Q8_0 / Q4_0 decode GEMV at 1–4 threads**, path `avx_vnni`. GB/s counts the weights, x and y; % of the read roof measured at the same thread count in the same case; scaling = GB/s at N threads / (N × GB/s at 1 thread); ours with weights rotated past the caches, and on the same weights every call (as ggml runs). ggml: llama.cpp v0.7.0 (`620d222`), `test-backend-ops perf` MUL_MAT q8_0 or q4_0 × f32, the same thread count (OMP_THREAD_LIMIT = threads, GGML_OPENMP=ON, GGML_NATIVE=ON), median of 3 runs of its own mean over ≥ 1 s on the same weights (not interleaved).
+
+| format | N×K (Llama-3.2-1B) | threads | simd-ml-kernels µs | GB/s | % of read roof | scaling | same weights µs | ggml µs (own timing) | ggml % of roof | ours / ggml (same weights) | ours / ggml (rotated) | read roof GB/s | IQR µs (ours) | ggml threads (max / timed) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q8_0 | 512×2048 (k_proj, v_proj) | 1 | 42 | 26.9 | 78% | 100% | 30 | 30 | 110% | 0.98× | 0.71× | 34.5 | 40–65 | 1 / 1 | 4.48 (4.00–4.58) |
+| Q8_0 | 512×2048 (k_proj, v_proj) | 2 | 24 | 47.2 | 71% | 88% | 17 | 18 | 95% | 1.07× | 0.75× | 66.5 | 23–29 | 2 / 2 | 4.26 (4.04–4.50) |
+| Q8_0 | 512×2048 (k_proj, v_proj) | 4 | 18 | 61.4 | 68% | 57% | 12 | 11 | 110% | 0.97× | 0.62× | 90.2 | 17–43 | 4 / 4 | 3.56 (3.13–3.65) |
+| Q8_0 | 2048×2048 (q_proj, o_proj) | 1 | 150 | 29.7 | 81% | 100% | 109 | 128 | 95% | 1.18× | 0.85× | 36.8 | 136–173 | 5 / 1 | 4.23 (3.95–4.57) |
+| Q8_0 | 2048×2048 (q_proj, o_proj) | 2 | 85 | 52.4 | 80% | 88% | 53 | 73 | 93% | 1.38× | 0.86× | 65.8 | 81–109 | 5 / 2 | 4.11 (3.67–4.52) |
+| Q8_0 | 2048×2048 (q_proj, o_proj) | 4 | 60 | 74.8 | 79% | 63% | 36 | 45 | 107% | 1.23× | 0.75× | 94.1 | 56–84 | 5 / 4 | 3.57 (3.16–3.66) |
+| Q8_0 | 2048×8192 (down_proj) | 1 | 504 | 35.4 | 93% | 100% | 474 | 877 | 54% | 1.85× | 1.74× | 37.9 | 475–552 | 5 / 1 | 4.50 (3.93–4.90) |
+| Q8_0 | 2048×8192 (down_proj) | 2 | 317 | 56.3 | 87% | 79% | 277 | 446 | 62% | 1.61× | 1.41× | 65.0 | 293–346 | 5 / 2 | 4.29 (3.61–4.54) |
+| Q8_0 | 2048×8192 (down_proj) | 4 | 237 | 75.3 | 81% | 53% | 194 | 278 | 69% | 1.43× | 1.17× | 93.3 | 214–277 | 5 / 4 | 3.60 (3.14–3.65) |
+| Q8_0 | 4096×4096 | 1 | 539 | 33.1 | 91% | 100% | 490 | 809 | 61% | 1.65× | 1.50× | 36.3 | 511–584 | 5 / 1 | 4.24 (3.73–4.48) |
+| Q8_0 | 4096×4096 | 2 | 314 | 56.9 | 90% | 86% | 260 | 438 | 65% | 1.68× | 1.39× | 63.0 | 285–341 | 5 / 2 | 4.17 (3.53–4.52) |
+| Q8_0 | 4096×4096 | 4 | 233 | 76.6 | 81% | 58% | 175 | 283 | 66% | 1.61× | 1.21× | 94.9 | 216–283 | 5 / 4 | 3.64 (3.27–3.66) |
+| Q8_0 | 8192×2048 (gate_proj, up_proj) | 1 | 551 | 32.4 | 89% | 100% | 487 | 833 | 59% | 1.71× | 1.51× | 36.3 | 527–583 | 5 / 1 | 4.42 (3.96–4.58) |
+| Q8_0 | 8192×2048 (gate_proj, up_proj) | 2 | 325 | 55.0 | 88% | 85% | 268 | 469 | 61% | 1.75× | 1.44× | 62.8 | 304–360 | 5 / 2 | 4.35 (3.89–4.57) |
+| Q8_0 | 8192×2048 (gate_proj, up_proj) | 4 | 232 | 77.1 | 86% | 59% | 179 | 299 | 66% | 1.67× | 1.29× | 90.1 | 209–280 | 5 / 4 | 3.56 (3.34–3.67) |
+| Q8_0 | 4096×11008 | 1 | 1445 | 33.2 | 91% | 100% | 1422 | 2766 | 48% | 1.94× | 1.91× | 36.4 | 1405–1624 | 5 / 1 | 4.43 (3.95–4.51) |
+| Q8_0 | 4096×11008 | 2 | 848 | 56.5 | 87% | 85% | 801 | 1511 | 49% | 1.89× | 1.78× | 64.8 | 797–962 | 5 / 2 | 4.20 (3.57–4.51) |
+| Q8_0 | 4096×11008 | 4 | 611 | 78.5 | 83% | 59% | 546 | 911 | 56% | 1.67× | 1.49× | 94.8 | 578–729 | 5 / 4 | 3.52 (3.06–3.66) |
+| Q8_0 | 128256×2048 (lm_head) | 1 | 8037 | 34.8 | 100% | 100% | 8171 | 15579 | 52% | 1.91× | 1.94× | 34.7 | 7774–8313 | 5 / 1 | 4.34 (3.95–4.55) |
+| Q8_0 | 128256×2048 (lm_head) | 2 | 4710 | 59.4 | 99% | 85% | 4683 | 9754 | 48% | 2.08× | 2.07× | 60.2 | 4491–4932 | 5 / 2 | 4.08 (3.53–4.55) |
+| Q8_0 | 128256×2048 (lm_head) | 4 | 3234 | 86.4 | 95% | 62% | 3191 | 5819 | 53% | 1.82× | 1.80× | 90.5 | 3150–3326 | 5 / 4 | 3.49 (3.31–3.66) |
+| Q4_0 | 512×2048 (k_proj, v_proj) | 1 | 29 | 21.0 | 57% | 100% | 22 | 31 | 52% | 1.42× | 1.10× | 36.6 | 26–36 | 1 / 1 | 4.39 (3.48–4.58) |
+| Q4_0 | 512×2048 (k_proj, v_proj) | 2 | 17 | 35.1 | 54% | 83% | 13 | 18 | 50% | 1.43× | 1.08× | 65.2 | 16–21 | 2 / 2 | 4.32 (3.46–4.52) |
+| Q4_0 | 512×2048 (k_proj, v_proj) | 4 | 12 | 48.0 | 50% | 57% | 10 | 12 | 53% | 1.22× | 0.94× | 95.6 | 12–31 | 4 / 4 | 3.60 (3.23–3.66) |
+| Q4_0 | 2048×2048 (q_proj, o_proj) | 1 | 90 | 26.4 | 72% | 100% | 71 | 126 | 52% | 1.77× | 1.39× | 36.6 | 85–116 | 5 / 1 | 4.13 (3.68–4.56) |
+| Q4_0 | 2048×2048 (q_proj, o_proj) | 2 | 56 | 42.4 | 64% | 80% | 38 | 72 | 50% | 1.89× | 1.28× | 65.8 | 52–84 | 5 / 2 | 4.24 (3.84–4.54) |
+| Q4_0 | 2048×2048 (q_proj, o_proj) | 4 | 37 | 64.6 | 70% | 61% | 26 | 43 | 60% | 1.62× | 1.16× | 92.1 | 34–64 | 5 / 4 | 3.54 (3.18–3.67) |
+| Q4_0 | 2048×8192 (down_proj) | 1 | 335 | 28.3 | 78% | 100% | 302 | 593 | 44% | 1.96× | 1.77× | 36.4 | 305–372 | 5 / 1 | 4.10 (3.54–4.52) |
+| Q4_0 | 2048×8192 (down_proj) | 2 | 184 | 51.4 | 84% | 91% | 158 | 311 | 50% | 1.97× | 1.69× | 61.2 | 167–218 | 5 / 2 | 4.09 (3.72–4.49) |
+| Q4_0 | 2048×8192 (down_proj) | 4 | 148 | 63.8 | 69% | 56% | 102 | 187 | 55% | 1.84× | 1.26× | 92.4 | 118–192 | 5 / 4 | 3.53 (3.14–3.66) |
+| Q4_0 | 4096×4096 | 1 | 332 | 28.5 | 78% | 100% | 294 | 553 | 47% | 1.88× | 1.66× | 36.6 | 311–369 | 5 / 1 | 4.53 (3.72–4.56) |
+| Q4_0 | 4096×4096 | 2 | 207 | 45.8 | 71% | 80% | 159 | 298 | 50% | 1.87× | 1.44× | 64.1 | 178–236 | 5 / 2 | 4.15 (3.79–4.47) |
+| Q4_0 | 4096×4096 | 4 | 148 | 64.2 | 68% | 56% | 102 | 187 | 53% | 1.83× | 1.27× | 94.9 | 123–192 | 5 / 4 | 3.54 (3.01–3.66) |
+| Q4_0 | 8192×2048 (gate_proj, up_proj) | 1 | 348 | 27.3 | 76% | 100% | 294 | 555 | 48% | 1.89× | 1.60× | 35.7 | 324–394 | 5 / 1 | 4.29 (3.87–4.57) |
+| Q4_0 | 8192×2048 (gate_proj, up_proj) | 2 | 202 | 47.0 | 75% | 86% | 158 | 318 | 47% | 2.01× | 1.58× | 62.8 | 183–226 | 5 / 2 | 4.37 (3.80–4.54) |
+| Q4_0 | 8192×2048 (gate_proj, up_proj) | 4 | 140 | 67.7 | 71% | 62% | 101 | 188 | 53% | 1.87× | 1.35× | 95.2 | 123–184 | 5 / 4 | 3.46 (3.07–3.62) |
+| Q4_0 | 4096×11008 | 1 | 882 | 28.8 | 84% | 100% | 843 | 2002 | 37% | 2.37× | 2.27× | 34.2 | 813–974 | 5 / 1 | 4.25 (3.50–4.58) |
+| Q4_0 | 4096×11008 | 2 | 492 | 51.7 | 81% | 90% | 466 | 996 | 40% | 2.14× | 2.03× | 63.6 | 441–571 | 5 / 2 | 3.99 (3.45–4.40) |
+| Q4_0 | 4096×11008 | 4 | 338 | 75.3 | 79% | 65% | 264 | 587 | 45% | 2.22× | 1.74× | 95.9 | 315–439 | 5 / 4 | 3.50 (3.15–3.65) |
+| Q4_0 | 128256×2048 (lm_head) | 1 | 5393 | 27.5 | 77% | 100% | 5468 | 9889 | 42% | 1.81× | 1.83× | 35.6 | 5208–5617 | 5 / 1 | 4.05 (3.25–4.48) |
+| Q4_0 | 128256×2048 (lm_head) | 2 | 2942 | 50.4 | 82% | 92% | 2947 | 6442 | 37% | 2.19× | 2.19× | 61.4 | 2811–3227 | 5 / 2 | 4.33 (4.14–4.51) |
+| Q4_0 | 128256×2048 (lm_head) | 4 | 1999 | 74.2 | 88% | 67% | 1934 | 3707 | 47% | 1.92× | 1.85× | 84.6 | 1894–2240 | 5 / 4 | 3.49 (3.05–3.62) |
+
+**Per-token GEMV time, Llama-3.2-1B** (config.json of meta-llama/Llama-3.2-1B (sha256 bfb5d39c327ee5c3, tie_word_embeddings True); 16 layers × (2 q/o + 2 k/v + 2 gate/up + 1 down) + lm_head, every matrix in the format shown; ours with rotated weights, ggml on the same weights every run; GEMVs only, not a tokens/s figure)
+
+- Q8_0, 1 thread: ours 39.88 ms, ggml 61.33 ms (1.54×)
+- Q8_0, 2 threads: ours 23.67 ms, ggml 34.82 ms (1.47×)
+- Q8_0, 4 threads: ours 16.95 ms, ggml 21.62 ms (1.28×)
+- Q4_0, 1 thread: ours 25.68 ms, ggml 42.16 ms (1.64×)
+- Q4_0, 2 threads: ours 14.69 ms, ggml 24.50 ms (1.67×)
+- Q4_0, 4 threads: ours 10.43 ms, ggml 14.48 ms (1.39×)
+
+**FP32 / FP16 / BF16 decode GEMV** (x·Wᵀ, W [N, K]), same roof and scaling; PyTorch: `F.linear` at `torch.set_num_threads(N)`, timed alone after ours (two OpenMP runtimes would spin against each other), FP32 and BF16.
+
+| weights | N×K | threads | simd-ml-kernels µs | GB/s | % of read roof | scaling | PyTorch GB/s | ours / PyTorch | read roof GB/s | IQR µs (ours) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| FP32 | 2048×8192 | 1 | 2147 | 31.3 | 92% | 100% | 32.2 | 0.97× | 33.8 | 2039–2339 | 4.00 (3.14–4.45) |
+| FP32 | 2048×8192 | 2 | 1126 | 59.6 | 93% | 95% | 56.0 | 1.07× | 64.0 | 1082–1226 | 4.14 (3.61–4.42) |
+| FP32 | 2048×8192 | 4 | 822 | 81.7 | 85% | 65% | 81.1 | 1.01× | 96.1 | 735–909 | 3.48 (3.12–3.64) |
+| FP32 | 4096×4096 | 1 | 1986 | 33.8 | 96% | 100% | 33.4 | 1.01× | 35.0 | 1924–2162 | 4.42 (3.66–4.54) |
+| FP32 | 4096×4096 | 2 | 1153 | 58.2 | 89% | 86% | 58.4 | 1.00× | 65.7 | 1097–1272 | 4.28 (3.83–4.54) |
+| FP32 | 4096×4096 | 4 | 816 | 82.3 | 91% | 61% | 82.6 | 1.00× | 90.2 | 733–919 | 3.59 (3.24–3.67) |
+| FP32 | 4096×11008 | 1 | 5153 | 35.0 | 101% | 100% | 33.8 | 1.03× | 34.6 | 4870–5426 | 4.29 (3.73–4.59) |
+| FP32 | 4096×11008 | 2 | 3060 | 59.0 | 93% | 84% | 58.3 | 1.01× | 63.3 | 2912–3264 | 4.18 (3.50–4.55) |
+| FP32 | 4096×11008 | 4 | 2106 | 85.7 | 89% | 61% | 84.6 | 1.01× | 96.6 | 2069–2166 | 3.57 (3.17–3.66) |
+| FP16 | 2048×8192 | 1 | 1110 | 30.2 | 83% | 100% | — | — | 36.2 | 1062–1228 | 4.28 (3.97–4.51) |
+| FP16 | 2048×8192 | 2 | 657 | 51.1 | 80% | 84% | — | — | 63.5 | 619–698 | 4.17 (3.67–4.47) |
+| FP16 | 2048×8192 | 4 | 457 | 73.4 | 77% | 61% | — | — | 95.2 | 428–535 | 3.58 (3.16–3.66) |
+| FP16 | 4096×4096 | 1 | 1067 | 31.5 | 87% | 100% | — | — | 36.1 | 1015–1143 | 4.50 (3.94–4.58) |
+| FP16 | 4096×4096 | 2 | 647 | 51.9 | 85% | 82% | — | — | 60.9 | 609–719 | 3.79 (3.37–4.53) |
+| FP16 | 4096×4096 | 4 | 445 | 75.5 | 83% | 60% | — | — | 91.0 | 409–543 | 3.50 (3.24–3.65) |
+| FP16 | 4096×11008 | 1 | 2617 | 34.5 | 96% | 100% | — | — | 36.0 | 2560–2872 | 4.26 (3.71–4.55) |
+| FP16 | 4096×11008 | 2 | 1588 | 56.8 | 85% | 82% | — | — | 66.6 | 1520–1706 | 4.25 (3.78–4.47) |
+| FP16 | 4096×11008 | 4 | 1113 | 81.1 | 84% | 59% | — | — | 96.4 | 1025–1207 | 3.59 (3.01–3.66) |
+| BF16 | 2048×8192 | 1 | 1118 | 30.0 | 86% | 100% | 18.8 | 1.60× | 34.9 | 1054–1216 | 4.46 (3.95–4.88) |
+| BF16 | 2048×8192 | 2 | 609 | 55.2 | 80% | 92% | 33.5 | 1.65× | 69.1 | 581–690 | 4.53 (4.08–4.82) |
+| BF16 | 2048×8192 | 4 | 424 | 79.2 | 75% | 66% | 53.3 | 1.48× | 105.5 | 393–498 | 3.81 (3.18–3.94) |
+| BF16 | 4096×4096 | 1 | 1096 | 30.6 | 85% | 100% | 17.4 | 1.76× | 35.9 | 1054–1157 | 4.14 (3.93–4.53) |
+| BF16 | 4096×4096 | 2 | 649 | 51.7 | 81% | 84% | 31.8 | 1.62× | 64.2 | 613–703 | 4.12 (3.56–4.49) |
+| BF16 | 4096×4096 | 4 | 446 | 75.3 | 79% | 61% | 49.8 | 1.51× | 94.8 | 407–550 | 3.63 (3.24–3.66) |
+| BF16 | 4096×11008 | 1 | 2559 | 35.3 | 98% | 100% | 18.0 | 1.96× | 35.9 | 2508–2727 | 4.53 (3.78–4.56) |
+| BF16 | 4096×11008 | 2 | 1691 | 53.4 | 91% | 76% | 33.6 | 1.59× | 58.3 | 1599–1813 | 3.78 (3.33–4.52) |
+| BF16 | 4096×11008 | 4 | 1112 | 81.1 | 83% | 58% | 53.1 | 1.53× | 97.3 | 1041–1208 | 3.54 (3.22–3.65) |
+
 #### lnl-226v-wsl, 2026-10-20, commit `da63d7762dfc`, 1/2/4 threads
 
 Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPUs 0-3 (the 4 P-cores; the 4 LP E-cores excluded), 1/2/4 threads; Python 3.12.3, GNU 13.3.0, commit `da63d7762dfc`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-20T04:03:42+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-20_da63d7762dfc_threads.json`](../benchmarks/results/lnl-226v-wsl_2026-10-20_da63d7762dfc_threads.json); CPUs [0, 1, 2, 3].

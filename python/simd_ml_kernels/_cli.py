@@ -639,8 +639,15 @@ def _gemv_case(results: list, kernel: str, shape: tuple, impls: list, nbytes: di
     return rows
 
 
+# Rows that read the same weights on every call (ggml's test-backend-ops, our
+# "same weights" row) may legitimately read faster than the DRAM roof: their
+# weights stay in the caches when they fit. They are left out of the check.
+REUSED_WEIGHT_IMPLS = ("ggml test-backend-ops", "simd_ml_kernels same weights")
+
+
 def _mark_roof_unstable(rows: list[dict]) -> None:
-    pct = [float(r["pct_stream_read"]) for r in rows if r.get("pct_stream_read") is not None]
+    pct = [float(r["pct_stream_read"]) for r in rows
+           if r.get("pct_stream_read") is not None and r["impl"] not in REUSED_WEIGHT_IMPLS]
     unstable = any(p > ROOF_UNSTABLE_PCT for p in pct)
     for r in rows:
         r["roof_unstable"] = unstable
@@ -906,17 +913,36 @@ THREADS_ROTATE_BYTES = 64 << 20
 THREADS_BLOCK = 5
 THREAD_KERNELS = ("gemv_fp32", "gemv_fp16", "gemv_bf16", "gemv_q8_0", "gemv_q4_0")
 # Llama-3.2-1B decode, one token (M = 1): W [N, K] of each projection and how
-# many of that shape one layer has. Dimensions as the model card gives them
-# (config.json of the gated meta-llama/Llama-3.2-1B was not read): hidden
-# 2048, intermediate 8192, 32 query / 8 KV heads of head_dim 64, vocab
-# 128256, 16 layers; lm_head is once per token.
-LLAMA_1B = {"model": "meta-llama/Llama-3.2-1B", "layers": 16, "hidden_size": 2048,
-            "intermediate_size": 8192, "num_attention_heads": 32, "num_key_value_heads": 8,
-            "head_dim": 64, "vocab_size": 128256,
-            "source": "model card values (config.json of the gated repository not read)"}
-LLAMA_1B_SHAPES = [("q_proj, o_proj", 2048, 2048, 2), ("k_proj, v_proj", 512, 2048, 2),
-                   ("gate_proj, up_proj", 8192, 2048, 2), ("down_proj", 2048, 8192, 1),
-                   ("lm_head", 128256, 2048, 0)]
+# many of that shape one layer has, from the model's config.json when
+# SIMD_ML_LLAMA_CONFIG points at it (recorded with its sha256), else the
+# model card's values; lm_head is once per token.
+LLAMA_CONFIG_ENV = "SIMD_ML_LLAMA_CONFIG"
+LLAMA_1B_CARD = {"hidden_size": 2048, "intermediate_size": 8192, "num_attention_heads": 32,
+                 "num_key_value_heads": 8, "head_dim": 64, "vocab_size": 128256, "num_hidden_layers": 16}
+
+
+def _llama_1b() -> dict:
+    import hashlib
+
+    path = os.environ.get(LLAMA_CONFIG_ENV)
+    dims = dict(LLAMA_1B_CARD)
+    source = f"model card values ({LLAMA_CONFIG_ENV} not set)"
+    if path:
+        with open(path, "rb") as f:
+            raw = f.read()
+        cfg = json.loads(raw)
+        dims = {key: int(cfg[key]) for key in LLAMA_1B_CARD}
+        source = (f"config.json of meta-llama/Llama-3.2-1B (sha256 {hashlib.sha256(raw).hexdigest()[:16]}, "
+                  f"tie_word_embeddings {cfg.get('tie_word_embeddings')})")
+    return {"model": "meta-llama/Llama-3.2-1B", "layers": dims["num_hidden_layers"], **dims, "source": source}
+
+
+def _llama_1b_shapes(m: dict) -> list[tuple[str, int, int, int]]:
+    h, d = m["hidden_size"], m["head_dim"]
+    return [("q_proj, o_proj", m["num_attention_heads"] * d, h, 2),
+            ("k_proj, v_proj", m["num_key_value_heads"] * d, h, 2),
+            ("gate_proj, up_proj", m["intermediate_size"], h, 2), ("down_proj", h, m["intermediate_size"], 1),
+            ("lm_head", m["vocab_size"], h, 0)]
 
 
 def _thread_weights(kernel: str, n: int, k: int, rng) -> tuple[np.ndarray, int]:
@@ -951,7 +977,7 @@ def _bench_threads(args: argparse.Namespace, results: list, torch: Any, ggml: di
     for _, n, k in GEMV_SHAPES:
         for kernel in THREAD_KERNELS:
             cases.setdefault((kernel, n, k), [])
-    for label, n, k, _ in LLAMA_1B_SHAPES:
+    for label, n, k, _ in _llama_1b_shapes(args.llama):
         for kernel in ("gemv_q8_0", "gemv_q4_0"):
             cases.setdefault((kernel, n, k), []).append(label)
     for (kernel, n, k), labels in cases.items():
@@ -1027,7 +1053,7 @@ def _bench_threads(args: argparse.Namespace, results: list, torch: Any, ggml: di
                     row["pct_stream_read"] = 100.0 * row["gb_per_s"] / roof
                 results.append(row)
                 case_rows.append(row)
-            _mark_roof_unstable([r for r in case_rows if not r["impl"].endswith("same weights")])
+            _mark_roof_unstable(case_rows)
             for r in case_rows:
                 r.setdefault("roof_unstable", False)
                 if labels:
@@ -1333,6 +1359,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         if not sk.build_info()["openmp"]:
             print("bench: the threads case needs an OpenMP build (SIMD_ML_OPENMP=ON)", file=sys.stderr)
             return 2
+        args.llama = _llama_1b()
         _bench_threads(args, results, torch, ggml, show)
 
     x = rng.standard_normal(args.elems).astype(np.float32)
@@ -1423,7 +1450,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
                                        f"(torch.set_num_threads, {THREADS_BLOCK} calls per round); ggml with OMP_THREAD_LIMIT = threads, thread "
                                        "check threads_timed == threads; clock sampled on every thread of a team "
                                        "of that size, --min-ghz on the slowest",
-                             "llama_3_2_1b": LLAMA_1B}} if "threads" in args.cases else {}),
+                             "llama_3_2_1b": args.llama}} if "threads" in args.cases else {}),
                          "malloc": malloc or "not pinned (allocator defaults)"},
             "command": " ".join(["python -m simd_ml_kernels"] + (args.argv or [])),
             "python": platform.python_version(),

@@ -13,6 +13,7 @@
 #include "../gemm/avx2_gemm_packed.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -127,25 +128,40 @@ void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* 
     thread_local std::vector<float> dx;
     if (qs.size() < static_cast<std::size_t>(K)) qs.resize(static_cast<std::size_t>(K));
     if (dx.size() < static_cast<std::size_t>(nb)) dx.resize(static_cast<std::size_t>(nb));
-    if (!quantize_x_q8(x, K, qs.data(), dx.data())) {
-        std::fill(y, y + N, std::numeric_limits<float>::quiet_NaN());
-        return;
-    }
     const std::size_t row = static_cast<std::size_t>(nb) * block_bytes;
 #ifdef SIMD_ML_OPENMP
-    // x is quantized once, above, by the calling thread; the team only reads it.
+    // x is quantized once per call, by the team: each thread quantizes one
+    // contiguous run of 32-value blocks with the same scalar code (blocks are
+    // independent, so the quants are the ones one thread would write), then
+    // a barrier, then each thread reads all of x for its rows. On one thread
+    // the quantization ran at ~1.6 ns per value (13.5 µs at K = 8192), which
+    // was most of a 4-thread Q4_0 512×2048 call (DESIGN.md §2.10).
     if (const int threads = gemm::gemv_threads(N, static_cast<double>(N) * row); threads > 1) {
-        const std::int8_t* xq = qs.data();
-        const float* xd = dx.data();
+        std::int8_t* xq = qs.data();
+        float* xd = dx.data();
+        std::atomic<bool> bad{false};   // x holds a NaN or ±Inf: every y is NaN
 #pragma omp parallel num_threads(threads)
         {
-            const gemm::GemvSlice s = gemm::gemv_slice(N, omp_get_thread_num(), omp_get_num_threads());
-            if (s.hi > s.lo) rows(s.hi - s.lo, nb, xq, xd, Wq + s.lo * row, y + s.lo);
+            const int t = omp_get_thread_num(), team = omp_get_num_threads();
+            const int b0 = static_cast<int>(static_cast<long long>(nb) * t / team);
+            const int b1 = static_cast<int>(static_cast<long long>(nb) * (t + 1) / team);
+            if (!quantize_x_q8(x + kQ8_0Values * b0, kQ8_0Values * (b1 - b0), xq + kQ8_0Values * b0, xd + b0))
+                bad.store(true, std::memory_order_relaxed);
+#pragma omp barrier
+            const gemm::GemvSlice s = gemm::gemv_slice(N, t, team);
+            if (bad.load(std::memory_order_relaxed))
+                std::fill(y + s.lo, y + s.hi, std::numeric_limits<float>::quiet_NaN());
+            else if (s.hi > s.lo)
+                rows(s.hi - s.lo, nb, xq, xd, Wq + s.lo * row, y + s.lo);
         }
         return;
     }
 #endif
     (void)row;
+    if (!quantize_x_q8(x, K, qs.data(), dx.data())) {
+        std::fill(y, y + N, std::numeric_limits<float>::quiet_NaN());
+        return;
+    }
     rows(N, nb, qs.data(), dx.data(), Wq, y);
 }
 

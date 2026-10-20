@@ -229,8 +229,15 @@ GEMV case, interleaved with its implementations, and that case's fastest
 stream is its roof (`roof_read_gbs`); the triad is measured once per run. A
 roof measured once per run drifted by several percent between runs on the
 laptop, which moved every percentage with it. A case where any implementation
-exceeds 105% of its own roof is marked `roof_unstable` and not published
-(make_tables.py lists it under "Not shown", as for `--min-ghz`):
+that reads rotated weights exceeds 105% of its own roof is marked
+`roof_unstable` and not published (make_tables.py lists it under "Not shown",
+as for `--min-ghz`). Rows that read the same weights on every call (ggml's
+test-backend-ops, our "same weights" row in threaded runs) are left out of the
+check: where their weights fit in the caches they legitimately read faster
+than the DRAM roof (in the first threaded run ggml read 2.2 MB of Q8_0
+weights at 118% of the 4-thread roof while our rotated rows read 59–83%, and
+the rule hid the whole case). Runs before this change applied the check to
+those rows too; their JSON flags are kept as recorded:
 
 - *read stream*: the fastest read-only loop we have, including the GEMV
   access pattern, over one large float32 array (4 bytes per element, nothing
@@ -556,8 +563,16 @@ for FP32/16-bit, 8 for Q8_0/Q4_0, whose next-group prefetch then stays
 inside the thread's own slice), spread so that thread sizes differ by at
 most one group. Each thread runs the single-threaded loop on its slice and
 writes its own part of y: no atomics, no reduction, one fork and one join per
-call. For Q8_0/Q4_0, x is quantized once by the calling thread before the
-parallel region and only read by the team. Contiguous slices rather than
+call. For Q8_0/Q4_0, x is quantized once per call by the team: each thread
+quantizes one contiguous run of 32-value blocks with the scalar code (blocks
+are independent, so the quants are the ones one thread writes), a barrier,
+then every thread reads all of x for its rows; a NaN or ±Inf in any block
+makes every y NaN (tested at 1–8 threads). The first version quantized x on
+the calling thread before the region, at about 1.6 ns per value (scalar unit,
+exact IEEE rounding): 4.0 µs at K = 2048, most of a 4-thread Q4_0 512×2048
+call. Dev runs, same weights back to back, 4 threads, before → after:
+Q4_0 512×2048 9.9 → 7.5 µs, 2048×2048 24.5 → 21.7; Q8_0 12.2 → 9.7 and
+33.1 → 30.7 (one thread unchanged within noise). Contiguous slices rather than
 chunks handed out dynamically (as the GEMM does, §2.4): a slice is a few
 sequential streams per thread, and with the threads pinned to cores of one
 type there is no slow core to balance against; on a hybrid CPU with E-cores
@@ -609,50 +624,40 @@ The clock is sampled on every thread of a team of N at once, and
 WSL2 placed on one) is caught. Scaling efficiency = GB/s at N threads /
 (N × GB/s at one thread).
 
-**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_da63d7762dfc_threads`, the laptop's 4 P-cores, path
-`avx_vnni`; Windows' per-processor counters during the run: processors 0–3
-62–64% busy on average, the E-cores 9–10%, so WSL2 kept the 4 vCPUs on the
-P-cores):
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_38cd710929a3_threads`, x quantized by the team, the laptop's
+4 P-cores, path `avx_vnni`; Windows' per-processor counters during the run:
+processors 0–3 60–63% busy on average, the E-cores 8–9%, so WSL2 kept the 4
+vCPUs on the P-cores; the first threaded run, `lnl-226v-wsl_2026-10-20_da63d7762dfc_threads`,
+quantized x on one thread):
 
-- **Read roof.** 31.6–35.4 GB/s on one thread, 54–62 on two, 80–95 on four:
-  four P-cores read only 2.4–2.9× what one does. Scaling efficiency of
-  even an ideal read loop is therefore 60–72% at 4 threads, and that is
-  where ours lands on the large shapes (Q8_0 52–62%, Q4_0 53–72%,
-  FP16/BF16 58–62%).
+- **Read roof.** 33.8–37.9 GB/s on one thread, 84.6–105.5 on four: four
+  P-cores read only 2.4–3.0× what one does, so even an ideal read loop
+  scales at 60–76% on 4 threads, and ours lands there on the large shapes
+  (≥ 2048×8192): Q8_0 53–62%, Q4_0 56–67%, FP32/FP16/BF16 58–66%.
 - **Per-core efficiency holds.** % of the read roof at the same thread
-  count, large shapes (≥ 2048×8192): Q8_0 94–99% on one thread, 74–98% on
-  four; Q4_0 77–86% and 64–87%; FP16/BF16 88–97% and 77–88%. ggml on the same
-  cases: Q8_0 49–62% and 56–72%, Q4_0 37–48% and 44–55%.
+  count, large shapes: Q8_0 89–100% on one thread, 81–95% on four; Q4_0
+  76–84% and 68–88%. ggml on the same cases: Q8_0 48–61% and 53–69%, Q4_0
+  37–48% and 45–55%.
 - **Against ggml at the same thread count** (ours on the same weights every
-  call, as ggml runs): one thread Q8_0 1.75–1.91× on the large shapes (1.04×
-  and 1.18× at 512×2048 and 2048×2048), Q4_0 1.46–2.27× on all; four
-  threads Q8_0 1.54–1.67× (the five shapes shown), Q4_0 1.52–2.19× on every
-  shape but the smallest. With our weights rotated past the caches (ggml's
-  stay in cache where they fit) four threads are still 1.15–1.66× (Q8_0) and
-  1.08–1.94× (Q4_0) faster on those shapes.
-- **Where we do not win: the smallest matrix.** Q4_0 512×2048 (k/v
-  projection, 576 KiB) on four threads: 12 µs on the same weights, the same
-  as ggml (0.97×), 16 µs rotated (0.76×). This is not the memory limit (42%
-  of the roof rotated): x is quantized on the calling thread before the
-  parallel region at about 1.6 ns per value (scalar unit, exact IEEE
-  rounding; dev runs: 4.0 µs at K = 2048, 13.5 at K = 8192) and the Python
-  call costs about 0.7 µs, where ggml quantizes x across its threads, with
-  SIMD, inside one graph. The same serial part is 8–12% of the 4-thread
-  Q4_0 down projection (K = 8192, 117–166 µs). Splitting the quantization across the team or
-  vectorizing it exactly would remove most of it (not done here).
-- **Per-token GEMV time, Llama-3.2-1B** (16 layers × 7 projections +
-  lm_head, ours rotated, ggml on reused weights): Q4_0 26.3 / 15.8 / 11.6 ms
-  at 1 / 2 / 4 threads against ggml's 46.1 / 26.3 / 15.1 (1.75×, 1.66×,
-  1.31×); Q8_0 41.4 / 24.6 ms against 66.2 / 36.3 (1.60×, 1.48×), at 4 threads
-  not computed: in two of its cases (512×2048, 2048×2048) ggml, whose 0.6 and
-  2.2 MB of weights stay in cache, read above 105% of the roof, so the
-  105% rule (§2.7) hides those cases. The model's dimensions are the model
-  card's (its config.json is in a gated repository and was not read).
-- **PyTorch** at the same thread count: ours is 0.99–1.05× its FP32
-  `F.linear` (both at the roof) and 1.42–2.04× its BF16 `F.linear`.
-- Not shown in that run: 4 cases whose slowest thread's clock dipped below
-  3.0 GHz in every attempt, 1 FP32 case with an unstable roof, and the two
-  Q8_0 cases above.
+  call, as ggml runs): one thread Q8_0 1.65–1.94× on the large shapes (0.98×
+  and 1.18× at 512×2048 and 2048×2048), Q4_0 1.42–2.37× on every shape; four
+  threads Q4_0 1.22–2.22× on every shape, Q8_0 1.23–1.82× on every shape but
+  512×2048, where it is level (0.97×: 12 µs against 11; ggml's 0.6 MB of
+  weights stay in its caches, it reads them at 110% of the DRAM roof, and our
+  time includes the ~0.7 µs Python call). With our weights rotated past the
+  caches we are 1.17–1.80× (Q8_0) and 1.26–1.85× (Q4_0) faster on the large
+  shapes; on the small ones rotated DRAM reads lose to ggml's cached ones
+  (Q8_0 0.62–0.75×, Q4_0 0.94–1.16×).
+- **x quantized by the team**: Q4_0 512×2048 on four threads went from 12 µs
+  (0.97× ggml) in the first run to 10 µs (1.22×), and 16 → 12 µs rotated.
+- **Per-token GEMV time, Llama-3.2-1B** (dimensions from its config.json;
+  16 layers × 7 projections + lm_head, ours rotated, ggml on reused
+  weights): Q4_0 25.7 / 14.7 / 10.4 ms at 1 / 2 / 4 threads against ggml's
+  42.2 / 24.5 / 14.5 (1.64×, 1.67×, 1.39×); Q8_0 39.9 / 23.7 / 17.0 ms
+  against 61.3 / 34.8 / 21.6 (1.54×, 1.47×, 1.28×).
+- **PyTorch** at the same thread count: ours is 0.97–1.07× its FP32
+  `F.linear` (both at the roof) and 1.48–1.96× its BF16 `F.linear`.
+- Every case of the run passed the clock and roof checks.
 
 ## 3. Elementwise kernels and normalization
 
