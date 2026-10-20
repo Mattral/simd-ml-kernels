@@ -282,11 +282,58 @@ def q8_0_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
 
 
-def _ggml_source(doc: dict) -> str:
+def q4_0_table(doc: dict, detail: bool) -> str:
+    """Q4_0 decode GEMV (gemv_q4_0): GB/s (18 bytes per 32 weights), % of the
+    case's read roof, time against our Q8_0 GEMV (Q8_0 blocks of the same W)
+    and FP32 GEMV and PyTorch's FP32 F.linear on the dequantized weights
+    (interleaved in the case), and ggml's test-backend-ops (its own timing,
+    run after the case)."""
+    rows = ["| M×N×K | simd-ml-kernels µs | GB/s | % of read roof | × our Q8_0 GEMV | × our FP32 GEMV |"
+            " PyTorch FP32 µs | ours / PyTorch | ggml µs (own timing) | ggml GB/s | ggml % of roof | ours / ggml |"
+            + (" IQR µs (ours) | read roof GB/s | ggml threads (max / timed) |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "") + "---:|"]
+    by_shape: dict[tuple, dict] = {}
+    for r in doc["results"]:
+        if r["kernel"] == "gemv_q4_0":
+            by_shape.setdefault(tuple(r["shape"]), {})[r["impl"]] = r
+    excluded, unstable = [], []
+    for shape in sorted(by_shape, key=lambda s: (s[1] * s[2], s)):
+        impls = by_shape[shape]
+        o, q8, f = impls.get(OURS), impls.get(OURS + " q8_0"), impls.get(OURS + " fp32")
+        t = next((v for k, v in impls.items() if k.startswith("torch")), None)
+        g = impls.get("ggml test-backend-ops")
+        if o is None or q8 is None or f is None:
+            continue
+        shp = "×".join(str(s) for s in shape)
+        if _throttled(o, q8, f, t) or (g is not None and "core_ghz" in g and _throttled(g)):
+            excluded.append((shp, o))
+            continue
+        if _unstable(o, q8, f, t, g):
+            unstable.append((shp, o))
+            continue
+        us = o["median_s"]
+        tt = f"{t['median_s'] * 1e6:.0f}" if t else "not measured"
+        tr = f"{t['median_s'] / us:.2f}×" if t else "—"
+        if g is not None and "time_s" in g:
+            gt, gg, gp, gr = (f"{g['time_s'] * 1e6:.0f}", f"{g['gb_per_s']:.1f}", f"{g['pct_stream_read']:.0f}%",
+                              f"{g['time_s'] / us:.2f}×")
+        else:
+            gt, gg, gp, gr = (g or {}).get("not_measured", "not measured"), "—", "—", "—"
+        line = (f"| {shp} | {us * 1e6:.0f} | {o['gb_per_s']:.1f} | {o['pct_stream_read']:.0f}% |"
+                f" {q8['median_s'] / us:.2f}× | {f['median_s'] / us:.2f}× | {tt} | {tr} | {gt} | {gg} | {gp} | {gr} |")
+        if detail:
+            th = f"{g['threads_max']} / {g['threads_timed']}" if g is not None and "threads_timed" in g else "—"
+            line += f" {o['p25_s'] * 1e6:.0f}–{o['p75_s'] * 1e6:.0f} | {o['roof_read_gbs']:.1f} | {th} |"
+        rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
+
+
+def _ggml_source(doc: dict, fmt: str = "q8_0") -> str:
     g = doc["baselines"].get("ggml")
     if not isinstance(g, dict):
         return g or "not measured"
-    return (f"llama.cpp {g['tag']} (`{(g['commit'] or '')[:7]}`), `test-backend-ops perf` MUL_MAT q8_0 × f32, "
+    return (f"llama.cpp {g['tag']} (`{(g['commit'] or '')[:7]}`), `test-backend-ops perf` MUL_MAT {fmt} × f32, "
             f"one thread (OMP_THREAD_LIMIT=1, GGML_OPENMP={g['cmake'].get('GGML_OPENMP')}, "
             f"GGML_NATIVE={g['cmake'].get('GGML_NATIVE')}), median of {g['runs_per_case']} runs of its own "
             "mean over ≥ 1 s on the same weights (not interleaved)")
@@ -370,6 +417,14 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
                        "time of that GEMV / ours, in the same interleaved case. PyTorch: FP32 `F.linear` on the "
                        "dequantized weights, not a quantized kernel. ggml: " + _ggml_source(d) + ".\n")
             out.append(q8_0_table(d, detail) + "\n")
+        if any(r["kernel"] == "gemv_q4_0" for r in d["results"]):
+            path = d["build"].get("q8_0_path", "not recorded")
+            out.append(f"**Q4_0 decode GEMV** (`gemv_q4_0`: ggml block_q4_0 weights, 18 bytes per 32, x quantized "
+                       f"to Q8 inside), path `{path}`, single thread; GB/s counts the weights, x and y; × columns: "
+                       "time of that GEMV / ours, in the same interleaved case (our Q8_0 GEMV on the Q8_0 blocks "
+                       "of the same W). PyTorch: FP32 `F.linear` on the dequantized weights, not a quantized "
+                       "kernel. ggml: " + _ggml_source(d, "q4_0") + ".\n")
+            out.append(q4_0_table(d, detail) + "\n")
         out.append("**Activations and normalization, out-of-place, single thread**\n")
         out.append(act_table(d, detail) + "\n")
     return "\n".join(out).rstrip() + "\n"

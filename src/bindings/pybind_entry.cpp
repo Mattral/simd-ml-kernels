@@ -58,6 +58,7 @@
 #include "../kernels/gemm/f16_gemm.hpp"
 #include "../kernels/gemm/bf16_gemm.hpp"
 #include "../kernels/gemm/int8_gemm.hpp"
+#include "../kernels/quant/q4_0.hpp"
 #include "../kernels/quant/q8_0.hpp"
 #include "../kernels/stream_read.hpp"
 #include "../kernels/intrinsic_gelu.hpp"
@@ -438,7 +439,7 @@ static py::dict build_info() {
     info["compiler"]        = SIMD_ML_COMPILER;
     info["kernel_flags"]    = active.flags;      // flags of that table's units
     info["u8s8_path"]       = simd_ml::gemm::u8s8_path();  // sgemm_u8s8: avx512_vnni | avx_vnni | fp32_convert | scalar
-    info["q8_0_path"]       = simd_ml::quant::q8_0_path(); // gemv_q8_0: avx512_vnni | avx_vnni | avx2 | scalar
+    info["q8_0_path"]       = simd_ml::quant::q8_0_path(); // gemv_q8_0 and gemv_q4_0: avx512_vnni | avx_vnni | avx2 | scalar
     return info;
 }
 
@@ -853,67 +854,93 @@ static py::array_t<float> py_sgemm_u8s8_convert(py::array A, py::array B, float 
     throw std::runtime_error("_sgemm_u8s8_convert needs the AVX2 kernels (this CPU or build has none)");
 }
 
-// ─── Binding: quantize_q8_0 / gemv_q8_0 ─────────────────────────────────────
+// ─── Binding: quantize_q8_0 / gemv_q8_0, quantize_q4_0 / gemv_q4_0 ───────────
 /**
- * quantize_q8_0(W) -> np.ndarray[uint8]: W [..., K] float32 into ggml Q8_0
- * blocks, shape [..., K/32*34] (quant/q8_0.hpp).
+ * quantize_blocks — W [..., K] float32 into ggml blocks of 32 values (Q8_0:
+ * 34 bytes, Q4_0: 18), shape [..., K/32*block_bytes]; quantize is the
+ * format's row function, too_large the message for a block it rejects.
  */
-static py::array py_quantize_q8_0(py::array W) {
+static py::array quantize_blocks(py::array W, int block_bytes,
+                                 bool (*quantize)(const float*, int, int, std::uint8_t*) noexcept,
+                                 const char* too_large) {
     validate_array(W, "W");
     if (W.ndim() < 1) throw ArgumentError("W must have at least 1 dimension (rows of K values)");
     const py::ssize_t K = W.shape(W.ndim() - 1);
-    if (K % simd_ml::quant::kQ8_0Values != 0)
+    if (K % 32 != 0)
         throw ArgumentError("K (the last dimension of W) must be a multiple of 32 (got " + std::to_string(K) + ")");
     if (K > std::numeric_limits<int>::max())
         throw ArgumentError("K is too large");
     const py::ssize_t rows = K == 0 ? 0 : W.size() / K;
     if (rows > std::numeric_limits<int>::max()) throw ArgumentError("W has too many rows");
     std::vector<py::ssize_t> shape(W.shape(), W.shape() + W.ndim());
-    shape.back() = static_cast<py::ssize_t>(simd_ml::quant::q8_0_row_bytes(static_cast<int>(K)));
+    shape.back() = K / 32 * block_bytes;
     py::array_t<std::uint8_t> out(shape);
     const auto* w = static_cast<const float*>(W.data());
     std::uint8_t* o = out.mutable_data();
     bool ok;
     {
         py::gil_scoped_release release;
-        ok = simd_ml::quant::quantize_q8_0_rows(w, static_cast<int>(rows), static_cast<int>(K), o);
+        ok = quantize(w, static_cast<int>(rows), static_cast<int>(K), o);
     }
-    if (!ok)
-        throw ArgumentError("W must be finite, with |W| below 127 * 65520 = 8321040 (a block scale "
-                            "max|w|/127 must fit float16)");
+    if (!ok) throw ArgumentError(too_large);
     return out;
 }
 
 /**
- * gemv_q8_0(x, Wq, N, K) -> np.ndarray[float32] [N]: y = x · Wᵀ with W given
- * as quantize_q8_0 blocks; x is quantized to Q8 blocks inside.
+ * gemv_blocks — y = x · Wᵀ [N] with W given as ggml blocks (block_bytes per
+ * 32 weights, made by quantize_<fmt>); x is quantized to Q8 blocks inside.
  */
-static py::array_t<float> py_gemv_q8_0(py::array x, py::array Wq, py::ssize_t N, py::ssize_t K) {
+static py::array_t<float> gemv_blocks(py::array x, py::array Wq, py::ssize_t N, py::ssize_t K, int block_bytes,
+                                      const char* fmt, simd_ml::GemvQ8_0Fn gemv) {
     validate_array(x, "x");
     const auto dt = Wq.dtype();
     if (dt.kind() != 'u' || dt.itemsize() != 1)
-        throw DTypeError("Wq must be uint8 (blocks from quantize_q8_0; dtype=np.uint8)");
+        throw DTypeError(std::string("Wq must be uint8 (blocks from quantize_") + fmt + "; dtype=np.uint8)");
     check_contiguous(Wq, "Wq");
     if (N < 0 || K < 0) throw ArgumentError("N and K must be >= 0");
-    if (K % simd_ml::quant::kQ8_0Values != 0)
+    if (K % 32 != 0)
         throw ArgumentError("K must be a multiple of 32 (got " + std::to_string(K) + ")");
     if (N > std::numeric_limits<int>::max() || K > std::numeric_limits<int>::max())
         throw ArgumentError("N or K is too large");
     if (x.ndim() != 1 || x.shape(0) != K)
         throw ArgumentError("x must be 1-D with K = " + std::to_string(K) + " elements");
-    const auto row = static_cast<py::ssize_t>(simd_ml::quant::q8_0_row_bytes(static_cast<int>(K)));
+    const py::ssize_t row = K / 32 * block_bytes;
     if (Wq.size() != N * row)
-        throw ArgumentError("Wq must hold N*K/32*34 = " + std::to_string(N * row) + " bytes (got " +
-                            std::to_string(Wq.size()) + ")");
+        throw ArgumentError("Wq must hold N*K/32*" + std::to_string(block_bytes) + " = " + std::to_string(N * row) +
+                            " bytes (got " + std::to_string(Wq.size()) + ")");
     py::array_t<float> y(N);
     const auto* xp = static_cast<const float*>(x.data());
     const auto* wp = static_cast<const std::uint8_t*>(Wq.data());
     float* yp = y.mutable_data();
     {
         py::gil_scoped_release release;
-        simd_ml::kernels().gemv_q8_0(static_cast<int>(N), static_cast<int>(K), xp, wp, yp);
+        gemv(static_cast<int>(N), static_cast<int>(K), xp, wp, yp);
     }
     return y;
+}
+
+/** quantize_q8_0(W) -> np.ndarray[uint8]: ggml Q8_0 blocks, [..., K/32*34] (quant/q8_0.hpp). */
+static py::array py_quantize_q8_0(py::array W) {
+    return quantize_blocks(W, simd_ml::quant::kQ8_0Bytes, &simd_ml::quant::quantize_q8_0_rows,
+                           "W must be finite, with |W| below 127 * 65520 = 8321040 (a block scale "
+                           "max|w|/127 must fit float16)");
+}
+
+/** gemv_q8_0(x, Wq, N, K) -> np.ndarray[float32] [N], W as quantize_q8_0 blocks. */
+static py::array_t<float> py_gemv_q8_0(py::array x, py::array Wq, py::ssize_t N, py::ssize_t K) {
+    return gemv_blocks(x, Wq, N, K, simd_ml::quant::kQ8_0Bytes, "q8_0", simd_ml::kernels().gemv_q8_0);
+}
+
+/** quantize_q4_0(W) -> np.ndarray[uint8]: ggml Q4_0 blocks, [..., K/32*18] (quant/q4_0.hpp). */
+static py::array py_quantize_q4_0(py::array W) {
+    return quantize_blocks(W, simd_ml::quant::kQ4_0Bytes, &simd_ml::quant::quantize_q4_0_rows,
+                           "W must be finite, with |W| below 8 * 65520 = 524160 (a block scale "
+                           "max|w|/8 must fit float16)");
+}
+
+/** gemv_q4_0(x, Wq, N, K) -> np.ndarray[float32] [N], W as quantize_q4_0 blocks. */
+static py::array_t<float> py_gemv_q4_0(py::array x, py::array Wq, py::ssize_t N, py::ssize_t K) {
+    return gemv_blocks(x, Wq, N, K, simd_ml::quant::kQ4_0Bytes, "q4_0", simd_ml::kernels().gemv_q4_0);
 }
 
 static bool py_bf16_avx512bf16_available() {
@@ -1332,6 +1359,82 @@ Parameters
 x  : ndarray[float32], shape [K], C-contiguous
 Wq : ndarray[uint8], N*K/32*34 bytes (any shape), C-contiguous: the blocks
      of W [N, K] as quantize_q8_0 returns them
+N  : int, rows of W (outputs)
+K  : int, columns of W, a multiple of 32
+
+Returns
+-------
+ndarray[float32], shape [N]
+
+Raises
+------
+ArgumentError if K % 32 != 0 or the sizes do not match; DTypeError if x is
+not float32 or Wq not uint8.
+)doc");
+    m.def("quantize_q4_0", &py_quantize_q4_0, py::arg("W"),
+          R"doc(
+Quantize float32 weights to ggml's Q4_0 blocks (byte-identical to block_q4_0).
+
+Each run of 32 values along the last axis becomes one 18-byte block: a
+float16 scale d (little-endian) then 16 bytes of 4-bit quants q in [0, 15],
+byte j holding value j in its low nibble and value 16 + j in its high
+nibble; value = d * (q - 8). As ggml's quantize_row_q4_0_ref: max = the
+value of largest magnitude (the first on a tie, sign kept), d = max / -8 in
+float32, q = min(15, trunc(w / d + 8.5)) (each step rounded to float32), and
+the stored scale is d rounded to float16 (nearest, ties to even). A zero
+block stores d = -0.0 and q = 8. One exception, where ggml's C code is
+undefined: a block with max|w| below 8 / FLT_MAX stores q = 8 (its scale is
+float16 zero either way).
+
+Dequantization error per value: |w - d16*(q - 8)| <= d*(0.5 + 8*2^-11) +
+2^-25 when d16 = float16(d) is a normal float16 (|w| >= 8*2^-14 in the
+block). The largest-magnitude value maps to q = 0 (-8*d); values with
+w/d >= 7.5 (the opposite sign, nearly as large) clamp to q = 15 (+7*d):
+error up to d*(1 + 8*2^-11).
+
+Parameters
+----------
+W : ndarray[float32], shape [..., K], C-contiguous, K a multiple of 32;
+    finite, |W| < 524160 (a scale above 65504 does not fit float16)
+
+Returns
+-------
+ndarray[uint8], shape [..., K // 32 * 18]: the rows' blocks, rows in order
+
+Raises
+------
+ArgumentError if K % 32 != 0, or W has a NaN, an infinity, or a block whose
+scale overflows float16.
+
+Example
+-------
+>>> import numpy as np, simd_ml_kernels as sk
+>>> W = np.random.randn(4096, 4096).astype(np.float32)   # [out, in]
+>>> Wq = sk.quantize_q4_0(W)                             # uint8 [4096, 2304]
+>>> x = np.random.randn(4096).astype(np.float32)
+>>> y = sk.gemv_q4_0(x, Wq, 4096, 4096)                  # ≈ W @ x, float32 [4096]
+)doc");
+    m.def("gemv_q4_0", &py_gemv_q4_0, py::arg("x"), py::arg("Wq"), py::arg("N"), py::arg("K"),
+          R"doc(
+Decode GEMV on Q4_0 weights: y[n] = sum_k x[k] * W[n, k], W from quantize_q4_0.
+
+x is quantized once per call to Q8 blocks, as for gemv_q8_0 (int8 quants
+equal to quantize_q8_0(x)'s, float32 scales dx = max|x|/127), as ggml's
+vec_dot_q4_0_q8_0 does. Each block's dot product sum_i (q_i - 8) * qx_i is
+an exact integer sum (AVX-512 VNNI / AVX-VNNI vpdpbusd, AVX2 vpmaddubsw, or
+scalar; the same path as build_info()['q8_0_path']), scaled by
+float16(dw) * dx and summed in float32. Error bound, every path, against
+that sum taken exactly:
+|y - y_exact| <= 2*(K/32 + 4)*2^-24 * sum_b |dw_b*dx_b| * sum_i |(q - 8)*qx|.
+The quantization of W (4 bits) and x (8 bits) adds its own error
+(docs/DESIGN.md §2.9). x with a NaN or an infinity gives NaN everywhere.
+Single-threaded.
+
+Parameters
+----------
+x  : ndarray[float32], shape [K], C-contiguous
+Wq : ndarray[uint8], N*K/32*18 bytes (any shape), C-contiguous: the blocks
+     of W [N, K] as quantize_q4_0 returns them
 N  : int, rows of W (outputs)
 K  : int, columns of W, a multiple of 32
 

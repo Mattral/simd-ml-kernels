@@ -414,6 +414,128 @@ column, not interleaved with ours.
   our loop with 4 rows and no prefetch read 60–76% of the roof, close to
   ggml's 52–63%, 8 rows 70–91%, and the next-group prefetch 90–100%.
 
+### 2.9 Q4_0 decode GEMV (`gemv_q4_0`)
+
+`quantize_q4_0(W)` stores W [N, K] in ggml's Q4_0 format, byte for byte
+`block_q4_0`: each run of 32 weights is an 18-byte block, a binary16 scale d
+then 16 bytes of 4-bit quants, byte j holding value j in its low nibble and
+value 16 + j in its high nibble; value = d·(q − 8). As
+`quantize_row_q4_0_ref`: max = the first value of largest magnitude (sign
+kept), d = max/−8, q = min(15, trunc(w·(1/d) + 8.5)). The value of largest
+magnitude therefore maps to q = 0 (−8·d = max), and values on the other side
+with |w/d| ≥ 7.5 clamp to q = 15 (+7·d). A zero block stores d = −0.0 and
+q = 8. Tested byte for byte against blocks written by llama.cpp v0.7.0's own
+quantization (`ggml_quantize_chunk`, committed fixture
+`tests/data/q4_0_ggml_v0.7.0.npz`, 20 rows of 256 values covering ties, zero
+blocks, binary16-subnormal and near-overflow scales, exact halves), against
+ggml's library when `SIMD_ML_GGML_LIB` is set, and against a NumPy port. The
+quantization runs in the scalar unit without `-ffast-math` and with
+`-ffp-contract=off`: w·id and + 8.5 are two roundings in ggml's reference
+(baseline x86-64, no FMA), and a fused multiply-add truncates differently
+next to an integer. Where 1/d overflows (max|w| below 8/FLT_MAX) ggml's C
+code is undefined; we store q = 8 (the scale is binary16 zero there anyway).
+The bytes are 18/32 = 0.5625 per weight: 53% of Q8_0, 14% of FP32.
+
+**x** is quantized once per call to Q8 blocks with FP32 scales, the same
+code as `gemv_q8_0` (§2.8); ggml's `vec_dot_q4_0_q8_0` also takes Q8_0
+activations.
+
+**Why the Q8_0 loop is not enough.** At the laptop's read roof one Q4_0
+block of one row arrives every ~0.55 ns (18 bytes at ~32 GB/s), and the
+Q8_0 loop's structure costs ~3 cycles per row and block (9 vector µops;
+measured with the weights in L2 at 3.2 GHz: 0.98 ns). The first Q4_0 loop,
+one row per register like Q8_0 (`vbroadcasti128` + `vpsrlvd` + `vpand` for
+the nibbles, then as Q8_0), ran at 55–64% of the read roof in dev runs:
+bound by instructions, not memory. Q8_0 hid the same cost behind 34 bytes.
+
+**Two rows per register** (`q4_0_rows.hpp`). Rows r and r + 1 share one YMM
+register, lanes 0–3 and 4–7, so the conversion, the scale and the FMA serve
+two rows. Per row pair and block:
+
+| step | instructions | per row and block |
+|---|---|---:|
+| the two rows' 16 quant bytes | `vmovdqu xmm` + `vinserti128` (load) | 1 (+1 load) |
+| nibbles: low, high | `vpand`; `vpsrlw` + `vpand` | 1.5 |
+| Σ q·x (low half with x[0..15], high with x[16..31]) | 2 `vpdpbusd` (AVX2: 2 × `vpmaddubsw` + `vpmaddwd` + `vpaddd`) | 1 (3) |
+| two binary16 scales, 4 copies each | `vmovd` + `vpinsrd` (loads) + `vpshufb` | 1 |
+| 8 FP32 scales × dx | `vcvtph2ps` (2 µops), `vmulps` | 1.5 |
+| accumulate | `vcvtdq2ps`, `vfmadd231ps` | 1 |
+| | | **6.5** (Q8_0 loop: 8, ggml's Q4_0: ~12) |
+
+Plus, once per block for all 8 rows: x's two 16-byte halves broadcast to
+both lanes, and the offset −8·Σx (two dots of 8 with x, negated). Σ (q − 8)·x
+= Σ q·x − 8·Σ x: q in [0, 15] is the dot's unsigned operand and x's quants
+the signed one, so no sign trick is needed (ggml subtracts 8 from q and then
+uses `vpsignb` twice, as for Q8_0), and −8·Σx is the starting accumulator of
+the first `vpdpbusd`, free with VNNI. `vpmaddubsw`'s int16 pair sums are at
+most 2·15·127 = 3810 (no saturation). An odd last row uses the one-row loop.
+
+**Unpacking nibbles** costs 1.5 instructions per row and block (3 per pair:
+`vpand`, `vpsrlw`, `vpand`). Dev measurement, weights in L2 (512×2048 and
+11008×4096, AVX-VNNI, alternating builds): with the three instructions
+removed (wrong results, timing only), 1.8–2.3 cycles per row and block instead
+of 2.3–2.6, about 0.1–0.35 cycles (5–15%) of the loop; the two-rows layout
+took the loop itself from ~3.1 to ~2.4 cycles. With the weights in DRAM the
+two-rows loop read 65–85% of the read roof in dev runs (one row per
+register: 55–64%).
+
+**Rows and prefetch, re-measured for Q4_0** (dev runs, AVX-VNNI, % of a read
+roof timed next to them, two runs each): rows per pass 4, 8, 12 and 16 were
+within run-to-run noise of each other (with the next-group prefetch every 4
+blocks: 65–81% at 4, 67–81% at 8, 63–80% at 12, 60–77% at 16), so 8 stays
+(4 accumulators; 16 rows would not fit the 16 YMM registers on AVX2). The
+next-group prefetch matters more than for Q8_0: without it 48–66% for every
+row count. Spacing (8 rows): one `prefetcht0` per row every 1, 2, 3, 4 or 8
+blocks gave 64–85%, 68–84%, 69–83%, 62–81% and 51–73%; every 2 blocks
+(36 bytes, so every cache line of the next group's rows is touched) is used.
+Bytes per block dropped from 34 to 18, so the prefetch every 2 blocks of
+Q8_0 (68 bytes) became one every 2 blocks here at about twice the rate per
+byte; every 8 blocks (144 bytes) skips lines and loses ~10 points.
+
+Paths: the same as `gemv_q8_0` (`build_info()["q8_0_path"]` names it):
+`avx_vnni`, `avx2` (`vpmaddubsw`), `avx512_vnni` (EVEX `vpdpbusd` on YMM;
+correct under SDE, speed not measured), `scalar`. Single-threaded.
+
+**Error.** Against the exact sum of the quantized operands (every path,
+tested): |y − y64| ≤ 2·(K/32 + 4)·u·Σ_b |dw·dx|·Σ_i |(qw − 8)·qx|. Against
+x·Wᵀ: per weight |w − ŵ| ≤ d·(1 + 8·2⁻¹¹) (rounding w/d, 0.5·d, or the clamp
+at +7, up to d; then d to a normal binary16) and |x − x̂| ≤ 0.5001·dx, so
+|y − x·Wᵀ| ≤ Σ_b [1.0045·|dw|·Σ|x| + 0.5001·dx·Σ|ŵ|] plus the kernel bound
+(tested on standard-normal data). Measured on the benchmark's standard-normal
+W and x (`err_vs_fp32` in `lnl-226v-wsl_2026-10-20_42f64c7d76b3`): relative L2 error of y 8.37–8.76% at the
+three shapes, largest error 7.59–8.92% of max|y|; with the weights quantized
+and x in FP32, 8.36–8.75%: the 4-bit weights are almost all of it (Q8_0:
+0.75–0.77%, §2.8).
+
+**ggml baseline**: as §2.8 (`test-backend-ops perf`, MUL_MAT q4_0 × f32,
+one thread, the same thread check). ggml's n = 1 Q4_0 path is again
+`tinyBLAS_Q0_AVX::gemm<4, 1>`: 4 rows per pass, no prefetch, and per row and
+block a lane-crossing denibble (`vpsrlw` on 128 bits + `vinsertf128` +
+`vpand`), `vpsubb` 8, two `vpsignb`, the dot, `vcvtdq2ps`, two scalar
+binary16 conversions, a multiply and a broadcast, and the FMA: about 12
+instructions where we spend 6.5. Note: Q4_0 weights at 1×4096×4096 and
+1×2048×8192 are 9.4 MB, close to the 8 MiB L3, and test-backend-ops reuses
+the same weights on every run (ours rotate copies), so part of ggml's reads
+there may hit the cache; the comparison favours ggml on those two shapes.
+
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_42f64c7d76b3`, one P-core, path `avx_vnni`), at
+1×4096×4096, 1×4096×11008 and 1×2048×8192:
+
+- 383, 890 and 397 µs: 24.7, 28.6 and 23.9 GB/s, 70%, 83% and 68% of each
+  case's read roof (34.5–35.4 GB/s in this run); 1.45×, 1.67× and 1.38×
+  faster than our Q8_0 GEMV and 5.40×, 6.05× and 5.12× than our FP32 GEMV in
+  the same case (they read 1.9× and 7.1× the bytes); 5.58×, 6.03× and 5.14×
+  PyTorch's FP32 `F.linear` on the dequantized weights.
+- ggml (llama.cpp v0.7.0, one thread): 610, 1948 and 628 µs, 38–44% of the
+  same roofs; ours is 1.58–2.19× faster.
+- The rest of the gap to the roof is the loop's instruction cost (above):
+  Q4_0 is about balanced between memory and compute on this core, where
+  Q8_0 is memory-bound. Four earlier runs of the same commit were set aside
+  because their clock dipped below 3.6 GHz in many cases (other programs
+  running, then the default laptop fan profile; this run's note records the
+  fan profile set to Performance). Their Q4_0 medians agreed with these
+  (1.6–2.3× ggml).
+
 ---
 
 ## 3. Elementwise kernels and normalization

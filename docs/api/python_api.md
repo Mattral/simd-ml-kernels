@@ -149,6 +149,52 @@ together, the next 8 rows prefetched; `avx_vnni` / `avx512_vnni`:
 `vpmaddwd`; `scalar`: exact int sums. Single-threaded. See
 `docs/DESIGN.md` §2.8.
 
+### `quantize_q4_0(W) → np.ndarray[uint8]`
+
+Quantizes float32 weights `[..., K]` (K a multiple of 32) to ggml's Q4_0
+format, byte-identical to `block_q4_0`: per 32 values a float16 scale
+`d = max / −8` (max: the first value of largest magnitude, sign kept;
+little-endian), then 16 bytes of 4-bit quants `q = min(15, trunc(w / d + 8.5))`,
+byte j holding value j in its low nibble and value 16 + j in its high
+nibble; value = `d · (q − 8)`. As ggml's `quantize_row_q4_0_ref`. Returns
+`[..., K // 32 * 18]` bytes. The dequantized value is within
+`d · (0.5 + 8·2⁻¹¹) + 2⁻²⁵` of `w` (blocks with a normal float16 scale), except
+values with `w / d ≥ 7.5`, which clamp to `q = 15`: within `d · (1 + 8·2⁻¹¹)`.
+
+Raises `ArgumentError` if K % 32 ≠ 0, or W holds a NaN, an infinity, or a
+block whose scale overflows float16 (|w| ≥ 524160).
+
+### `gemv_q4_0(x, Wq, N, K) → np.ndarray[float32]`
+
+`y[n] = Σ_k x[k] · W[n, k]` for W `[N, K]` given as `quantize_q4_0` blocks.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `x` | `ndarray[float32]`, shape `[K]` | Activations (one token) |
+| `Wq` | `ndarray[uint8]`, `N·K/32·18` bytes, any shape | Blocks of W, as `quantize_q4_0(W)` returns them |
+| `N`, `K` | `int` | Shape of W; K a multiple of 32 |
+
+x is quantized once per call to Q8 blocks, as in `gemv_q8_0` (float32
+scales); each block's dot product `Σ (q − 8) · qx` is an exact integer sum,
+scaled and summed in float32. Error bound against that sum taken exactly:
+`2·(K/32 + 4)·2⁻²⁴·Σ_b |dw_b·dx_b|·Σ_i |(qw − 8)·qx|`; against the FP32
+product, the 4-bit weights dominate (docs/DESIGN.md §2.9). x with a NaN or an
+infinity gives NaN everywhere.
+
+```python
+W = np.random.randn(4096, 4096).astype(np.float32)   # [out, in]
+Wq = simd_ml_kernels.quantize_q4_0(W)               # uint8 [4096, 2304], ggml block_q4_0
+x = np.random.randn(4096).astype(np.float32)
+y = simd_ml_kernels.gemv_q4_0(x, Wq, 4096, 4096)    # ≈ W @ x
+```
+
+**Implementation** (the path `build_info()["q8_0_path"]` names): two rows of
+W per YMM register (lanes 0–3 and 4–7), 8 rows read in place together, the
+next 8 rows prefetched; nibbles unpacked with `vpand` / `vpsrlw`; q is the
+unsigned operand of `vpdpbusd` (`vpmaddubsw` on AVX2) and −8·Σx its starting
+value, so no sign trick; `scalar`: exact int sums. Single-threaded. See
+`docs/DESIGN.md` §2.9.
+
 ### `GEMMConfig` — callable GEMM configuration object
 
 ```python
@@ -326,7 +372,7 @@ features):
 | `kernel_flags`, `sgemm_tile` | that table's flags and GEMM micro-kernel shape |
 | `sgemm_blocking` | `{kc, mc, nc}` block sizes derived from this core's caches |
 | `u8s8_path` | the path `sgemm_u8s8` runs: `avx512_vnni`, `avx_vnni`, `fp32_convert` or `scalar` |
-| `q8_0_path` | the path `gemv_q8_0` runs: `avx512_vnni`, `avx_vnni`, `avx2` or `scalar` |
+| `q8_0_path` | the path `gemv_q8_0` and `gemv_q4_0` run: `avx512_vnni`, `avx_vnni`, `avx2` or `scalar` |
 | `openmp` | whether GEMM can use more than one thread |
 | `alignment` | allocation alignment of internal buffers |
 

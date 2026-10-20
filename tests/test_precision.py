@@ -20,7 +20,7 @@ import pytest
 
 try:
     import simd_ml_kernels
-    from simd_ml_kernels._cli import q8_0_blocks, q8_0_reference, q8_0_x_scales
+    from simd_ml_kernels._cli import q4_0_blocks, q4_0_reference, q8_0_blocks, q8_0_reference, q8_0_x_scales
     HAS_SIMD = True
 except ImportError:
     HAS_SIMD = False
@@ -557,6 +557,213 @@ class TestQ8_0:
                                       simd_ml_kernels.gemv_q8_0(x, wq, N, K))
 
 
+# ─── Q4_0 (quantize_q4_0, gemv_q4_0) ──────────────────────────────────────────
+
+Q4_0_FIXTURE = os.path.join(os.path.dirname(__file__), "data", "q4_0_ggml_v0.7.0.npz")
+
+
+def q4_0_quantize_numpy(w: np.ndarray) -> np.ndarray:
+    """ggml's quantize_row_q4_0_ref in NumPy float32 arithmetic (each step
+    rounded, as the C reference built for baseline x86-64): max = the first
+    value of largest magnitude, d = max / -8, q = min(15, trunc(w * (1/d) + 8.5)),
+    scale stored as float16 (round to nearest even), little-endian; byte j =
+    q[j] | q[16 + j] << 4."""
+    k = w.shape[-1]
+    b = w.astype(np.float32).reshape(-1, k // 32, 32)
+    a = np.abs(b)
+    amax = a.max(axis=2)
+    first = np.take_along_axis(b, a.argmax(axis=2)[:, :, None], axis=2)[:, :, 0]
+    mx = np.where(amax > 0, first, np.float32(0)).astype(np.float32)   # all-zero block: max stays +0.0
+    d = (mx / np.float32(-8)).astype(np.float32)
+    with np.errstate(divide="ignore", over="ignore"):
+        idv = np.where(d != 0, np.float32(1) / d, np.float32(0)).astype(np.float32)
+    idv = np.where(np.isinf(idv), np.float32(0), idv)       # 1/d overflow: q = 8 (q4_0.hpp)
+    v = (b * idv[:, :, None]).astype(np.float32)
+    t = (v + np.float32(8.5)).astype(np.float32)
+    q = np.minimum(np.trunc(t), 15).astype(np.uint8)
+    out = np.empty(b.shape[:2] + (18,), np.uint8)
+    out[:, :, :2] = d.astype("<f2").view(np.uint8).reshape(b.shape[:2] + (2,))
+    out[:, :, 2:] = q[:, :, :16] | (q[:, :, 16:] << 4)
+    return out.reshape(w.shape[:-1] + (k // 32 * 18,))
+
+
+def q4_0_fixture_input() -> np.ndarray:
+    """The input of the committed llama.cpp fixture (and of its generator):
+    20 rows of 256 float32 values, random rows at several scales and rows
+    that exercise every rule of quantize_row_q4_0_ref."""
+    rng = np.random.default_rng(2026)
+    w = rng.standard_normal((20, 256)).astype(np.float32)
+    w[:12] *= np.array([1, 3, 0.01, 100, 1e-3, 0.5, 7, 1, 1, 2, 40, 1e4], np.float32)[:, None]
+    w[12] = np.tile(np.arange(-8, 8, 0.5, dtype=np.float32), 8)          # max -8: w + 8.5 on k + 0.5 and k
+    w[12, 32:64] = -w[12, 32:64]                                          # max +8: d = -1
+    w[12, 64:] *= np.repeat(np.float32([0.25, 3, 1e-2, 7, 11, 0.125]), 32)
+    w[13, :] = rng.uniform(-1, 1, 256).astype(np.float32)
+    w[13, 5], w[13, 9] = 2.0, -2.0                                         # equal magnitudes: the first sets the sign
+    w[13, 35], w[13, 62] = -2.0, 2.0
+    w[13, 64 + 20], w[13, 64 + 3] = 2.0, -2.0                              # first by position, not by order written
+    w[14, :32] = 0.0                                                       # zero block: d = -0.0, q = 8
+    w[14, 32:64] = -0.0
+    w[14, 64:96] = np.where(np.arange(32) % 3 == 0, 0.0, -0.0)
+    w[15, :128] = rng.uniform(-1e-5, 1e-5, 128).astype(np.float32)        # d a float16 subnormal
+    w[15, 128:] = rng.uniform(-1e-36, 1e-36, 128).astype(np.float32)      # d far below float16 (scale 0), 1/d finite
+    w[16, :] = rng.uniform(-5.2e5, 5.2e5, 256).astype(np.float32)         # large scales, below float16 overflow
+    w[17, :] = np.round(rng.uniform(-8, 8, 256)).astype(np.float32) * 0.5 # many exact halves
+    w[18, :] = -np.abs(w[18, :])                                          # all negative
+    w[19, ::2] = np.float32(7.0)                                          # +7 next to a -8 max: q = 15
+    w[19, 0::32] = np.float32(-8.0)
+    return w
+
+
+def write_q4_0_fixture(lib_path: str, out_path: str = Q4_0_FIXTURE) -> None:
+    """Write the Q4_0 fixture: llama.cpp's own quantization (ggml_quantize_chunk,
+    the call llama-quantize makes; Q4_0 without an importance matrix is
+    quantize_row_q4_0_ref) of q4_0_fixture_input(), run in libggml-base.so."""
+    import ctypes
+    import subprocess
+
+    lib = ctypes.CDLL(lib_path)
+    f = lib.ggml_quantize_chunk
+    f.restype = ctypes.c_size_t
+    f.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64,
+                  ctypes.c_int64, ctypes.c_void_p]
+    w = q4_0_fixture_input()
+    out = np.zeros((w.shape[0], w.shape[1] // 32 * 18), np.uint8)
+    n = f(2, w.ctypes.data, out.ctypes.data, 0, w.shape[0], w.shape[1], None)   # 2 = GGML_TYPE_Q4_0
+    assert n == out.size, n
+    src = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(lib_path))))
+    git = lambda *a: subprocess.run(["git", "-C", src, *a], capture_output=True, text=True).stdout.strip()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    np.savez_compressed(out_path, w=w, blocks=out,
+                        source=np.array(f"llama.cpp {git('describe', '--tags')} {git('rev-parse', 'HEAD')}: "
+                                        "ggml_quantize_chunk(GGML_TYPE_Q4_0, w, out, 0, 20, 256, NULL)"))
+
+
+class TestQ4_0:
+    """quantize_q4_0 byte for byte against ggml's quantize_row_q4_0_ref
+    (NumPy port; blocks written by llama.cpp v0.7.0, committed; the live
+    ggml library when available); gemv_q4_0 against the exact sum of its
+    quantized operands (documented bound) and against the FP32 product
+    (end-to-end bound from the quantization steps)."""
+
+    @pytest.mark.parametrize("shape", [(32,), (1, 32), (7, 64), (33, 4096), (3, 2, 96)])
+    def test_quantize_matches_ggml_reference(self, shape):
+        w = np.random.default_rng(sum(shape) + 1).standard_normal(shape).astype(np.float32) * 3
+        q = simd_ml_kernels.quantize_q4_0(w)
+        assert q.dtype == np.uint8 and q.shape == shape[:-1] + (shape[-1] // 32 * 18,)
+        np.testing.assert_array_equal(q, q4_0_quantize_numpy(w))
+
+    def test_quantize_matches_llama_cpp_fixture(self):
+        """Blocks written by llama.cpp's own quantization (v0.7.0, 620d2225),
+        generated once on the fixture's input with:
+            python tests/test_precision.py write-q4_0-fixture \\
+                ~/code/llama.cpp/build/bin/libggml-base.so
+        (ggml_quantize_chunk(GGML_TYPE_Q4_0, ...), as llama-quantize calls it)."""
+        fx = np.load(Q4_0_FIXTURE)
+        np.testing.assert_array_equal(fx["w"], q4_0_fixture_input())   # the input is what the generator used
+        q = simd_ml_kernels.quantize_q4_0(fx["w"])
+        np.testing.assert_array_equal(q, fx["blocks"])
+        np.testing.assert_array_equal(q4_0_quantize_numpy(fx["w"]), fx["blocks"])
+        blk = fx["blocks"].reshape(20, 8, 18)
+        assert (blk[14, 0, :2].view("<f2") == 0).all() and blk[14, 0, :2].view("<u2")[0] == 0x8000   # -0.0
+        assert (blk[14, 0, 2:] == 0x88).all()
+        assert (blk[19, 0, 2:] & 0x0F == 0).sum() >= 1 and (blk[19, 0, 2:] >> 4 == 15).any()
+
+    def test_quantize_special_blocks(self):
+        w = np.zeros((2, 64), np.float32)
+        w[0, :32] = np.where(np.arange(32) % 2, 1e-44, -1e-44).astype(np.float32)   # 1/d overflows: q = 8
+        w[0, 32:] = 1.0                                                              # constant: max +1, d = -1/8
+        w[1, :] = np.random.default_rng(1).standard_normal(64).astype(np.float32)
+        q = simd_ml_kernels.quantize_q4_0(w)
+        np.testing.assert_array_equal(q, q4_0_quantize_numpy(w))
+        blk = q.reshape(2, 2, 18)
+        assert (blk[0, 0, 2:] == 0x88).all() and blk[0, 0, :2].view("<f2")[0] == 0
+        assert (blk[0, 1, 2:] == 0x00).all() and blk[0, 1, :2].view("<f2")[0] == np.float16(-0.125)
+
+    def test_quantize_matches_real_ggml(self):
+        import ctypes
+
+        lib = _ggml_lib()
+        w = np.concatenate([np.random.default_rng(6).standard_normal((40, 256)).astype(np.float32),
+                            q4_0_fixture_input()])
+        q = simd_ml_kernels.quantize_q4_0(w)
+        ref = np.empty_like(q)
+        f = lib.quantize_row_q4_0_ref
+        f.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+        for i in range(w.shape[0]):
+            f(w[i].ctypes.data, ref[i].ctypes.data, w.shape[1])
+        np.testing.assert_array_equal(q, ref)
+        deq = np.empty(w.shape, np.float32)
+        g = lib.dequantize_row_q4_0
+        g.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+        for i in range(w.shape[0]):
+            g(q[i].ctypes.data, deq[i].ctypes.data, w.shape[1])
+        d, qs = q4_0_blocks(q, w.shape[0], w.shape[1])
+        np.testing.assert_array_equal(deq, (qs.astype(np.float32) * d.astype(np.float32)[:, :, None]).reshape(w.shape))
+
+    @pytest.mark.parametrize("N,K", [(1, 32), (7, 64), (8, 96), (9, 128), (17, 352), (100, 4096), (33, 11008)])
+    def test_gemv_vs_exact_quantized(self, N, K):
+        rng = np.random.default_rng(N * 37 + K)
+        w = rng.standard_normal((N, K)).astype(np.float32)
+        x = (rng.standard_normal(K) * 4).astype(np.float32)
+        wq = simd_ml_kernels.quantize_q4_0(w)
+        y = simd_ml_kernels.gemv_q4_0(x, wq, N, K)
+        assert y.dtype == np.float32 and y.shape == (N,)
+        ref, mag = q4_0_reference(x, wq, N, K)
+        bound = 2 * (K // 32 + 4) * 2.0 ** -24 * mag + 1e-300
+        err = np.abs(y.astype(np.float64) - ref)
+        assert (err <= bound).all(), f"[{N}x{K}] max err/bound {np.max(err / bound):.3g}"
+
+    @pytest.mark.parametrize("N,K", [(64, 4096), (300, 2048)])
+    def test_gemv_end_to_end_bound_vs_fp32(self, N, K):
+        """|y - x·Wᵀ| <= sum_b [1.0045·dw_b·sum|x| + 0.5001·dx_b·sum|ŵ|] + the kernel bound:
+        |w - ŵ| <= d·(1 + 8·2^-11) per weight (rounding w/d to q - 8, clamped at
+        +7 for values >= 7.5·d, then d to float16, a normal float16 here),
+        |x - x̂| <= dx·(0.5 + 2^-16)."""
+        rng = np.random.default_rng(K + N + 1)
+        w = rng.standard_normal((N, K)).astype(np.float32)
+        x = rng.standard_normal(K).astype(np.float32)
+        wq = simd_ml_kernels.quantize_q4_0(w)
+        y = simd_ml_kernels.gemv_q4_0(x, wq, N, K).astype(np.float64)
+        dw, qw = q4_0_blocks(wq, N, K)
+        assert (np.abs(dw) >= 2.0 ** -14).all()          # normal float16 scales
+        dx = q8_0_x_scales(x).astype(np.float64)
+        what = np.abs(qw.astype(np.float64) * dw[:, :, None]).sum(axis=2)          # sum |ŵ| per block
+        xs = np.abs(x.astype(np.float64)).reshape(-1, 32).sum(axis=1)               # sum |x| per block
+        _, mag = q4_0_reference(x, wq, N, K)
+        bound = (1.0045 * np.abs(dw) * xs[None, :] + 0.5001 * dx[None, :] * what).sum(axis=1) \
+            + 2 * (K // 32 + 4) * 2.0 ** -24 * mag
+        err = np.abs(y - w.astype(np.float64) @ x.astype(np.float64))
+        assert (err <= bound).all(), f"max err/bound {np.max(err / bound):.3g}"
+
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+    def test_gemv_nonfinite_x_gives_nan(self, bad):
+        w = np.full((9, 64), 0.25, np.float32)
+        x = np.ones(64, np.float32)
+        x[37] = bad
+        y = simd_ml_kernels.gemv_q4_0(x, simd_ml_kernels.quantize_q4_0(w), 9, 64)
+        assert np.isnan(y).all()
+
+    def test_gemv_k0_and_n0(self):
+        assert (simd_ml_kernels.gemv_q4_0(np.ones(0, np.float32), np.zeros(0, np.uint8), 5, 0) == 0).all()
+        assert simd_ml_kernels.gemv_q4_0(np.ones(32, np.float32), np.zeros(0, np.uint8), 0, 32).shape == (0,)
+
+    def test_gemv_unaligned(self):
+        """Wq at an odd address and x at a 4-byte (not 32-byte) offset."""
+        N, K = 13, 160
+        rng = np.random.default_rng(4)
+        w = rng.standard_normal((N, K)).astype(np.float32)
+        x = rng.standard_normal(K).astype(np.float32)
+        wq = simd_ml_kernels.quantize_q4_0(w).ravel()
+        buf = np.empty(wq.size + 1, np.uint8)
+        buf[1:] = wq
+        xbuf = np.empty(K + 1, np.float32)
+        xbuf[1:] = x
+        want = simd_ml_kernels.gemv_q4_0(x, wq, N, K)
+        np.testing.assert_array_equal(simd_ml_kernels.gemv_q4_0(xbuf[1:], buf[1:], N, K), want)
+        ref, mag = q4_0_reference(x, wq, N, K)
+        assert (np.abs(want - ref) <= 2 * (K // 32 + 4) * 2.0 ** -24 * mag + 1e-300).all()
+
+
 class TestGeLU:
     """GeLU, both variants, against float64 evaluations of the same formula.
 
@@ -889,3 +1096,14 @@ class TestBuildInfo:
         x = np.zeros(1024, dtype=np.float32)
         result = simd_ml_kernels.is_aligned(x)
         assert isinstance(result, bool)
+
+
+if __name__ == "__main__":
+    # python tests/test_precision.py write-q4_0-fixture <llama.cpp>/build/bin/libggml-base.so
+    import sys
+
+    if len(sys.argv) == 3 and sys.argv[1] == "write-q4_0-fixture":
+        write_q4_0_fixture(sys.argv[2])
+        print(f"wrote {Q4_0_FIXTURE}")
+    else:
+        sys.exit("usage: python tests/test_precision.py write-q4_0-fixture <libggml-base.so>")
