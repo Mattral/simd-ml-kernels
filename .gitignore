@@ -76,6 +76,20 @@ gmon.out
 # ─── Jupyter notebooks (if any) ───────────────────────────────────────────────
 .ipynb_checkpoints/
 
+# ─── Model weights and credentials (examples/llama) ───────────────────────────
+# Never commit checkpoints, GGUFs or Hugging Face tokens; models live outside
+# the repo (SIMD_ML_LLAMA_DIR).
+*.safetensors
+*.safetensors.index.json
+*.gguf
+*.pt
+*.pth
+*.ckpt
+/models/
+.cache/huggingface/
+**/huggingface/token
+hf_token*
+
 # ─── Environment files ────────────────────────────────────────────────────────
 .env
 .envrc

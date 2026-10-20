@@ -213,7 +213,15 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   4. Fused RMSNorm and SwiGLU (`silu(gate) * up`) epilogues.
   5. Flash-decoding attention for one query (online softmax, GQA, split-K).
   6. Opt-in row-split OpenMP GEMV, judged against the all-core roofs.
-- **W6 — end-to-end decode loop** against PyTorch and llama.cpp.
+- **W6 — end-to-end decode loop** against PyTorch and llama.cpp:
+  Llama-3.2-1B in `examples/llama/` (a module and a CLI, not library API),
+  checked through `SIMD_ML_LLAMA_DIR`.
+  1. *FP32 correctness* (W6 PR1): safetensors + config.json, KV cache, llama3
+     RoPE, GQA, our GEMVs and SiLU, `tokenizers`; logits of the first 8
+     positions and 64 greedy tokens against transformers FP32 on 5 prompts
+     (`tests/test_llama.py`). DESIGN.md §9. Prefill runs one token at a time.
+  2. Q8_0/Q4_0 weights from llama.cpp's own GGUF (`--pure`) into
+     `gemv_q8_0`/`gemv_q4_0`, and ms/token against llama.cpp.
 
 ---
 
