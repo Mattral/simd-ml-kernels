@@ -405,7 +405,7 @@ def _time_once(fns, warmup, reps, threads=1, block=None):
         for fn in fns:
             fn()
     clock = _clock_sample(threads)
-    ts: list[list[float]] = [[] for _ in fns]
+    ts = [[] for _ in fns]
     for i in range(reps):
         for j, fn in enumerate(fns):
             for _ in range(block[j]):
