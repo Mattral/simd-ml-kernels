@@ -72,11 +72,16 @@ using Q8RowsFn = void (*)(int N, int nb, const std::int8_t* xq, const float* dx,
                           const std::uint8_t* Wq, float* y) noexcept;
 
 /**
- * gemv_q8_0_run — the shared driver: quantizes x into per-thread scratch
- * (may throw std::bad_alloc), then calls rows. K % 32 == 0 is the caller's
- * check; K == 0 gives y = 0.
+ * gemv_q8_0_run — the shared driver of gemv_q8_0 and gemv_q4_0: quantizes x
+ * into per-thread scratch (may throw std::bad_alloc), then calls rows on W's
+ * rows of block_bytes-byte blocks (34: Q8_0, 18: Q4_0). In OpenMP builds the
+ * rows are split into one contiguous slice per thread (gemm::gemv_threads,
+ * gemv_slice: whole 8-row groups), all reading the same quantized x; each
+ * output is computed by one thread exactly as with one thread. K % 32 == 0 is
+ * the caller's check; K == 0 gives y = 0.
  */
-void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* y, Q8RowsFn rows);
+void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* y, Q8RowsFn rows,
+                   int block_bytes);
 
 /** Scalar table: exact int sums per block, FP32 accumulation. */
 void gemv_q8_0_scalar(int N, int K, const float* x, const std::uint8_t* Wq, float* y);

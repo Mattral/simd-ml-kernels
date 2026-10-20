@@ -548,6 +548,27 @@ Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, s
 | `layer_norm` | 1024×1024 | 3.184 | 0.740 | 3.905 | 0.82× | 313.0–428.4 | 250.5–322.3 | 4.30 (4.19–4.42) |
 <!-- END GENERATED: results-detail -->
 
+## Threaded decode GEMV
+
+`python -m simd_ml_kernels bench --cases threads` in an OpenMP build, its own
+run and JSON (`..._threads.json`), the process pinned to the CPUs it may use
+(laptop: `taskset -c 0-3`, the 4 P-cores; the 4 low-power E-cores are left
+out). For each thread count (1, 2, 4) and case: ours in rounds with the read
+roof at the same thread count (our calls 5 at a time back to back, then each
+roof loop once; weights rotated over at least 64 MiB of copies, plus ours on
+the same weights every call, as ggml runs); then PyTorch `F.linear` alone at
+`torch.set_num_threads(N)`; then ggml's MUL_MAT with `OMP_THREAD_LIMIT=N`,
+whose thread check expects N threads. The clock is sampled on every thread at
+once and `--min-ghz` applies to the slowest; with 4 threads busy, these
+P-cores run at about 3.3–3.55 GHz (all-core turbo), inside the E-cores' range,
+so the 3.6 GHz single-core threshold does not apply and the clock alone cannot
+show which core type ran a thread. The JSON's note says how placement was
+checked. Why each step: docs/DESIGN.md §2.10.
+
+<!-- BEGIN GENERATED: threads-detail -->
+_No committed threaded runs._
+<!-- END GENERATED: threads-detail -->
+
 PyTorch's exact GeLU (`F.gelu`, erf) is the least stable baseline on the
 laptop: 1.571, 1.612 and 0.368 Gelem/s in the runs on `7a698867be89`,
 `b193633ecec1` and `045918e51839`, while ours measured 2.414, 2.651 and 2.428;

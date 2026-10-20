@@ -329,12 +329,12 @@ def q4_0_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
 
 
-def _ggml_source(doc: dict, fmt: str = "q8_0") -> str:
+def _ggml_source(doc: dict, fmt: str = "q8_0", threads: str = "one thread (OMP_THREAD_LIMIT=1") -> str:
     g = doc["baselines"].get("ggml")
     if not isinstance(g, dict):
         return g or "not measured"
     return (f"llama.cpp {g['tag']} (`{(g['commit'] or '')[:7]}`), `test-backend-ops perf` MUL_MAT {fmt} × f32, "
-            f"one thread (OMP_THREAD_LIMIT=1, GGML_OPENMP={g['cmake'].get('GGML_OPENMP')}, "
+            f"{threads}, GGML_OPENMP={g['cmake'].get('GGML_OPENMP')}, "
             f"GGML_NATIVE={g['cmake'].get('GGML_NATIVE')}), median of {g['runs_per_case']} runs of its own "
             "mean over ≥ 1 s on the same weights (not interleaved)")
 
@@ -374,9 +374,192 @@ def act_table(doc: dict, detail: bool) -> str:
     return "\n".join(rows) + _excluded_note(doc, excluded)
 
 
+def _is_threads(doc: dict) -> bool:
+    """A threaded decode GEMV run (bench --cases threads): its own tables."""
+    return doc["protocol"].get("threads") is not None
+
+
+def _thr_rows(doc: dict, kernel: str) -> dict:
+    """{(shape, threads): {impl: row}} for one kernel of a threads run."""
+    out: dict = {}
+    for r in doc["results"]:
+        if r["kernel"] == kernel and "threads" in r:
+            out.setdefault((tuple(r["shape"]), r["threads"]), {})[r["impl"]] = r
+    return out
+
+
+def _ok(*rs: dict | None) -> bool:
+    return not any(r is not None and "core_ghz" in r and _throttled(r) for r in rs) and not _unstable(*rs)
+
+
+def _scaling(o: dict, one: dict | None, th: int) -> str:
+    if one is None or not _ok(one):
+        return "—"
+    return f"{100 * o['gb_per_s'] / (th * one['gb_per_s']):.0f}%"
+
+
+def _shape_key(shape_th):
+    (m, n, k), th = shape_th
+    return (n * k, n, k, th)
+
+
+THREAD_QUANT = [("gemv_q8_0", "Q8_0"), ("gemv_q4_0", "Q4_0")]
+THREAD_FLOAT = [("gemv_fp32", "FP32"), ("gemv_fp16", "FP16"), ("gemv_bf16", "BF16")]
+
+
+def threads_quant_table(doc: dict, detail: bool) -> str:
+    rows = ["| format | N×K (Llama-3.2-1B) | threads | simd-ml-kernels µs | GB/s | % of read roof | scaling |"
+            " same weights µs | ggml µs (own timing) | ggml % of roof | ours / ggml (same weights) |"
+            " ours / ggml (rotated) |"
+            + (" read roof GB/s | IQR µs (ours) | ggml threads (max / timed) |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|---:|" if detail else "")
+            + "---:|"]
+    excluded, unstable = [], []
+    for kernel, label in THREAD_QUANT:
+        by = _thr_rows(doc, kernel)
+        for key in sorted(by, key=_shape_key):
+            (m, n, k), th = key
+            impls = by[key]
+            o, sw, g = impls.get(OURS), impls.get(OURS + " same weights"), impls.get("ggml test-backend-ops")
+            if o is None:
+                continue
+            llama = ", ".join(o.get("llama_3_2_1b", []))
+            shp = f"{n}×{k}" + (f" ({llama})" if llama else "")
+            name = f"{label} {n}×{k} {th}T"
+            if _throttled(o, sw) or (g is not None and "core_ghz" in g and _throttled(g)):
+                excluded.append((name, o))
+                continue
+            if _unstable(o, g):
+                unstable.append((name, o))
+                continue
+            one = by.get(((m, n, k), 1), {}).get(OURS)
+            us = o["median_s"]
+            swt = f"{sw['median_s'] * 1e6:.0f}" if sw else "—"
+            if g is not None and "time_s" in g:
+                gt, gp = f"{g['time_s'] * 1e6:.0f}", f"{g['pct_stream_read']:.0f}%"
+                gs = f"{g['time_s'] / sw['median_s']:.2f}×" if sw else "—"
+                gr = f"{g['time_s'] / us:.2f}×"
+            else:
+                gt, gp, gs, gr = (g or {}).get("not_measured", "not measured"), "—", "—", "—"
+            line = (f"| {label} | {shp} | {th} | {us * 1e6:.0f} | {o['gb_per_s']:.1f} | {o['pct_stream_read']:.0f}% |"
+                    f" {_scaling(o, one, th)} | {swt} | {gt} | {gp} | {gs} | {gr} |")
+            if detail:
+                gth = f"{g['threads_max']} / {g['threads_timed']}" if g is not None and "threads_timed" in g else "—"
+                line += f" {o['roof_read_gbs']:.1f} | {o['p25_s'] * 1e6:.0f}–{o['p75_s'] * 1e6:.0f} | {gth} |"
+            rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
+
+
+def threads_float_table(doc: dict, detail: bool) -> str:
+    rows = ["| weights | N×K | threads | simd-ml-kernels µs | GB/s | % of read roof | scaling |"
+            " PyTorch GB/s | ours / PyTorch |" + (" read roof GB/s | IQR µs (ours) |" if detail else "")
+            + " core GHz median (min–max) |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|" + ("---:|---:|" if detail else "") + "---:|"]
+    excluded, unstable = [], []
+    for kernel, label in THREAD_FLOAT:
+        by = _thr_rows(doc, kernel)
+        for key in sorted(by, key=_shape_key):
+            (m, n, k), th = key
+            impls = by[key]
+            o = impls.get(OURS)
+            t = next((v for i, v in impls.items() if i.startswith("torch")), None)
+            if o is None:
+                continue
+            name = f"{label} {n}×{k} {th}T"
+            if _throttled(o, t):
+                excluded.append((name, o))
+                continue
+            if _unstable(o, t):
+                unstable.append((name, o))
+                continue
+            one = by.get(((m, n, k), 1), {}).get(OURS)
+            tg = f"{t['gb_per_s']:.1f}" if t else "—"
+            tr = f"{t['median_s'] / o['median_s']:.2f}×" if t else "—"
+            line = (f"| {label} | {n}×{k} | {th} | {o['median_s'] * 1e6:.0f} | {o['gb_per_s']:.1f} |"
+                    f" {o['pct_stream_read']:.0f}% | {_scaling(o, one, th)} | {tg} | {tr} |")
+            if detail:
+                line += f" {o['roof_read_gbs']:.1f} | {o['p25_s'] * 1e6:.0f}–{o['p75_s'] * 1e6:.0f} |"
+            rows.append(line + f" {_clk(o)} |")
+    return "\n".join(rows) + _excluded_note(doc, excluded) + _unstable_note(unstable)
+
+
+def per_token(doc: dict) -> str:
+    """GEMV time of one Llama-3.2-1B decode token: layers × (the shapes of one
+    layer × their count) + lm_head, ours (rotated weights) and ggml, per
+    format and thread count, from the rows tagged llama_3_2_1b."""
+    llama = doc["protocol"]["threads"].get("llama_3_2_1b")
+    if not llama:
+        return ""
+    counts = {"q_proj, o_proj": 2, "k_proj, v_proj": 2, "gate_proj, up_proj": 2, "down_proj": 1}
+    lines = []
+    for kernel, label in THREAD_QUANT:
+        by = _thr_rows(doc, kernel)
+        for th in doc["protocol"]["threads"]["counts"]:
+            ours = ggml = 0.0
+            missing = []
+            for key, impls in by.items():
+                if key[1] != th:
+                    continue
+                o, g = impls.get(OURS), impls.get("ggml test-backend-ops")
+                for tag in (o or {}).get("llama_3_2_1b", []):
+                    mult = llama["layers"] * counts[tag] if tag in counts else 1
+                    if not _ok(o) or g is None or "time_s" not in g or not _ok(g):
+                        missing.append(tag)
+                        continue
+                    ours += mult * o["median_s"]
+                    ggml += mult * g["time_s"]
+            if missing:
+                lines.append(f"- {label}, {th} thread{'s' if th > 1 else ''}: not computed "
+                             f"({', '.join(sorted(set(missing)))} not shown or not measured)")
+            elif ours:
+                lines.append(f"- {label}, {th} thread{'s' if th > 1 else ''}: ours {ours * 1e3:.2f} ms, "
+                             f"ggml {ggml * 1e3:.2f} ms ({ggml / ours:.2f}×)")
+    if not lines:
+        return ""
+    return ("**Per-token GEMV time, Llama-3.2-1B** (" + llama["source"] + "; "
+            f"{llama['layers']} layers × (2 q/o + 2 k/v + 2 gate/up + 1 down) + lm_head, every matrix in the "
+            "format shown; ours with rotated weights, ggml on the same weights every run; GEMVs only, not "
+            "a tokens/s figure)\n\n" + "\n".join(lines) + "\n")
+
+
+def threads_section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool) -> str:
+    docs = sorted([d for d in docs if _is_threads(d)], key=lambda d: d["timestamp_utc"], reverse=True)
+    if not docs:
+        return "_No committed threaded runs._\n"
+    if latest_only:   # newest threaded run per machine label
+        newest: dict[str, dict] = {}
+        for d in docs:
+            newest.setdefault(d["machine"]["label"], d)
+        docs = list(newest.values())
+    out = []
+    for d in docs:
+        th = d["protocol"]["threads"]
+        cpus = d["machine"].get("pinned_cpus")
+        out.append(f"#### {d['machine']['label']}, {d['timestamp_utc'][:10]}, commit `{d['build']['git_commit']}`, "
+                   f"{'/'.join(map(str, th['counts']))} threads\n")
+        out.append("Source: " + _source(d, link_prefix) + f"; CPUs {cpus}.\n")
+        path = d["build"].get("q8_0_path", "not recorded")
+        out.append(f"**Q8_0 / Q4_0 decode GEMV at 1–{max(th['counts'])} threads**, path `{path}`. GB/s counts the "
+                   "weights, x and y; % of the read roof measured at the same thread count in the same case; "
+                   "scaling = GB/s at N threads / (N × GB/s at 1 thread); ours with weights rotated past the "
+                   "caches, and on the same weights every call (as ggml runs). ggml: "
+                   + _ggml_source(d, "q8_0 or q4_0", "the same thread count (OMP_THREAD_LIMIT = threads")
+                   + ".\n")
+        out.append(threads_quant_table(d, detail) + "\n")
+        out.append(per_token(d))
+        out.append("**FP32 / FP16 / BF16 decode GEMV** (x·Wᵀ, W [N, K]), same roof and scaling; PyTorch: "
+                   "`F.linear` at `torch.set_num_threads(N)`, timed alone after ours (two OpenMP runtimes would "
+                   "spin against each other), FP32 and BF16.\n")
+        out.append(threads_float_table(d, detail) + "\n")
+    return "\n".join(out).rstrip() + "\n"
+
+
 def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool) -> str:
     """One block per result file, newest first; latest_only keeps the newest
-    file per machine label (README), otherwise every run is listed (BENCHMARKS)."""
+    file per machine label (README), otherwise every run is listed (BENCHMARKS).
+    Threaded runs are left to threads_section."""
+    docs = [d for d in docs if not _is_threads(d)]
     if not docs:
         return "_No committed benchmark results._\n"
     docs = sorted(docs, key=lambda d: d["timestamp_utc"], reverse=True)
@@ -451,12 +634,20 @@ def main() -> int:
         "docs/BENCHMARKS.md": ("results-detail",
                                section(docs, detail=True, link_prefix="../", latest_only=False)),
     }
+    threads = {
+        "README.md": ("threads-summary",
+                      threads_section(docs, detail=False, latest_only=True,
+                                      link_prefix="https://github.com/Mattral/simd-ml-kernels/blob/main/")),
+        "docs/BENCHMARKS.md": ("threads-detail",
+                               threads_section(docs, detail=True, link_prefix="../", latest_only=False)),
+    }
     stale = []
     for rel, (name, body) in targets.items():
         path = os.path.join(ROOT, rel)
         with open(path, encoding="utf-8") as f:
             old = f.read()
         new = replace_block(old, name, body)
+        new = replace_block(new, *threads[rel])
         if new != old:
             stale.append(rel)
             if not args.check:

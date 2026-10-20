@@ -370,6 +370,17 @@ Source: Intel(R) Xeon(R) Processor @ 2.10GHz, vCPU 1 (KVM guest, 2 vCPU; host co
 | `layer_norm` | 1024×1024 | 2.099 | 0.663 | 2.180 | 0.96× | 3.16 (3.04–3.30) |
 <!-- END GENERATED: results-summary -->
 
+### Threaded decode GEMV
+
+OpenMP builds only (`-DSIMD_ML_OPENMP=ON`, off by default). The process runs
+on the laptop's 4 P-cores (`taskset -c 0-3`, the 4 low-power E-cores excluded);
+ours, PyTorch and ggml use the same thread count, and every percentage is of
+the read roof measured at that thread count in the same case.
+
+<!-- BEGIN GENERATED: threads-summary -->
+_No committed threaded runs._
+<!-- END GENERATED: threads-summary -->
+
 Run it on your hardware:
 
 ```bash

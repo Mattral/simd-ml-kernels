@@ -218,15 +218,16 @@ def layer_norm(
 # ─── Threading ────────────────────────────────────────────────────────────────
 
 def set_num_threads(n: int) -> None:
-    """Set the most OpenMP threads one sgemm call uses (default: OMP_NUM_THREADS,
-    else one per logical CPU). Small products and calls from inside an OpenMP
-    parallel region use fewer; results are bitwise the same for any count.
+    """Set the most OpenMP threads one GEMM or decode GEMV call uses (sgemm,
+    sgemm_f16, sgemm_bf16, gemv_q8_0, gemv_q4_0; default: OMP_NUM_THREADS, else
+    one per logical CPU). Small calls and calls from inside an OpenMP parallel
+    region use fewer; results are bitwise the same for any count.
     Without OpenMP (build_info()['openmp'] False), n > 1 warns (RuntimeWarning)."""
     ...
 
 
 def get_num_threads() -> int:
-    """Return the most OpenMP threads one sgemm call uses (1 without OpenMP)."""
+    """Return the most OpenMP threads one GEMM or decode GEMV call uses (1 without OpenMP)."""
     ...
 
 
@@ -407,6 +408,8 @@ def is_aligned(arr: np.ndarray) -> bool:
 # ─── Private: used by `python -m simd_ml_kernels bench` and `info` ────────────
 
 def _measure_core_ghz(seconds: float = 0.05) -> float: ...
+def _measure_core_ghz_team(seconds: float = 0.05, threads: int = 1) -> list[float]: ...
+def _gemv_min_bytes(bytes: float = 0.0) -> float: ...
 def _cpu_caches() -> list[dict[str, int | str]]: ...
 def _stream_triad(
     a: NDArray[np.float32],
@@ -416,7 +419,9 @@ def _stream_triad(
     threads: int = 1,
 ) -> None: ...
 def _stream_read(a: NDArray[np.float32], threads: int = 1, streams: int = 4) -> float: ...
-def _stream_read_rows(a: NDArray[np.float32], rows: int, row_floats: int, prefetch: bool = False) -> float: ...
+def _stream_read_rows(
+    a: NDArray[np.float32], rows: int, row_floats: int, prefetch: bool = False, threads: int = 1
+) -> float: ...
 def _set_isa(isa: str) -> None: ...
 def _sgemm_u8s8_convert(
     A: NDArray[np.uint8],

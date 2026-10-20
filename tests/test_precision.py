@@ -404,6 +404,56 @@ class TestGEMMThreads:
             f"{threads} threads differ from 1 thread"
 
 
+class TestGEMVThreads:
+    """Decode GEMV (x·Wᵀ in FP32/FP16/BF16, gemv_q8_0, gemv_q4_0) with 2, 3 and
+    4 threads (OpenMP builds): bitwise equal to 1 thread, since each output row
+    is computed by one thread with the same code. Shapes above the default
+    bytes-per-thread minimum, and small ones with the minimum lowered to 1 byte
+    so they split too (N with every remainder mod 8)."""
+
+    @pytest.fixture(autouse=True)
+    def restore_threads(self):
+        saved = simd_ml_kernels.get_num_threads()
+        min_bytes = simd_ml_kernels._core._gemv_min_bytes()
+        yield
+        simd_ml_kernels.set_num_threads(saved)
+        simd_ml_kernels._core._gemv_min_bytes(min_bytes)
+
+    @staticmethod
+    def _all(x, W, n, k):
+        x16 = x.astype(np.float16)
+        W16 = W.astype(np.float16)
+        xb = (x.view(np.uint32) >> 16).astype(np.uint16)
+        Wb = (W.view(np.uint32) >> 16).astype(np.uint16)
+        return [simd_ml_kernels.sgemm(x, W, trans_b=True),
+                simd_ml_kernels.sgemm_f16(x16, W16, trans_b=True),
+                simd_ml_kernels.sgemm_bf16(xb, Wb, trans_b=True),
+                simd_ml_kernels.gemv_q8_0(x[0], simd_ml_kernels.quantize_q8_0(W), n, k),
+                simd_ml_kernels.gemv_q4_0(x[0], simd_ml_kernels.quantize_q4_0(W), n, k)]
+
+    @pytest.mark.parametrize("threads", [2, 3, 4])
+    @pytest.mark.parametrize("N,K,force", [
+        (1003, 2048, False),   # Q4_0 1.1 MB: split at the default minimum
+        (4100, 1024, False),
+        (9, 32, True), (31, 96, True), (257, 160, True), (2047, 64, True),
+    ])
+    def test_gemv_threads_bitwise(self, N, K, force, threads):
+        if not simd_ml_kernels.build_info()["openmp"]:
+            pytest.skip("built without OpenMP")
+        if force:
+            simd_ml_kernels._core._gemv_min_bytes(1.0)
+        rng = np.random.default_rng(N * 7 + K)
+        x = rng.standard_normal((1, K)).astype(np.float32)
+        W = rng.standard_normal((N, K)).astype(np.float32)
+        simd_ml_kernels.set_num_threads(1)
+        ref = self._all(x, W, N, K)
+        simd_ml_kernels.set_num_threads(threads)
+        got = self._all(x, W, N, K)
+        for name, a, b in zip(("fp32", "fp16", "bf16", "q8_0", "q4_0"), got, ref):
+            assert np.array_equal(a.view(np.uint32), b.view(np.uint32)), \
+                f"{name} {N}x{K}: {threads} threads differ from 1 thread"
+
+
 # ─── GeLU Tests ──────────────────────────────────────────────────────────────
 
 # ─── Q8_0 (quantize_q8_0, gemv_q8_0) ──────────────────────────────────────────

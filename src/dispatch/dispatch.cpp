@@ -344,7 +344,43 @@ constexpr int kGemmMinChunkCols = 128;
 
 int ceil_div(int a, int b) noexcept { return (a + b - 1) / b; }
 
+// A threaded decode GEMV gives each thread at least this many bytes of
+// weights. Lunar Lake laptop, P-cores 0-3 under WSL2 (dev runs, not a
+// benchmark), K = 2048, weights rotated past the caches, each thread count
+// called back to back: team start/stop costs 0.3-0.6 µs (a 9 KiB Q4_0 GEMV
+// in L1: 1.47 µs on 1 thread, 1.7-1.9 on 2, 2.0 on 4); Q4_0/Q8_0/BF16/FP32
+// ran 1.17-2.4x faster on 2 threads and 1.21-3.9x on 4 at 64 KiB per thread
+// or more, 1.0-1.35x at 18-36 KiB. When the team's threads have stopped
+// spinning (other work in between, e.g. thread counts alternating call by
+// call) waking them took 40-70 µs under WSL2, so the cut-off keeps a margin.
+std::atomic<double> g_gemv_min_bytes{64 * 1024};
+
 }  // namespace
+
+int gemv_threads(int N, double bytes) noexcept {
+#ifdef SIMD_ML_OPENMP
+    if (N <= 0 || omp_in_parallel()) return 1;  // never nest teams
+    const double by_bytes = bytes / g_gemv_min_bytes.load(std::memory_order_relaxed);
+    long long t = get_num_threads();
+    t = std::min(t, std::max(1LL, static_cast<long long>(std::min(by_bytes, 1e9))));
+    return static_cast<int>(std::min<long long>(t, ceil_div(N, kGemvRowGroup)));
+#else
+    (void)N; (void)bytes;
+    return 1;
+#endif
+}
+
+GemvSlice gemv_slice(int N, int t, int team) noexcept {
+    const long long groups = ceil_div(N, kGemvRowGroup);
+    const auto edge = [&](long long i) {
+        return static_cast<int>(std::min<long long>(N, groups * i / team * kGemvRowGroup));
+    };
+    return GemvSlice{edge(t), edge(t + 1)};
+}
+
+double set_gemv_min_bytes_per_thread(double bytes) noexcept {
+    return g_gemv_min_bytes.exchange(bytes > 0 ? bytes : 1.0, std::memory_order_relaxed);
+}
 
 GemmChunks gemm_chunks(int threads, int M, int N, int mr, int nr, int mc_max) noexcept {
     const int target = std::max(1, threads) * kGemmChunksPerThread;

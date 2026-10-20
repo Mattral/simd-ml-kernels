@@ -23,6 +23,9 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 taskset -c 2 python -m simd_ml_kernels bench --json benchmarks/results/<label>_<date>_<commit>.json \
     --label <label> --core "<which core>"
 python benchmarks/make_tables.py       # regenerate README/BENCHMARKS tables from the JSON
+# Threaded decode GEMV (OpenMP build: SKBUILD_CMAKE_DEFINE=SIMD_ML_OPENMP=ON pip install .), its own run
+taskset -c 0-3 python -m simd_ml_kernels bench --cases threads --threads 1,2,4 \
+    --json benchmarks/results/<label>_<date>_<commit>_threads.json --label <label> --core "<which cores>"
 ```
 
 Pitfalls:
@@ -154,14 +157,16 @@ build     version, git_commit, compiler, kernel_flags, isa_compiled, openmp,
           sgemm_tile, sgemm_blocking {kc, mc, nc}, u8s8_path, q8_0_path
 baselines numpy, blas {name, version}, torch, ggml {tag, commit, cmake, system_info, ...} | "not measured (...)"
 env       OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, SIMD_ML_ISA, SIMD_ML_BF16_DOT
-protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc, stream, gemv, gemv_roof
+protocol  warmup, reps, statistic, interleaved, clock, min_ghz, malloc, stream, gemv, gemv_roof,
+          threads {counts, method, llama_3_2_1b} (threaded runs)
 results[] kernel, impl, shape, median_s, p25_s, p75_s, min_s, reps,
           core_ghz {median, min, max, samples, attempts, below_min_ghz},
           gflops + flop_per_cycle (GEMM; GEMV also bytes, gb_per_s, pct_stream_{read,triad},
           weight_copies, roof_read_gbs, roof_unstable; Q8_0/Q4_0: err_vs_fp32; ggml rows: time_s,
-          runs, threads_max/timed, command) | gelem_per_s + elem_per_cycle (elementwise) | gb_per_s (stream_*)
+          runs, threads_max/timed, command; threaded runs: threads, llama_3_2_1b) | gelem_per_s + elem_per_cycle (elementwise) | gb_per_s (stream_*)
 ```
 
-Files are named `benchmarks/results/<label>_<YYYY-MM-DD>_<commit>.json`, one
+Files are named `benchmarks/results/<label>_<YYYY-MM-DD>_<commit>.json` (threaded
+runs: `..._threads.json`, rendered in their own blocks), one
 machine per file. `benchmarks/make_tables.py` renders every file into the
 generated blocks of README.md and docs/BENCHMARKS.md; CI fails if they differ.
