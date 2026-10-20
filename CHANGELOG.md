@@ -9,7 +9,9 @@ under **Changed** with a migration note.
 ### Changed
 - Threaded `gemv_q8_0` / `gemv_q4_0`: x is quantized by the thread team
   (one run of blocks per thread) instead of the calling thread alone; same
-  quants, results bitwise unchanged.
+  quants, results bitwise unchanged. Rerun (`lnl-226v-wsl_2026-10-20_38cd710929a3_threads`): at 4 threads Q4_0
+  1.22–2.22× ggml on every shape (512×2048 was 0.97×), Llama-3.2-1B GEMV time
+  per token 10.4 ms (Q4_0) and 17.0 ms (Q8_0) against ggml's 14.5 and 21.6.
 - `bench`: rows that reuse their weights on every call (ggml, our "same
   weights" row) no longer count towards `roof_unstable`; the Llama-3.2-1B
   shapes come from its config.json when `SIMD_ML_LLAMA_CONFIG` points at it.
