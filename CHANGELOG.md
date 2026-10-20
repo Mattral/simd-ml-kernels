@@ -20,7 +20,10 @@ under **Changed** with a migration note.
   blocks once per call, as for `gemv_q8_0`; exact integer block dot
   products, two weight rows per register; same paths as
   `build_info()['q8_0_path']`. K % 32 != 0 raises `ArgumentError`.
-  docs/DESIGN.md §2.9.
+  docs/DESIGN.md §2.9. Measured on the reference laptop's P-core
+  (`lnl-226v-wsl_2026-10-20_42f64c7d76b3`, 1×4096×11008; the other two shapes were below the clock
+  threshold): 79% of the read roof, 1.67× our Q8_0 GEMV, 6.30× our FP32 GEMV
+  and 2.16× ggml's Q4_0 MUL_MAT (llama.cpp v0.7.0, one thread).
 - `python -m simd_ml_kernels bench`: Q4_0 GEMV cases (`--cases q4_0`) against
   our Q8_0 and FP32 GEMV, PyTorch's FP32 `F.linear` on the dequantized
   weights and ggml's Q4_0 MUL_MAT on one thread.

@@ -204,8 +204,13 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
      §2.8. Open: FP32 GEMV 1×4096×11008 still above 105% of its roof (109.6%
      in that run, not shown): the roof is a lower bound, and a tighter one
      (or a protocol for it) is a later item; AVX-512 GEMV run.
-  3. Q4_0 (`quantize_q4_0`, `gemv_q4_0`; ggml `block_q4_0`, rounding as
-     `quantize_row_q4_0_ref`).
+  3. *Q4_0 GEMV* (done, W5 PR3): `quantize_q4_0` / `gemv_q4_0` (ggml
+     `block_q4_0`, byte-identical, checked against blocks written by
+     llama.cpp v0.7.0); two weight rows per register (6.5 instructions per
+     row and block). Laptop (`lnl-226v-wsl_2026-10-20_42f64c7d76b3`, 1×4096×11008): 79% of the roof,
+     2.16× ggml's Q4_0 MUL_MAT on one thread. DESIGN.md §2.9. Open: the two
+     other shapes were below the clock threshold in every publication run
+     that day (rerun on a cooler machine); AVX-512 run.
   4. Fused RMSNorm and SwiGLU (`silu(gate) * up`) epilogues.
   5. Flash-decoding attention for one query (online softmax, GQA, split-K).
   6. Opt-in row-split OpenMP GEMV, judged against the all-core roofs.

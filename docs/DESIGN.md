@@ -501,7 +501,11 @@ tested): |y − y64| ≤ 2·(K/32 + 4)·u·Σ_b |dw·dx|·Σ_i |(qw − 8)·qx|.
 x·Wᵀ: per weight |w − ŵ| ≤ d·(1 + 8·2⁻¹¹) (rounding w/d, 0.5·d, or the clamp
 at +7, up to d; then d to a normal binary16) and |x − x̂| ≤ 0.5001·dx, so
 |y − x·Wᵀ| ≤ Σ_b [1.0045·|dw|·Σ|x| + 0.5001·dx·Σ|ŵ|] plus the kernel bound
-(tested on standard-normal data).
+(tested on standard-normal data). Measured on the benchmark's standard-normal
+W and x (`err_vs_fp32` in `lnl-226v-wsl_2026-10-20_42f64c7d76b3`): relative L2 error of y 8.37–8.76% at the
+three shapes, largest error 7.59–8.92% of max|y|; with the weights quantized
+and x in FP32, 8.36–8.75%: the 4-bit weights are almost all of it (Q8_0:
+0.75–0.77%, §2.8).
 
 **ggml baseline**: as §2.8 (`test-backend-ops perf`, MUL_MAT q4_0 × f32,
 one thread, the same thread check). ggml's n = 1 Q4_0 path is again
@@ -513,6 +517,18 @@ instructions where we spend 6.5. Note: Q4_0 weights at 1×4096×4096 and
 1×2048×8192 are 9.4 MB, close to the 8 MiB L3, and test-backend-ops reuses
 the same weights on every run (ours rotate copies), so part of ggml's reads
 there may hit the cache; the comparison favours ggml on those two shapes.
+
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_42f64c7d76b3`, one P-core, path `avx_vnni`). Only
+1×4096×11008 passed the clock check in that run (1×4096×4096 and 1×2048×8192
+each had a clock sample below 3.6 GHz in all three attempts; their rows stay
+in the JSON, not in the tables; three publication runs on this laptop that
+day all had such dips). At 1×4096×11008: 1028 µs, 24.7 GB/s, 79% of the
+case's read roof; 1.67× faster than our Q8_0 GEMV and 6.30× than our FP32
+GEMV in the same case (they read 1.9× and 7.1× the bytes); 5.79× PyTorch's
+FP32 `F.linear` on the dequantized weights. ggml (llama.cpp v0.7.0, one
+thread): 2221 µs, 37% of the roof; ours is 2.16× faster. The remaining gap to
+the roof is the loop's instruction cost (above): Q4_0 is about balanced
+between memory and compute on this core, where Q8_0 is memory-bound.
 
 ---
 

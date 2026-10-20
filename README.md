@@ -112,6 +112,9 @@ Summary:
 - Q8_0 decode GEMV (laptop, `290b91baad26`): 92–95% of the read roof,
   1.46–1.82× ggml's Q8_0 MUL_MAT (llama.cpp v0.7.0, one thread), 3.49–3.61×
   our FP32 GEMV.
+- Q4_0 decode GEMV (laptop, `42f64c7d76b3`, 1×4096×11008): 79% of the read
+  roof, 2.16× ggml's Q4_0 MUL_MAT (llama.cpp v0.7.0, one thread), 1.67× our
+  Q8_0 GEMV.
 - INT8 GEMM with AVX-VNNI (laptop, `ecc219baa1f2`): 3.36–3.60× our FP32 GEMM
   and 1.72–2.19× PyTorch's quantized linear at 256³ and 1024³.
 - Activations (laptop, `ecc219baa1f2`): 1.05–2.97× PyTorch, except LayerNorm
@@ -232,79 +235,77 @@ interleaved call by call. The GHz column is the core clock measured during the
 case; cases where it fell below the P-core threshold are not shown.
 
 <!-- BEGIN GENERATED: results-summary -->
-#### lnl-226v-wsl, 2026-10-19, commit `v0.3.0-4-g290b91baad26`
+#### lnl-226v-wsl, 2026-10-20, commit `42f64c7d76b3`
 
-Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `v0.3.0-4-g290b91baad26`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-19T09:28:54+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-19_290b91baad26.json`](https://github.com/Mattral/simd-ml-kernels/blob/main/benchmarks/results/lnl-226v-wsl_2026-10-19_290b91baad26.json).
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPU 2 (P-core by measured clock, see protocol); Python 3.12.3, GNU 13.3.0, commit `42f64c7d76b3`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-20T02:14:20+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-20_42f64c7d76b3.json`](https://github.com/Mattral/simd-ml-kernels/blob/main/benchmarks/results/lnl-226v-wsl_2026-10-20_42f64c7d76b3.json).
 
 **FP32 GEMM, square, single thread**
 
 | N | simd-ml-kernels GFLOP/s | OpenBLAS GFLOP/s | % of OpenBLAS | core GHz median (min–max) |
 |---:|---:|---:|---:|---:|
-| 128 | 94.9 | 105.3 | 90% | 4.30 (3.91–4.56) |
-| 256 | 122.4 | 121.2 | 101% | 4.37 (3.76–4.48) |
-| 512 | 111.8 | 116.3 | 96% | 4.13 (3.72–4.56) |
-| 1024 | 115.7 | 118.5 | 98% | 4.19 (3.73–4.68) |
-| 2048 | 111.9 | 118.5 | 94% | 4.07 (3.67–4.61) |
+| 128 | 92.7 | 99.5 | 93% | 4.10 (3.70–4.42) |
+| 256 | 114.3 | 116.3 | 98% | 4.09 (3.76–4.37) |
+| 1024 | 109.6 | 112.8 | 97% | 3.74 (3.63–4.32) |
+Not shown: N = 512 (median 3.98, min 3.17 GHz, 3 attempts), N = 2048 (median 3.98, min 3.58 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 **FP16 / BF16-input GEMM, FP32 accumulation and output, single thread** (PyTorch: `torch.matmul` on float16 / bfloat16 tensors, which returns float16 / bfloat16)
 
 | input | M×N×K | simd-ml-kernels GFLOP/s | our FP32 GFLOP/s | % of FP32 | PyTorch GFLOP/s | ours / PyTorch | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| FP16 | 128×128×128 | 98.4 | 108.3 | 91% | 69.8 | 1.41× | 4.29 (3.64–4.50) |
-| FP16 | 256×256×256 | 108.0 | 118.3 | 91% | 78.9 | 1.37× | 4.40 (3.94–4.65) |
-| FP16 | 512×512×512 | 115.1 | 119.2 | 97% | 78.0 | 1.48× | 3.87 (3.65–4.48) |
-| FP16 | 1×4096×4096 | 5.2 | 4.4 | 118% | 8.6 | 0.60× | 4.41 (3.67–4.63) |
-| BF16 | 128×128×128 | 101.0 | 105.8 | 95% | 95.5 | 1.06× | 4.22 (3.79–4.46) |
-| BF16 | 256×256×256 | 115.6 | 120.7 | 96% | 109.9 | 1.05× | 4.28 (3.77–4.47) |
-| BF16 | 512×512×512 | 109.6 | 115.7 | 95% | 114.6 | 0.96× | 4.38 (4.19–4.48) |
-| BF16 | 1024×1024×1024 | 114.9 | 116.1 | 99% | 116.4 | 0.99× | 4.17 (3.91–4.46) |
-| BF16 | 2048×2048×2048 | 114.2 | 112.8 | 101% | 116.7 | 0.98× | 4.24 (3.77–4.58) |
-| BF16 | 1×4096×4096 | 5.1 | 4.3 | 118% | 8.8 | 0.58× | 4.09 (3.70–4.21) |
-Not shown: FP16 1024×1024×1024 (median 4.19, min 3.57 GHz, 3 attempts), FP16 2048×2048×2048 (median 4.11, min 3.09 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
+| FP16 | 128×128×128 | 95.1 | 96.0 | 99% | 61.1 | 1.56× | 4.20 (3.68–4.35) |
+| FP16 | 256×256×256 | 109.3 | 116.1 | 94% | 76.9 | 1.42× | 4.09 (3.84–4.24) |
+| FP16 | 512×512×512 | 105.8 | 107.3 | 99% | 78.4 | 1.35× | 3.95 (3.60–4.37) |
+| FP16 | 1024×1024×1024 | 99.2 | 100.5 | 99% | 69.7 | 1.42× | 3.91 (3.63–4.19) |
+| FP16 | 2048×2048×2048 | 107.2 | 106.8 | 100% | 74.6 | 1.44× | 3.96 (3.63–4.45) |
+| FP16 | 1×4096×4096 | 5.2 | 4.1 | 126% | 9.9 | 0.53× | 4.15 (3.68–4.39) |
+| BF16 | 128×128×128 | 92.2 | 90.0 | 102% | 72.8 | 1.27× | 4.05 (3.79–4.29) |
+| BF16 | 256×256×256 | 106.7 | 109.9 | 97% | 101.9 | 1.05× | 4.19 (3.77–4.41) |
+| BF16 | 512×512×512 | 110.7 | 108.2 | 102% | 111.9 | 0.99× | 4.17 (3.69–4.37) |
+Not shown: BF16 1024×1024×1024 (median 3.95, min 3.29 GHz, 3 attempts), BF16 2048×2048×2048 (median 3.77, min 3.20 GHz, 3 attempts), BF16 1×4096×4096 (median 4.05, min 3.47 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 **INT8 GEMM (uint8 × per-channel int8, FP32 output), x·Wᵀ, single thread**, path `avx_vnni` (PyTorch: `torch.ops.quantized.linear`, prepacked weights, which returns requantized uint8)
 
 | M×N×K | simd-ml-kernels GOP/s | × our FP32 | FP32-conversion path GOP/s | × our FP32 | PyTorch GOP/s | ours / PyTorch | core GHz median (min–max) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 128×128×128 | 267.0 | 2.81× | 93.6 | 0.98× | 125.1 | 2.13× | 4.16 (3.73–4.55) |
-| 256×256×256 | 325.3 | 2.92× | 114.3 | 1.03× | 171.6 | 1.90× | 4.39 (3.61–4.62) |
-| 512×512×512 | 411.1 | 3.68× | 115.7 | 1.04× | 206.1 | 1.99× | 4.12 (3.85–4.44) |
-| 1024×1024×1024 | 380.0 | 3.41× | 108.3 | 0.97× | 235.5 | 1.61× | 4.19 (4.03–4.57) |
-| 2048×2048×2048 | 416.1 | 3.68× | 112.5 | 1.00× | 233.6 | 1.78× | 4.33 (3.74–4.57) |
-| 1×4096×4096 | 58.4 | 4.09× | 65.5 | 4.59× | 43.0 | 1.36× | 4.12 (3.74–4.63) |
+| 512×512×512 | 393.4 | 3.67× | 109.9 | 1.03× | 208.4 | 1.89× | 3.89 (3.74–4.40) |
+Not shown: 128×128×128 (median 4.29, min 3.36 GHz, 3 attempts), 256×256×256 (median 3.91, min 3.49 GHz, 3 attempts), 1024×1024×1024 (median 4.05, min 3.37 GHz, 3 attempts), 2048×2048×2048 (median 3.66, min 3.31 GHz, 3 attempts), 1×4096×4096 (median 4.15, min 3.35 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
-**Decode GEMV y = x·Wᵀ (one row x, W [N, K] as torch.nn.Linear stores it), FP32 output, single thread**; read roof: the read stream timed in each case, interleaved with it; STREAM triad of the run: single-core read stream 35.3 GB/s, STREAM triad 30.3 GB/s (all-core: read not measured, triad not measured). GB/s counts the weights, x and y. (PyTorch: `F.linear` on the same weights in their dtype, which returns that dtype; OpenBLAS: NumPy's matrix-vector product, FP32 only)
+**Decode GEMV y = x·Wᵀ (one row x, W [N, K] as torch.nn.Linear stores it), FP32 output, single thread**; read roof: the read stream timed in each case, interleaved with it; STREAM triad of the run: single-core read stream 34.5 GB/s, STREAM triad 27.9 GB/s (all-core: read not measured, triad not measured). GB/s counts the weights, x and y. (PyTorch: `F.linear` on the same weights in their dtype, which returns that dtype; OpenBLAS: NumPy's matrix-vector product, FP32 only)
 
 | weights | M×N×K | simd-ml-kernels µs | GB/s | % of read roof | % of triad | PyTorch GB/s | ours / PyTorch | OpenBLAS sgemv GB/s | ours / OpenBLAS | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| FP32 | 1×2048×8192 | 2135 | 31.4 | 94% | 104% | 31.0 | 1.02× | 29.6 | 1.06× | 4.03 (3.71–4.49) |
-| FP16 | 1×2048×8192 | 1169 | 28.7 | 85% | 95% | 17.8 | 1.61× | — | — | 4.30 (3.85–4.63) |
-| FP16 | 1×4096×4096 | 1086 | 30.9 | 90% | 102% | 18.7 | 1.65× | — | — | 4.16 (3.90–4.33) |
-| FP16 | 1×4096×11008 | 2784 | 32.4 | 97% | 107% | 18.2 | 1.78× | — | — | 4.14 (3.88–4.44) |
-| BF16 | 1×2048×8192 | 1137 | 29.5 | 88% | 98% | 17.2 | 1.72× | — | — | 4.02 (3.96–4.54) |
-| BF16 | 1×4096×4096 | 1126 | 29.8 | 85% | 99% | 16.4 | 1.82× | — | — | 4.08 (3.91–4.50) |
-| BF16 | 1×4096×11008 | 2976 | 30.3 | 92% | 100% | 17.3 | 1.76× | — | — | 4.06 (3.73–4.53) |
-Not shown: FP32 1×4096×4096 (median 3.94, min 2.85 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
-Not shown: FP32 1×4096×11008 (roof 31.8 GB/s). An implementation ran above 105% of the read roof measured in the same case (`roof_unstable`), so the roof was not reliable there; the numbers remain in the JSON.
+| FP32 | 1×2048×8192 | 2127 | 31.6 | 98% | 113% | 30.1 | 1.05× | 27.6 | 1.15× | 4.04 (3.76–4.42) |
+| FP32 | 1×4096×4096 | 2216 | 30.3 | 91% | 109% | 30.3 | 1.00× | 29.8 | 1.02× | 4.33 (4.11–4.41) |
+| FP16 | 1×2048×8192 | 1227 | 27.4 | 88% | 98% | 17.3 | 1.58× | — | — | 3.95 (3.72–4.35) |
+| BF16 | 1×2048×8192 | 1167 | 28.8 | 87% | 103% | 16.1 | 1.79× | — | — | 3.80 (3.62–4.36) |
+| BF16 | 1×4096×4096 | 1236 | 27.2 | 86% | 98% | 15.5 | 1.75× | — | — | 4.09 (3.70–4.39) |
+Not shown: FP32 1×4096×11008 (median 3.98, min 3.58 GHz, 3 attempts), FP16 1×4096×4096 (median 4.23, min 3.45 GHz, 3 attempts), FP16 1×4096×11008 (median 3.76, min 3.52 GHz, 3 attempts), BF16 1×4096×11008 (median 4.02, min 3.22 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 **Q8_0 decode GEMV** (`gemv_q8_0`: ggml block_q8_0 weights, 34 bytes per 32, x quantized to Q8 inside), path `avx_vnni`, single thread; GB/s counts the weights, x and y; × columns: time of that GEMV / ours, in the same interleaved case. PyTorch: FP32 `F.linear` on the dequantized weights, not a quantized kernel. ggml: llama.cpp v0.7.0 (`620d222`), `test-backend-ops perf` MUL_MAT q8_0 × f32, one thread (OMP_THREAD_LIMIT=1, GGML_OPENMP=ON, GGML_NATIVE=ON), median of 3 runs of its own mean over ≥ 1 s on the same weights (not interleaved).
 
 | M×N×K | simd-ml-kernels µs | GB/s | % of read roof | × our FP32 GEMV | × our BF16 GEMV | PyTorch FP32 µs | ours / PyTorch | ggml µs (own timing) | ggml GB/s | ggml % of roof | ours / ggml | core GHz median (min–max) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1×2048×8192 | 608 | 29.4 | 92% | 3.49× | 1.77× | 2158 | 3.55× | 887 | 20.1 | 63% | 1.46× | 3.87 (3.70–4.16) |
-| 1×4096×4096 | 552 | 32.4 | 95% | 3.61× | 2.05× | 2043 | 3.70× | 957 | 18.7 | 55% | 1.73× | 4.17 (3.92–4.60) |
-| 1×4096×11008 | 1514 | 31.7 | 94% | 3.51× | 1.88× | 5155 | 3.41× | 2750 | 17.4 | 52% | 1.82× | 4.06 (3.77–4.53) |
+| 1×2048×8192 | 673 | 26.5 | 82% | 3.19× | 1.73× | 2220 | 3.30× | 987 | 18.1 | 56% | 1.47× | 4.00 (3.81–4.34) |
+| 1×4096×4096 | 609 | 29.3 | 91% | 3.55× | 1.99× | 2319 | 3.81× | 1012 | 17.6 | 55% | 1.66× | 4.23 (3.75–4.40) |
+Not shown: 1×4096×11008 (median 3.60, min 3.21 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
+
+**Q4_0 decode GEMV** (`gemv_q4_0`: ggml block_q4_0 weights, 18 bytes per 32, x quantized to Q8 inside), path `avx_vnni`, single thread; GB/s counts the weights, x and y; × columns: time of that GEMV / ours, in the same interleaved case (our Q8_0 GEMV on the Q8_0 blocks of the same W). PyTorch: FP32 `F.linear` on the dequantized weights, not a quantized kernel. ggml: llama.cpp v0.7.0 (`620d222`), `test-backend-ops perf` MUL_MAT q4_0 × f32, one thread (OMP_THREAD_LIMIT=1, GGML_OPENMP=ON, GGML_NATIVE=ON), median of 3 runs of its own mean over ≥ 1 s on the same weights (not interleaved).
+
+| M×N×K | simd-ml-kernels µs | GB/s | % of read roof | × our Q8_0 GEMV | × our FP32 GEMV | PyTorch FP32 µs | ours / PyTorch | ggml µs (own timing) | ggml GB/s | ggml % of roof | ours / ggml | core GHz median (min–max) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1×4096×11008 | 1028 | 24.7 | 79% | 1.67× | 6.30× | 5951 | 5.79× | 2221 | 11.4 | 37% | 2.16× | 4.12 (3.73–4.42) |
+Not shown: 1×2048×8192 (median 4.03, min 3.56 GHz, 3 attempts), 1×4096×4096 (median 3.71, min 3.35 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 **Activations and normalization, out-of-place, single thread**
 
 | kernel | shape | simd-ml-kernels Gelem/s | elem/cycle | PyTorch Gelem/s | ours / PyTorch | core GHz median (min–max) |
 |---|---|---:|---:|---:|---:|---:|
-| `gelu_exact` | 1048576 | 0.632 | 0.154 | 0.820 | 0.77× | 4.11 (3.83–4.54) |
-| `gelu_tanh` | 1048576 | 0.410 | 0.100 | 0.381 | 1.07× | 4.08 (3.85–4.60) |
-| `silu` | 1048576 | 0.558 | 0.137 | 0.836 | 0.67× | 4.06 (3.68–4.45) |
-| `relu` | 1048576 | 1.846 | 0.432 | 2.902 | 0.64× | 4.27 (3.79–4.52) |
-| `softmax` | 1024×1024 | 1.097 | 0.249 | 1.202 | 0.91× | 4.41 (3.96–4.62) |
-| `layer_norm` | 1024×1024 | 2.459 | 0.557 | 2.923 | 0.84× | 4.41 (3.98–4.59) |
+| `gelu_exact` | 1048576 | 2.591 | 0.643 | 1.510 | 1.72× | 4.03 (3.60–4.43) |
+| `gelu_tanh` | 1048576 | 1.442 | 0.368 | 0.499 | 2.89× | 3.92 (3.75–4.42) |
+| `relu` | 1048576 | 4.712 | 1.139 | 4.409 | 1.07× | 4.14 (3.79–4.40) |
+| `softmax` | 1024×1024 | 1.671 | 0.415 | 1.334 | 1.25× | 4.02 (3.61–4.30) |
+| `layer_norm` | 1024×1024 | 3.965 | 0.973 | 4.043 | 0.98× | 4.08 (3.77–4.36) |
+Not shown: `silu` 1048576 (median 4.10, min 3.59 GHz, 3 attempts). A clock sample stayed below the 3.6 GHz P-core threshold (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
 
 #### cloud-xeon-emr-2vcpu, 2026-10-18, commit `255f27755c31`
 
