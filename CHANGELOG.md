@@ -6,6 +6,22 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
+### Added
+- **Threaded decode GEMV** in OpenMP builds (`-DSIMD_ML_OPENMP=ON`): `sgemm` /
+  `sgemm_f16` / `sgemm_bf16` with `trans_b=True` and at most 8 rows of x, and
+  `gemv_q8_0` / `gemv_q4_0`, split W's rows into one contiguous slice per
+  thread (whole 8-row groups), up to `get_num_threads()` threads and at
+  least 64 KiB of weights per thread; results are bitwise the same for any
+  thread count. No new API. docs/DESIGN.md §2.10. Measured on the reference
+  laptop's 4 P-cores (`lnl-226v-wsl_2026-10-20_da63d7762dfc_threads`): at 4 threads Q8_0 1.54–1.67× and Q4_0
+  1.52–2.19× ggml's MUL_MAT at the same thread count on the same weights,
+  except Q4_0 512×2048 (0.97×); Llama-3.2-1B Q4_0 per-token GEMV time 11.6 ms
+  against ggml's 15.1 ms at 4 threads.
+- `python -m simd_ml_kernels bench --cases threads [--threads 1,2,4]`: the
+  threaded GEMV against the read roof at the same thread count, PyTorch at
+  `torch.set_num_threads(N)` and ggml with `OMP_THREAD_LIMIT=N`, including
+  the Llama-3.2-1B decode shapes; written to its own `..._threads.json`.
+
 ### Fixed
 - `build_info()["git_commit"]` is the bare 12-digit commit hash again (plus
   `-dirty` for local changes). Since the v0.3.0 tag, CMake's `git describe`

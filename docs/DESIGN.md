@@ -609,7 +609,50 @@ The clock is sampled on every thread of a team of N at once, and
 WSL2 placed on one) is caught. Scaling efficiency = GB/s at N threads /
 (N × GB/s at one thread).
 
-**Measured**: see BENCHMARKS.md (threaded runs).
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_da63d7762dfc_threads`, the laptop's 4 P-cores, path
+`avx_vnni`; Windows' per-processor counters during the run: processors 0–3
+62–64% busy on average, the E-cores 9–10%, so WSL2 kept the 4 vCPUs on the
+P-cores):
+
+- **Read roof.** 31.6–35.4 GB/s on one thread, 54–62 on two, 80–95 on four:
+  four P-cores read only 2.4–2.9× what one does. Scaling efficiency of
+  even an ideal read loop is therefore 60–72% at 4 threads, and that is
+  where ours lands on the large shapes (Q8_0 52–62%, Q4_0 53–72%,
+  FP16/BF16 58–62%).
+- **Per-core efficiency holds.** % of the read roof at the same thread
+  count, large shapes (≥ 2048×8192): Q8_0 94–99% on one thread, 74–98% on
+  four; Q4_0 77–86% and 64–87%; FP16/BF16 88–97% and 77–88%. ggml on the same
+  cases: Q8_0 49–62% and 56–72%, Q4_0 37–48% and 44–55%.
+- **Against ggml at the same thread count** (ours on the same weights every
+  call, as ggml runs): one thread Q8_0 1.75–1.91× on the large shapes (1.04×
+  and 1.18× at 512×2048 and 2048×2048), Q4_0 1.46–2.27× on all; four
+  threads Q8_0 1.54–1.67× (the five shapes shown), Q4_0 1.52–2.19× on every
+  shape but the smallest. With our weights rotated past the caches (ggml's
+  stay in cache where they fit) four threads are still 1.15–1.66× (Q8_0) and
+  1.08–1.94× (Q4_0) faster on those shapes.
+- **Where we do not win: the smallest matrix.** Q4_0 512×2048 (k/v
+  projection, 576 KiB) on four threads: 12 µs on the same weights, the same
+  as ggml (0.97×), 16 µs rotated (0.76×). This is not the memory limit (42%
+  of the roof rotated): x is quantized on the calling thread before the
+  parallel region at about 1.6 ns per value (scalar unit, exact IEEE
+  rounding; dev runs: 4.0 µs at K = 2048, 13.5 at K = 8192) and the Python
+  call costs about 0.7 µs, where ggml quantizes x across its threads, with
+  SIMD, inside one graph. The same serial part is 8–12% of the 4-thread
+  Q4_0 down projection (K = 8192, 117–166 µs). Splitting the quantization across the team or
+  vectorizing it exactly would remove most of it (not done here).
+- **Per-token GEMV time, Llama-3.2-1B** (16 layers × 7 projections +
+  lm_head, ours rotated, ggml on reused weights): Q4_0 26.3 / 15.8 / 11.6 ms
+  at 1 / 2 / 4 threads against ggml's 46.1 / 26.3 / 15.1 (1.75×, 1.66×,
+  1.31×); Q8_0 41.4 / 24.6 ms against 66.2 / 36.3 (1.60×, 1.48×), at 4 threads
+  not computed: in two of its cases (512×2048, 2048×2048) ggml, whose 0.6 and
+  2.2 MB of weights stay in cache, read above 105% of the roof, so the
+  105% rule (§2.7) hides those cases. The model's dimensions are the model
+  card's (its config.json is in a gated repository and was not read).
+- **PyTorch** at the same thread count: ours is 0.99–1.05× its FP32
+  `F.linear` (both at the roof) and 1.42–2.04× its BF16 `F.linear`.
+- Not shown in that run: 4 cases whose slowest thread's clock dipped below
+  3.0 GHz in every attempt, 1 FP32 case with an unstable roof, and the two
+  Q8_0 cases above.
 
 ## 3. Elementwise kernels and normalization
 

@@ -86,7 +86,8 @@ def _excluded_note(doc: dict, cases: list[tuple[str, dict]]) -> str:
     min_ghz = doc["protocol"].get("min_ghz")
     items = ", ".join(f"{name} (median {r['core_ghz']['median']:.2f}, min {r['core_ghz']['min']:.2f} GHz, "
                       f"{r['core_ghz']['attempts']} attempts)" for name, r in cases)
-    return (f"\nNot shown: {items}. A clock sample stayed below the {min_ghz} GHz P-core threshold "
+    where = ("threshold on the slowest thread" if _is_threads(doc) else "P-core threshold")
+    return (f"\nNot shown: {items}. A clock sample stayed below the {min_ghz} GHz {where} "
             f"(`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.")
 
 
