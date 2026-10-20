@@ -6,6 +6,14 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
+### Changed
+- Threaded `gemv_q8_0` / `gemv_q4_0`: x is quantized by the thread team
+  (one run of blocks per thread) instead of the calling thread alone; same
+  quants, results bitwise unchanged.
+- `bench`: rows that reuse their weights on every call (ggml, our "same
+  weights" row) no longer count towards `roof_unstable`; the Llama-3.2-1B
+  shapes come from its config.json when `SIMD_ML_LLAMA_CONFIG` points at it.
+
 ### Added
 - **Threaded decode GEMV** in OpenMP builds (`-DSIMD_ML_OPENMP=ON`): `sgemm` /
   `sgemm_f16` / `sgemm_bf16` with `trans_b=True` and at most 8 rows of x, and

@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <algorithm>
 #include <vector>
 #include "../src/kernels/gemm/avx2_gemm_packed.hpp"
@@ -297,6 +298,38 @@ bool test_gemv_bitwise(const simd_ml::KernelTable& t) {
     return ok;
 }
 
+/** x quantized by the team: a NaN or ±Inf in any thread's blocks makes every y NaN. */
+bool test_gemv_special_x(const simd_ml::KernelTable& t) {
+    const double saved = simd_ml::gemm::set_gemv_min_bytes_per_thread(1.0);
+    const int N = 67, K = 256;   // 8 blocks of x
+    std::vector<float> w((std::size_t)N * K), x(K);
+    fill(w, 8);
+    std::vector<std::uint8_t> q8(simd_ml::quant::q8_0_row_bytes(K) * N), q4((std::size_t)N * (K / 32) * 18);
+    simd_ml::quant::quantize_q8_0_rows(w.data(), N, K, q8.data());
+    simd_ml::quant::quantize_q4_0_rows(w.data(), N, K, q4.data());
+    const auto all_nan = [](const std::vector<float>& y) {
+        for (float v : y) {
+            std::uint32_t u; std::memcpy(&u, &v, 4);
+            if ((u & 0x7fffffffu) <= 0x7f800000u) return false;   // bit test: kernels use -ffast-math
+        }
+        return true;
+    };
+    bool ok = true;
+    for (int threads : {1, 2, 3, 4, 8})
+        for (int pos : {0, 100, 255})
+            for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+                fill(x, 9);
+                x[pos] = bad;
+                set_num_threads(threads);
+                std::vector<float> y8(N, 1.0f), y4(N, 1.0f);
+                t.gemv_q8_0(N, K, x.data(), q8.data(), y8.data());
+                t.gemv_q4_0(N, K, x.data(), q4.data(), y4.data());
+                ok &= all_nan(y8) && all_nan(y4);
+            }
+    simd_ml::gemm::set_gemv_min_bytes_per_thread(saved);
+    return report(ok, "q8_0/q4_0: NaN/Inf in x (any block) -> all y NaN, 1/2/3/4/8 threads");
+}
+
 }  // namespace
 
 int run_thread_tests() {
@@ -311,7 +344,8 @@ int run_thread_tests() {
         const bool bitwise = test_bitwise(t);
         const bool concurrent = test_concurrent_callers(t);
         const bool gemv = test_gemv_bitwise(t);
-        return bitwise && concurrent && gemv;
+        const bool special = test_gemv_special_x(t);
+        return bitwise && concurrent && gemv && special;
     });
     set_num_threads(original);
     std::printf("  Overall: %s\n", ok ? "ALL PASS" : "SOME FAILURES");

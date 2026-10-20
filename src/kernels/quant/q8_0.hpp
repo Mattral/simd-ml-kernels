@@ -76,8 +76,9 @@ using Q8RowsFn = void (*)(int N, int nb, const std::int8_t* xq, const float* dx,
  * into per-thread scratch (may throw std::bad_alloc), then calls rows on W's
  * rows of block_bytes-byte blocks (34: Q8_0, 18: Q4_0). In OpenMP builds the
  * rows are split into one contiguous slice per thread (gemm::gemv_threads,
- * gemv_slice: whole 8-row groups), all reading the same quantized x; each
- * output is computed by one thread exactly as with one thread. K % 32 == 0 is
+ * gemv_slice: whole 8-row groups); x is quantized by the team (one run of
+ * blocks per thread, then a barrier) into the same quants one thread writes,
+ * and each output is computed by one thread exactly as with one thread. K % 32 == 0 is
  * the caller's check; K == 0 gives y = 0.
  */
 void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* y, Q8RowsFn rows,

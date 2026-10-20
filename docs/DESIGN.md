@@ -229,8 +229,15 @@ GEMV case, interleaved with its implementations, and that case's fastest
 stream is its roof (`roof_read_gbs`); the triad is measured once per run. A
 roof measured once per run drifted by several percent between runs on the
 laptop, which moved every percentage with it. A case where any implementation
-exceeds 105% of its own roof is marked `roof_unstable` and not published
-(make_tables.py lists it under "Not shown", as for `--min-ghz`):
+that reads rotated weights exceeds 105% of its own roof is marked
+`roof_unstable` and not published (make_tables.py lists it under "Not shown",
+as for `--min-ghz`). Rows that read the same weights on every call (ggml's
+test-backend-ops, our "same weights" row in threaded runs) are left out of the
+check: where their weights fit in the caches they legitimately read faster
+than the DRAM roof (in the first threaded run ggml read 2.2 MB of Q8_0
+weights at 118% of the 4-thread roof while our rotated rows read 59–83%, and
+the rule hid the whole case). Runs before this change applied the check to
+those rows too; their JSON flags are kept as recorded:
 
 - *read stream*: the fastest read-only loop we have, including the GEMV
   access pattern, over one large float32 array (4 bytes per element, nothing
@@ -556,8 +563,16 @@ for FP32/16-bit, 8 for Q8_0/Q4_0, whose next-group prefetch then stays
 inside the thread's own slice), spread so that thread sizes differ by at
 most one group. Each thread runs the single-threaded loop on its slice and
 writes its own part of y: no atomics, no reduction, one fork and one join per
-call. For Q8_0/Q4_0, x is quantized once by the calling thread before the
-parallel region and only read by the team. Contiguous slices rather than
+call. For Q8_0/Q4_0, x is quantized once per call by the team: each thread
+quantizes one contiguous run of 32-value blocks with the scalar code (blocks
+are independent, so the quants are the ones one thread writes), a barrier,
+then every thread reads all of x for its rows; a NaN or ±Inf in any block
+makes every y NaN (tested at 1–8 threads). The first version quantized x on
+the calling thread before the region, at about 1.6 ns per value (scalar unit,
+exact IEEE rounding): 4.0 µs at K = 2048, most of a 4-thread Q4_0 512×2048
+call. Dev runs, same weights back to back, 4 threads, before → after:
+Q4_0 512×2048 9.9 → 7.5 µs, 2048×2048 24.5 → 21.7; Q8_0 12.2 → 9.7 and
+33.1 → 30.7 (one thread unchanged within noise). Contiguous slices rather than
 chunks handed out dynamically (as the GEMM does, §2.4): a slice is a few
 sequential streams per thread, and with the threads pinned to cores of one
 type there is no slow core to balance against; on a hybrid CPU with E-cores
