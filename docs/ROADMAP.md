@@ -207,10 +207,9 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   3. *Q4_0 GEMV* (done, W5 PR3): `quantize_q4_0` / `gemv_q4_0` (ggml
      `block_q4_0`, byte-identical, checked against blocks written by
      llama.cpp v0.7.0); two weight rows per register (6.5 instructions per
-     row and block). Laptop (`lnl-226v-wsl_2026-10-20_42f64c7d76b3`, 1×4096×11008): 79% of the roof,
-     2.16× ggml's Q4_0 MUL_MAT on one thread. DESIGN.md §2.9. Open: the two
-     other shapes were below the clock threshold in every publication run
-     that day (rerun on a cooler machine); AVX-512 run.
+     row and block). Laptop (`lnl-226v-wsl_2026-10-20_42f64c7d76b3`): 68–83% of the roof,
+     1.58–2.19× ggml's Q4_0 MUL_MAT on one thread, 1.38–1.67× our Q8_0 GEMV.
+     DESIGN.md §2.9. Open: AVX-512 run.
   4. Fused RMSNorm and SwiGLU (`silu(gate) * up`) epilogues.
   5. Flash-decoding attention for one query (online softmax, GQA, split-K).
   6. Opt-in row-split OpenMP GEMV, judged against the all-core roofs.

@@ -518,17 +518,23 @@ instructions where we spend 6.5. Note: Q4_0 weights at 1×4096×4096 and
 the same weights on every run (ours rotate copies), so part of ggml's reads
 there may hit the cache; the comparison favours ggml on those two shapes.
 
-**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_42f64c7d76b3`, one P-core, path `avx_vnni`). Only
-1×4096×11008 passed the clock check in that run (1×4096×4096 and 1×2048×8192
-each had a clock sample below 3.6 GHz in all three attempts; their rows stay
-in the JSON, not in the tables; three publication runs on this laptop that
-day all had such dips). At 1×4096×11008: 1028 µs, 24.7 GB/s, 79% of the
-case's read roof; 1.67× faster than our Q8_0 GEMV and 6.30× than our FP32
-GEMV in the same case (they read 1.9× and 7.1× the bytes); 5.79× PyTorch's
-FP32 `F.linear` on the dequantized weights. ggml (llama.cpp v0.7.0, one
-thread): 2221 µs, 37% of the roof; ours is 2.16× faster. The remaining gap to
-the roof is the loop's instruction cost (above): Q4_0 is about balanced
-between memory and compute on this core, where Q8_0 is memory-bound.
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_42f64c7d76b3`, one P-core, path `avx_vnni`), at
+1×4096×4096, 1×4096×11008 and 1×2048×8192:
+
+- 383, 890 and 397 µs: 24.7, 28.6 and 23.9 GB/s, 70%, 83% and 68% of each
+  case's read roof (34.5–35.4 GB/s in this run); 1.45×, 1.67× and 1.38×
+  faster than our Q8_0 GEMV and 5.40×, 6.05× and 5.12× than our FP32 GEMV in
+  the same case (they read 1.9× and 7.1× the bytes); 5.58×, 6.03× and 5.14×
+  PyTorch's FP32 `F.linear` on the dequantized weights.
+- ggml (llama.cpp v0.7.0, one thread): 610, 1948 and 628 µs, 38–44% of the
+  same roofs; ours is 1.58–2.19× faster.
+- The rest of the gap to the roof is the loop's instruction cost (above):
+  Q4_0 is about balanced between memory and compute on this core, where
+  Q8_0 is memory-bound. Four earlier runs of the same commit were set aside
+  because their clock dipped below 3.6 GHz in many cases (other programs
+  running, then the default laptop fan profile; this run's note records the
+  fan profile set to Performance). Their Q4_0 medians agreed with these
+  (1.6–2.3× ggml).
 
 ---
 
