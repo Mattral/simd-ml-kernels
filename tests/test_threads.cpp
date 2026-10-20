@@ -13,14 +13,23 @@
  *   5. GEMMs called concurrently from the threads of an enclosing OpenMP
  *      region (each runs single-threaded, on its own buffers) match the
  *      sequential results bitwise.
+ *   6. Decode GEMV: gemv_slice tiles [0, N) in whole 8-row groups, balanced
+ *      to one group; gemv_threads respects the bytes-per-thread minimum, the
+ *      row groups and enclosing parallel regions; every table's FP32/FP16/
+ *      BF16 x·Wᵀ (M = 1 and 3) and gemv_q8_0 / gemv_q4_0 give bitwise the
+ *      1-thread result with 2, 3, 4 and 8 threads (minimum lowered so small
+ *      shapes split; N with every remainder mod 8).
  * The GEMM suite itself (test_gemm_packed.cpp) runs with 1, 2 and 4 threads.
  */
 
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <algorithm>
 #include <vector>
 #include "../src/kernels/gemm/avx2_gemm_packed.hpp"
+#include "../src/kernels/quant/q8_0.hpp"
+#include "../src/kernels/quant/q4_0.hpp"
 #include "kernel_tables.hpp"
 
 #ifdef SIMD_ML_OPENMP
@@ -181,6 +190,113 @@ bool test_concurrent_callers(const simd_ml::KernelTable& t) {
 #endif
 }
 
+bool test_gemv_slices() {
+    using simd_ml::gemm::gemv_slice;
+    using simd_ml::gemm::kGemvRowGroup;
+    int bad = 0, cases = 0;
+    for (int team = 1; team <= 16; ++team)
+        for (int N : {1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 100, 512, 1003, 2048, 8193, 128256}) {
+            ++cases;
+            int prev = 0, smallest = N, largest = 0;
+            bool good = true;
+            for (int t = 0; t < team; ++t) {
+                const simd_ml::gemm::GemvSlice s = gemv_slice(N, t, team);
+                good &= s.lo == prev && s.hi >= s.lo && s.lo % kGemvRowGroup == 0 &&
+                        (s.hi % kGemvRowGroup == 0 || s.hi == N);
+                smallest = std::min(smallest, s.hi - s.lo);
+                largest = std::max(largest, s.hi - s.lo);
+                prev = s.hi;
+            }
+            good &= prev == N;
+            const int groups = (N + kGemvRowGroup - 1) / kGemvRowGroup;
+            if (groups >= team) good &= largest - smallest <= kGemvRowGroup;   // within one group
+            if (!good && bad++ < 5) std::printf("    team=%d N=%d\n", team, N);
+        }
+    char msg[96];
+    std::snprintf(msg, sizeof msg, "gemv_slice tiles [0, N) in whole 8-row groups (%d cases)", cases);
+    return report(bad == 0, msg);
+}
+
+bool test_gemv_thread_count() {
+    using simd_ml::gemm::gemv_threads;
+    bool ok = true;
+    set_num_threads(4);
+    ok &= report(gemv_threads(4096, 1000.0) == 1, "gemv_threads(1 kB of weights) == 1");
+#ifdef SIMD_ML_OPENMP
+    ok &= report(gemv_threads(4096, 4096.0 * 4096 * 18 / 32) == 4,
+                 "gemv_threads(Q4_0 4096x4096) == 4 with set_num_threads(4)");
+    ok &= report(gemv_threads(17, 1e9) == 3, "gemv_threads(N = 17) == 3 (row groups)");
+    int inner = -1;
+#pragma omp parallel num_threads(2)
+    {
+#pragma omp single
+        inner = gemv_threads(4096, 1e9);
+    }
+    ok &= report(omp_get_max_threads() < 2 || inner == 1, "gemv_threads == 1 inside a parallel region");
+#else
+    ok &= report(gemv_threads(4096, 1e9) == 1, "gemv_threads == 1 without OpenMP");
+#endif
+    return ok;
+}
+
+/** y from one decode GEMV of every kind (FP32 M=1 and M=3, FP16, BF16, Q8_0, Q4_0) with `threads`. */
+std::vector<float> run_gemv(const simd_ml::KernelTable& t, int N, int K, int threads) {
+    std::vector<float> x(3 * (std::size_t)K), w((std::size_t)N * K);
+    fill(x, 5); fill(w, 6);
+    std::vector<std::uint16_t> x16(x.size()), w16(w.size()), xb(x.size()), wb(w.size());
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x16[i] = simd_ml::quant::fp32_to_fp16(x[i]);
+        std::uint32_t u; std::memcpy(&u, &x[i], 4); xb[i] = (std::uint16_t)(u >> 16);
+    }
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        w16[i] = simd_ml::quant::fp32_to_fp16(w[i]);
+        std::uint32_t u; std::memcpy(&u, &w[i], 4); wb[i] = (std::uint16_t)(u >> 16);
+    }
+    std::vector<std::uint8_t> q8(simd_ml::quant::q8_0_row_bytes(K) * N), q4((std::size_t)N * (K / 32) * 18);
+    simd_ml::quant::quantize_q8_0_rows(w.data(), N, K, q8.data());
+    simd_ml::quant::quantize_q4_0_rows(w.data(), N, K, q4.data());
+    set_num_threads(threads);
+    std::vector<float> out, y(3 * (std::size_t)N);
+    const auto take = [&](std::size_t n) { out.insert(out.end(), y.begin(), y.begin() + n); };
+    // Outputs that must be overwritten start from values that differ per
+    // thread count, so a row no thread computed cannot compare equal.
+    const auto stale = [&]() { fill(y, 100u + (unsigned)threads); };
+    fill(y, 7);   // beta = 0.5 reads C: the same start for every count
+    t.sgemm(false, true, 1, N, K, 1.0f, x.data(), K, w.data(), K, 0.5f, y.data(), N); take(N);
+    stale();
+    t.sgemm(false, true, 3, N, K, -1.5f, x.data(), K, w.data(), K, 0.0f, y.data(), N); take(3 * (std::size_t)N);
+    stale();
+    t.sgemm_f16(true, 1, N, K, 1.0f, x16.data(), K, w16.data(), K, 0.0f, y.data(), N); take(N);
+    stale();
+    t.sgemm_bf16(true, 2, N, K, 1.0f, xb.data(), K, wb.data(), K, 0.0f, y.data(), N); take(2 * (std::size_t)N);
+    stale();
+    t.gemv_q8_0(N, K, x.data(), q8.data(), y.data()); take(N);
+    stale();
+    t.gemv_q4_0(N, K, x.data(), q4.data(), y.data()); take(N);
+    return out;
+}
+
+bool test_gemv_bitwise(const simd_ml::KernelTable& t) {
+    // Lower the minimum so that every shape below splits across the team.
+    const double saved = simd_ml::gemm::set_gemv_min_bytes_per_thread(1.0);
+    bool ok = true;
+    for (const auto& nk : {std::make_pair(1, 64), std::make_pair(9, 32), std::make_pair(31, 96),
+                           std::make_pair(63, 4096), std::make_pair(100, 160), std::make_pair(257, 1024),
+                           std::make_pair(1003, 288), std::make_pair(2048, 64), std::make_pair(4101, 128)}) {
+        const int N = nk.first, K = nk.second;
+        const std::vector<float> ref = run_gemv(t, N, K, 1);
+        int differ = 0;
+        for (int threads : {2, 3, 4, 8})
+            if (run_gemv(t, N, K, threads) != ref) differ = threads;
+        char msg[112];
+        std::snprintf(msg, sizeof msg, "GEMV %5dx%5d fp32/f16/bf16/q8_0/q4_0: 2/3/4/8 threads == 1 thread%s",
+                      N, K, differ ? " (differs)" : "");
+        ok &= report(differ == 0, msg);
+    }
+    simd_ml::gemm::set_gemv_min_bytes_per_thread(saved);
+    return ok;
+}
+
 }  // namespace
 
 int run_thread_tests() {
@@ -189,10 +305,13 @@ int run_thread_tests() {
     bool ok = test_set_get();
     ok &= test_chunks();
     ok &= test_thread_count();
+    ok &= test_gemv_slices();
+    ok &= test_gemv_thread_count();
     ok &= for_each_kernel_table([](const simd_ml::KernelTable& t) {
         const bool bitwise = test_bitwise(t);
         const bool concurrent = test_concurrent_callers(t);
-        return bitwise && concurrent;
+        const bool gemv = test_gemv_bitwise(t);
+        return bitwise && concurrent && gemv;
     });
     set_num_threads(original);
     std::printf("  Overall: %s\n", ok ? "ALL PASS" : "SOME FAILURES");

@@ -41,11 +41,11 @@ void q4_0_rows_avx2(int N, int nb, const std::int8_t* xq, const float* dx,
 void gemv_q4_0_avx2(int N, int K, const float* x, const std::uint8_t* Wq, float* y) {
 #ifdef SIMD_ML_HAVE_AVXVNNI
     if (gemm::avx_vnni_available()) {
-        gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_avxvnni);
+        gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_avxvnni, kQ4_0Bytes);
         return;
     }
 #endif
-    gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_avx2);
+    gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_avx2, kQ4_0Bytes);
 }
 
 }  // namespace quant

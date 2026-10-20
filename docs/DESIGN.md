@@ -137,8 +137,8 @@ OpenMP is a build option (`-DSIMD_ML_OPENMP=ON`), off by default; whether to
 turn it on by default waits for a scaling table on a non-hybrid 8-core CPU.
 In an OpenMP build one packed GEMM call uses up to `get_num_threads()`
 threads: `OMP_NUM_THREADS` (else one per logical CPU) until
-`set_num_threads(n)` is called. The small-product paths (direct, dot) stay
-single-threaded.
+`set_num_threads(n)` is called. The direct path stays single-threaded; the
+dot path (x·Wᵀ with few rows) splits W's rows across threads (§2.10).
 
 All threads of a call work on the same NC-wide column block, one block after
 the other. For each KC panel they pack the KC×NC B panel together (each a
@@ -258,8 +258,8 @@ through the misses it can keep in flight (its fill buffers and prefetchers),
 not through the memory controller's limit; all cores together read several
 times more. So the single-threaded GEMV is judged against the single-core
 roofs, and an all-core triad and read stream are recorded (OpenMP builds that
-may use more than one CPU) for the threaded GEMV planned after the quantized
-ones, which will be judged against those.
+may use more than one CPU). The threaded GEMV (§2.10) is judged against a read
+roof measured with the same number of threads.
 
 **Structure** (`dot_rows` / `gemm_dot_trans_b` in `avx2_gemm_packed.cpp` and
 `avx512_gemm_packed.cpp`). W is never packed: packing copies all of W once per
@@ -366,7 +366,7 @@ Paths (`build_info()["q8_0_path"]`): `avx_vnni` (VEX `vpdpbusd`), `avx2`
 (`vpmaddubsw` + `vpmaddwd`), `avx512_vnni` (EVEX `vpdpbusd` on YMM: a ZMM
 register would need two loads and a lane insert per two blocks plus a
 per-lane scale vector, in a loop bound by memory; correct under SDE, speed
-not measured), `scalar` (exact int sums per block). All single-threaded.
+not measured), `scalar` (exact int sums per block). Threads: §2.10.
 
 **Error.** Against the exact sum of the quantized operands (every path,
 tested): |y − y64| ≤ 2·(K/32 + 4)·u·Σ_b |dw·dx|·Σ_i |qw·qx|. Against the FP32
@@ -494,7 +494,7 @@ byte; every 8 blocks (144 bytes) skips lines and loses ~10 points.
 
 Paths: the same as `gemv_q8_0` (`build_info()["q8_0_path"]` names it):
 `avx_vnni`, `avx2` (`vpmaddubsw`), `avx512_vnni` (EVEX `vpdpbusd` on YMM;
-correct under SDE, speed not measured), `scalar`. Single-threaded.
+correct under SDE, speed not measured), `scalar`. Threads: §2.10.
 
 **Error.** Against the exact sum of the quantized operands (every path,
 tested): |y − y64| ≤ 2·(K/32 + 4)·u·Σ_b |dw·dx|·Σ_i |(qw − 8)·qx|. Against
@@ -537,6 +537,122 @@ there may hit the cache; the comparison favours ggml on those two shapes.
   (1.6–2.3× ggml).
 
 ---
+
+### 2.10 Threaded decode GEMV (OpenMP builds)
+
+One core cannot saturate DRAM (§2.7): on the reference laptop one P-core
+reads about 33 GB/s, all four about 75 (dev runs). A decode GEMV is
+nothing but reading W, so more cores reading disjoint parts of W is the only
+way to go faster. In an OpenMP build, the FP32/FP16/BF16 dot path
+(`sgemm(x, W, trans_b=True)` and the 16-bit forms, at most `kDotRowsMax`
+rows of x) and `gemv_q8_0` / `gemv_q4_0` use up to `get_num_threads()`
+threads, set as for the GEMM (`set_num_threads`, else `OMP_NUM_THREADS`);
+there is no new API.
+
+**Split.** The N output rows (rows of W) are cut into one contiguous slice
+per thread (`gemv_slice` in `dispatch.cpp`), each a whole number of 8-row
+groups (`kGemvRowGroup`, the row block of every GEMV loop: 4 or 8 rows
+for FP32/16-bit, 8 for Q8_0/Q4_0, whose next-group prefetch then stays
+inside the thread's own slice), spread so that thread sizes differ by at
+most one group. Each thread runs the single-threaded loop on its slice and
+writes its own part of y: no atomics, no reduction, one fork and one join per
+call. For Q8_0/Q4_0, x is quantized once by the calling thread before the
+parallel region and only read by the team. Contiguous slices rather than
+chunks handed out dynamically (as the GEMM does, §2.4): a slice is a few
+sequential streams per thread, and with the threads pinned to cores of one
+type there is no slow core to balance against; on a hybrid CPU with E-cores
+in the team the slowest thread sets the time.
+
+**Bitwise the same for any thread count.** Every slice starts on a group
+boundary, so each output row is computed in the same row group, by the same
+code, in the same order over K as with one thread (tested for 1, 2, 3, 4 and
+8 threads, N with every remainder mod 8, every table, C++ and Python).
+
+**How many threads** (`gemv_threads`): at most `get_num_threads()`, at most
+one per row group, one inside an enclosing parallel region (never nested),
+and each thread gets at least 64 KiB of weights. Dev runs on the laptop's
+P-cores (K = 2048, weights rotated past the caches, each thread count called
+back to back): starting and stopping the team costs 0.3–0.6 µs (a Q4_0 GEMV
+of 9 KiB in L1: 1.47 µs on one thread, 1.7–1.9 on two, 2.0 on four); from
+64 KiB per thread every format ran 1.17–2.4× faster on 2 threads and
+1.21–3.9× on 4, and at 18–36 KiB per thread still 1.0–1.35×. The margin is
+for threads that are asleep: libgomp's idle threads spin for a while after a
+parallel region, then sleep, and when thread counts alternated call by call
+waking them cost 40–70 µs under WSL2. The smallest Llama-3.2-1B matrix
+(k/v projection, 512×2048) is 576 KiB in Q4_0, 144 KiB per thread on four.
+
+**Benchmark protocol** (`bench --cases threads`, its own run and JSON; the
+process pinned to the CPUs to use, on the laptop `taskset -c 0-3`, its 4
+P-cores; the 4 low-power E-cores are left out): for each thread count N and
+case,
+
+1. ours and the read roof at N threads (the part sums and the GEMV row
+   patterns of §2.7, each thread reading one contiguous part) in rounds: our
+   calls 5 at a time back to back, then each roof loop once. A short GEMV
+   timed right after a 64 MiB roof sweep ran slower than after another GEMV
+   (dev, Q4_0 512×2048 rotated: 60 µs on one thread and 38–48 on four after a
+   sweep, 32 and 13 back to back); in decode the operation before a GEMV is
+   another GEMV. Weights rotate over at least 64 MiB of copies: with 24 MiB,
+   4 threads read Q8_0 weights faster than the 4-thread read stream in dev
+   runs (four 2.5 MiB L2 caches, the 8 MiB L3 and Lunar Lake's memory-side
+   cache together hold more than 2× the 8 MiB LLC that CPUID reports). Ours
+   is also timed on the same weights every call ("same weights"), which is
+   how test-backend-ops runs ggml (§2.8);
+2. PyTorch `F.linear` at `torch.set_num_threads(N)` (FP32, BF16), timed
+   alone after ours: PyTorch has its own OpenMP runtime, whose idle threads
+   would spin against ours if the calls alternated;
+3. ggml's MUL_MAT with `OMP_THREAD_LIMIT=N` on the same CPUs; the thread
+   check expects exactly N threads in the timed window.
+
+The clock is sampled on every thread of a team of N at once, and
+`--min-ghz` applies to the slowest, so a thread on an E-core (or a vCPU that
+WSL2 placed on one) is caught. Scaling efficiency = GB/s at N threads /
+(N × GB/s at one thread).
+
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-20_da63d7762dfc_threads`, the laptop's 4 P-cores, path
+`avx_vnni`; Windows' per-processor counters during the run: processors 0–3
+62–64% busy on average, the E-cores 9–10%, so WSL2 kept the 4 vCPUs on the
+P-cores):
+
+- **Read roof.** 31.6–35.4 GB/s on one thread, 54–62 on two, 80–95 on four:
+  four P-cores read only 2.4–2.9× what one does. Scaling efficiency of
+  even an ideal read loop is therefore 60–72% at 4 threads, and that is
+  where ours lands on the large shapes (Q8_0 52–62%, Q4_0 53–72%,
+  FP16/BF16 58–62%).
+- **Per-core efficiency holds.** % of the read roof at the same thread
+  count, large shapes (≥ 2048×8192): Q8_0 94–99% on one thread, 74–98% on
+  four; Q4_0 77–86% and 64–87%; FP16/BF16 88–97% and 77–88%. ggml on the same
+  cases: Q8_0 49–62% and 56–72%, Q4_0 37–48% and 44–55%.
+- **Against ggml at the same thread count** (ours on the same weights every
+  call, as ggml runs): one thread Q8_0 1.75–1.91× on the large shapes (1.04×
+  and 1.18× at 512×2048 and 2048×2048), Q4_0 1.46–2.27× on all; four
+  threads Q8_0 1.54–1.67× (the five shapes shown), Q4_0 1.52–2.19× on every
+  shape but the smallest. With our weights rotated past the caches (ggml's
+  stay in cache where they fit) four threads are still 1.15–1.66× (Q8_0) and
+  1.08–1.94× (Q4_0) faster on those shapes.
+- **Where we do not win: the smallest matrix.** Q4_0 512×2048 (k/v
+  projection, 576 KiB) on four threads: 12 µs on the same weights, the same
+  as ggml (0.97×), 16 µs rotated (0.76×). This is not the memory limit (42%
+  of the roof rotated): x is quantized on the calling thread before the
+  parallel region at about 1.6 ns per value (scalar unit, exact IEEE
+  rounding; dev runs: 4.0 µs at K = 2048, 13.5 at K = 8192) and the Python
+  call costs about 0.7 µs, where ggml quantizes x across its threads, with
+  SIMD, inside one graph. The same serial part is 8–12% of the 4-thread
+  Q4_0 down projection (K = 8192, 117–166 µs). Splitting the quantization across the team or
+  vectorizing it exactly would remove most of it (not done here).
+- **Per-token GEMV time, Llama-3.2-1B** (16 layers × 7 projections +
+  lm_head, ours rotated, ggml on reused weights): Q4_0 26.3 / 15.8 / 11.6 ms
+  at 1 / 2 / 4 threads against ggml's 46.1 / 26.3 / 15.1 (1.75×, 1.66×,
+  1.31×); Q8_0 41.4 / 24.6 ms against 66.2 / 36.3 (1.60×, 1.48×), at 4 threads
+  not computed: in two of its cases (512×2048, 2048×2048) ggml, whose 0.6 and
+  2.2 MB of weights stay in cache, read above 105% of the roof, so the
+  105% rule (§2.7) hides those cases. The model's dimensions are the model
+  card's (its config.json is in a gated repository and was not read).
+- **PyTorch** at the same thread count: ours is 0.99–1.05× its FP32
+  `F.linear` (both at the roof) and 1.42–2.04× its BF16 `F.linear`.
+- Not shown in that run: 4 cases whose slowest thread's clock dipped below
+  3.0 GHz in every attempt, 1 FP32 case with an unstable roof, and the two
+  Q8_0 cases above.
 
 ## 3. Elementwise kernels and normalization
 

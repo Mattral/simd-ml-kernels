@@ -123,6 +123,29 @@ GemmChunks gemm_chunks(int threads, int M, int N, int mr, int nr, int mc_max) no
  */
 int gemm_threads(int M, int N, int K, int mr, int nr) noexcept;
 
+/**
+ * Threaded decode GEMV (x·Wᵀ with few rows of x: the FP32/FP16/BF16 dot path
+ * and gemv_q8_0 / gemv_q4_0). The N output rows are cut into one contiguous
+ * slice per thread, each a whole number of kGemvRowGroup-row groups (the
+ * kernels' row blocks), so every output is computed by one thread with the
+ * same code and order as with one thread: bitwise the same for any count.
+ *
+ * gemv_threads — how many threads a GEMV over N rows reading `bytes` of
+ * weights uses: get_num_threads(), fewer so that each thread reads at least
+ * kGemvMinBytesPerThread (dispatch.cpp) and has at least one row group, and
+ * 1 inside an enclosing OpenMP parallel region. Always 1 without
+ * -DSIMD_ML_OPENMP.
+ *
+ * gemv_slice — rows [lo, hi) of thread t of a team of `team`: the row groups
+ * split as evenly as possible (thread sizes differ by at most one group).
+ */
+constexpr int kGemvRowGroup = 8;
+struct GemvSlice { int lo, hi; };
+int gemv_threads(int N, double bytes) noexcept;
+GemvSlice gemv_slice(int N, int t, int team) noexcept;
+/** Tests only: set the minimum weight bytes per thread; returns the previous value. */
+double set_gemv_min_bytes_per_thread(double bytes) noexcept;
+
 // Reference: Goto, K. & van de Geijn, R. (2008). Anatomy of High-Performance
 // Matrix Multiplication. ACM TOMS 34(3). Low, T. M. et al. (2016). Analytical
 // Modeling Is Enough for High-Performance BLIS. ACM TOMS 43(2).

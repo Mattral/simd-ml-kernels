@@ -32,7 +32,7 @@ namespace quant {
 void gemv_q8_0_avx512(int N, int K, const float* x, const std::uint8_t* Wq, float* y) {
 #ifdef SIMD_ML_HAVE_AVX512VNNI
     if (gemm::avx512vnni_available()) {
-        gemv_q8_0_run(N, K, x, Wq, y, &q8_0_rows_avx512vnni);
+        gemv_q8_0_run(N, K, x, Wq, y, &q8_0_rows_avx512vnni, kQ8_0Bytes);
         return;
     }
 #endif
@@ -43,7 +43,7 @@ void gemv_q8_0_avx512(int N, int K, const float* x, const std::uint8_t* Wq, floa
 void gemv_q4_0_avx512(int N, int K, const float* x, const std::uint8_t* Wq, float* y) {
 #ifdef SIMD_ML_HAVE_AVX512VNNI
     if (gemm::avx512vnni_available()) {
-        gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_avx512vnni);
+        gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_avx512vnni, kQ4_0Bytes);
         return;
     }
 #endif

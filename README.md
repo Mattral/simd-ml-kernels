@@ -115,6 +115,12 @@ Summary:
 - Q4_0 decode GEMV (laptop, `42f64c7d76b3`): 68–83% of the read roof,
   1.58–2.19× ggml's Q4_0 MUL_MAT (llama.cpp v0.7.0, one thread), 1.38–1.67×
   our Q8_0 GEMV.
+- Threaded decode GEMV (OpenMP build, laptop's 4 P-cores, `da63d7762dfc`):
+  at 4 threads 1.54–1.67× (Q8_0) and 1.52–2.19× (Q4_0) ggml's MUL_MAT at the
+  same thread count, on the same weights, except the smallest Llama-3.2-1B
+  matrix (Q4_0 512×2048: 0.97×); Llama-3.2-1B Q4_0 GEMV time per token
+  11.6 ms against ggml's 15.1 ms. Four P-cores read only 2.4–2.9× one core's
+  bandwidth, so 4 threads run 1.8–2.9× faster than one, not 4×.
 - INT8 GEMM with AVX-VNNI (laptop, `ecc219baa1f2`): 3.36–3.60× our FP32 GEMM
   and 1.72–2.19× PyTorch's quantized linear at 256³ and 1024³.
 - Activations (laptop, `ecc219baa1f2`): 1.05–2.97× PyTorch, except LayerNorm
@@ -136,8 +142,11 @@ is in
 - LayerNorm at 0.92× PyTorch on the laptop (`ecc219baa1f2`).
 - FP16/BF16 GEMM on AVX2 saves memory but is no faster than FP32 on
   compute-bound shapes (AVX2 has no 16-bit FMA).
-- Single-threaded by default: OpenMP GEMM is a build option without a
-  published scaling table; the GEMV and the INT8 GEMM have no threaded path.
+- Single-threaded by default: OpenMP (GEMM and decode GEMV) is a build
+  option. GEMV scaling is measured only on the laptop's 4 P-cores under
+  WSL2, where 4 cores read 2.4–2.9× one core's bandwidth; the smallest
+  Llama-3.2-1B matrix (Q4_0 512×2048) is no faster than ggml at 4 threads
+  (x is quantized on one thread). The INT8 GEMM has no threaded path.
 - AVX-512 is measured only on a cloud VM whose clock and neighbours are not
   controlled; the AVX-512 GEMV is not measured.
 
@@ -369,6 +378,104 @@ Source: Intel(R) Xeon(R) Processor @ 2.10GHz, vCPU 1 (KVM guest, 2 vCPU; host co
 | `softmax` | 1024×1024 | 1.084 | 0.336 | 1.260 | 0.86× | 3.22 (3.15–3.26) |
 | `layer_norm` | 1024×1024 | 2.099 | 0.663 | 2.180 | 0.96× | 3.16 (3.04–3.30) |
 <!-- END GENERATED: results-summary -->
+
+### Threaded decode GEMV
+
+OpenMP builds only (`-DSIMD_ML_OPENMP=ON`, off by default). The process runs
+on the laptop's 4 P-cores (`taskset -c 0-3`, the 4 low-power E-cores excluded);
+ours, PyTorch and ggml use the same thread count, and every percentage is of
+the read roof measured at that thread count in the same case.
+
+<!-- BEGIN GENERATED: threads-summary -->
+#### lnl-226v-wsl, 2026-10-20, commit `da63d7762dfc`, 1/2/4 threads
+
+Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPUs 0-3 (the 4 P-cores; the 4 LP E-cores excluded), 1/2/4 threads; Python 3.12.3, GNU 13.3.0, commit `da63d7762dfc`; baselines: NumPy 2.5.4 with scipy-openblas 0.3.34.106.0, PyTorch 2.14.1+cpu; 30 interleaved reps after 5 warm-up; 2026-10-20T04:03:42+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-20_da63d7762dfc_threads.json`](https://github.com/Mattral/simd-ml-kernels/blob/main/benchmarks/results/lnl-226v-wsl_2026-10-20_da63d7762dfc_threads.json); CPUs [0, 1, 2, 3].
+
+**Q8_0 / Q4_0 decode GEMV at 1–4 threads**, path `avx_vnni`. GB/s counts the weights, x and y; % of the read roof measured at the same thread count in the same case; scaling = GB/s at N threads / (N × GB/s at 1 thread); ours with weights rotated past the caches, and on the same weights every call (as ggml runs). ggml: llama.cpp v0.7.0 (`620d222`), `test-backend-ops perf` MUL_MAT q8_0 or q4_0 × f32, the same thread count (OMP_THREAD_LIMIT = threads, GGML_OPENMP=ON, GGML_NATIVE=ON), median of 3 runs of its own mean over ≥ 1 s on the same weights (not interleaved).
+
+| format | N×K (Llama-3.2-1B) | threads | simd-ml-kernels µs | GB/s | % of read roof | scaling | same weights µs | ggml µs (own timing) | ggml % of roof | ours / ggml (same weights) | ours / ggml (rotated) | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q8_0 | 512×2048 (k_proj, v_proj) | 1 | 43 | 26.4 | 75% | 100% | 30 | 32 | 100% | 1.04× | 0.75× | 4.39 (4.16–4.45) |
+| Q8_0 | 512×2048 (k_proj, v_proj) | 2 | 28 | 39.7 | 67% | 75% | 19 | 19 | 102% | 0.98× | 0.66× | 4.03 (3.14–4.38) |
+| Q8_0 | 2048×2048 (q_proj, o_proj) | 1 | 150 | 29.8 | 86% | 100% | 114 | 135 | 96% | 1.18× | 0.90× | 4.06 (3.90–4.43) |
+| Q8_0 | 2048×2048 (q_proj, o_proj) | 2 | 89 | 50.1 | 81% | 84% | 61 | 76 | 96% | 1.24× | 0.85× | 4.10 (3.68–4.39) |
+| Q8_0 | 2048×8192 (down_proj) | 1 | 550 | 32.5 | 98% | 100% | 521 | 918 | 59% | 1.76× | 1.67× | 4.20 (3.12–4.42) |
+| Q8_0 | 2048×8192 (down_proj) | 2 | 346 | 51.6 | 89% | 79% | 299 | 474 | 65% | 1.59× | 1.37× | 4.01 (3.54–4.33) |
+| Q8_0 | 2048×8192 (down_proj) | 4 | 248 | 72.1 | 86% | 55% | 192 | 298 | 72% | 1.56× | 1.20× | 3.50 (3.15–3.56) |
+| Q8_0 | 4096×4096 | 1 | 545 | 32.8 | 98% | 100% | 499 | 871 | 62% | 1.75× | 1.60× | 4.18 (3.53–4.42) |
+| Q8_0 | 4096×4096 | 2 | 318 | 56.2 | 92% | 86% | 258 | 465 | 63% | 1.80× | 1.46× | 4.06 (3.76–4.38) |
+| Q8_0 | 4096×4096 | 4 | 262 | 68.2 | 74% | 52% | 195 | 300 | 64% | 1.54× | 1.15× | 3.49 (3.13–3.57) |
+| Q8_0 | 8192×2048 (gate_proj, up_proj) | 1 | 549 | 32.5 | 95% | 100% | 495 | 913 | 57% | 1.85× | 1.66× | 4.12 (3.95–4.45) |
+| Q8_0 | 8192×2048 (gate_proj, up_proj) | 2 | 320 | 55.9 | 100% | 86% | 271 | 493 | 65% | 1.82× | 1.54× | 3.99 (3.61–4.34) |
+| Q8_0 | 8192×2048 (gate_proj, up_proj) | 4 | 238 | 75.1 | 87% | 58% | 196 | 322 | 64% | 1.64× | 1.35× | 3.54 (3.15–3.57) |
+| Q8_0 | 4096×11008 | 1 | 1503 | 31.9 | 99% | 100% | 1513 | 2748 | 54% | 1.82× | 1.83× | 4.04 (3.42–4.33) |
+| Q8_0 | 4096×11008 | 4 | 621 | 77.3 | 84% | 61% | 556 | 927 | 56% | 1.67× | 1.49× | 3.44 (3.14–3.56) |
+| Q8_0 | 128256×2048 (lm_head) | 1 | 8858 | 31.6 | 94% | 100% | 8880 | 16977 | 49% | 1.91× | 1.92× | 3.96 (3.79–4.39) |
+| Q8_0 | 128256×2048 (lm_head) | 2 | 5090 | 54.9 | 95% | 87% | 5101 | 9944 | 49% | 1.95× | 1.95× | 3.97 (3.49–4.18) |
+| Q8_0 | 128256×2048 (lm_head) | 4 | 3555 | 78.6 | 98% | 62% | 3579 | 5893 | 59% | 1.65× | 1.66× | 3.48 (3.13–3.65) |
+| Q4_0 | 512×2048 (k_proj, v_proj) | 1 | 29 | 20.3 | 58% | 100% | 23 | 34 | 51% | 1.46× | 1.14× | 4.27 (4.03–4.43) |
+| Q4_0 | 512×2048 (k_proj, v_proj) | 2 | 20 | 29.8 | 50% | 73% | 15 | 20 | 51% | 1.34× | 1.00× | 4.03 (3.71–4.38) |
+| Q4_0 | 512×2048 (k_proj, v_proj) | 4 | 16 | 37.7 | 42% | 46% | 12 | 12 | 56% | 0.97× | 0.76× | 3.45 (3.19–3.56) |
+| Q4_0 | 2048×2048 (q_proj, o_proj) | 1 | 96 | 24.7 | 71% | 100% | 75 | 136 | 50% | 1.80× | 1.41× | 3.99 (3.61–4.42) |
+| Q4_0 | 2048×2048 (q_proj, o_proj) | 2 | 59 | 40.1 | 66% | 81% | 43 | 77 | 51% | 1.77× | 1.30× | 4.08 (3.06–4.40) |
+| Q4_0 | 2048×2048 (q_proj, o_proj) | 4 | 42 | 57.2 | 64% | 58% | 30 | 45 | 59% | 1.52× | 1.08× | 3.37 (3.10–3.56) |
+| Q4_0 | 2048×8192 (down_proj) | 1 | 354 | 26.8 | 77% | 100% | 321 | 619 | 44% | 1.93× | 1.75× | 4.29 (3.88–4.41) |
+| Q4_0 | 2048×8192 (down_proj) | 2 | 199 | 47.5 | 79% | 89% | 174 | 345 | 46% | 1.98× | 1.73× | 4.10 (3.70–4.39) |
+| Q4_0 | 2048×8192 (down_proj) | 4 | 166 | 57.0 | 64% | 53% | 117 | 200 | 53% | 1.71× | 1.20× | 3.30 (3.05–3.56) |
+| Q4_0 | 4096×4096 | 1 | 332 | 28.5 | 86% | 100% | 296 | 599 | 48% | 2.02× | 1.80× | 3.99 (3.34–4.26) |
+| Q4_0 | 4096×4096 | 2 | 203 | 46.5 | 79% | 82% | 174 | 309 | 52% | 1.77× | 1.52× | 3.92 (3.57–4.35) |
+| Q4_0 | 4096×4096 | 4 | 145 | 65.3 | 72% | 57% | 106 | 190 | 55% | 1.80× | 1.31× | 3.46 (3.18–3.56) |
+| Q4_0 | 8192×2048 (gate_proj, up_proj) | 1 | 338 | 28.0 | 85% | 100% | 310 | 595 | 48% | 1.92× | 1.76× | 3.84 (3.69–4.36) |
+| Q4_0 | 8192×2048 (gate_proj, up_proj) | 2 | 210 | 45.1 | 75% | 81% | 175 | 353 | 45% | 2.02× | 1.68× | 4.00 (3.45–4.34) |
+| Q4_0 | 8192×2048 (gate_proj, up_proj) | 4 | 158 | 60.0 | 67% | 54% | 112 | 194 | 55% | 1.73× | 1.23× | 3.48 (3.15–3.56) |
+| Q4_0 | 4096×11008 | 1 | 891 | 28.5 | 84% | 100% | 898 | 2035 | 37% | 2.27× | 2.28× | 3.97 (3.14–4.37) |
+| Q4_0 | 4096×11008 | 2 | 481 | 52.8 | 87% | 93% | 467 | 1080 | 39% | 2.32× | 2.24× | 4.18 (3.04–4.37) |
+| Q4_0 | 4096×11008 | 4 | 338 | 75.3 | 84% | 66% | 291 | 638 | 44% | 2.19× | 1.89× | 3.45 (3.13–3.56) |
+| Q4_0 | 128256×2048 (lm_head) | 1 | 5796 | 25.6 | 81% | 100% | 5857 | 11778 | 40% | 2.01× | 2.03× | 3.96 (3.40–4.39) |
+| Q4_0 | 128256×2048 (lm_head) | 2 | 3369 | 44.0 | 81% | 86% | 3409 | 6427 | 43% | 1.89× | 1.91× | 3.81 (3.29–4.31) |
+| Q4_0 | 128256×2048 (lm_head) | 4 | 2013 | 73.7 | 87% | 72% | 1985 | 3906 | 45% | 1.97× | 1.94× | 3.45 (3.17–3.55) |
+Not shown: Q8_0 4096×11008 2T (median 3.84, min 1.45 GHz, 3 attempts). A clock sample stayed below the 3.0 GHz threshold on the slowest thread (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
+Not shown: Q8_0 512×2048 4T (roof 91.5 GB/s), Q8_0 2048×2048 4T (roof 82.9 GB/s). An implementation ran above 105% of the read roof measured in the same case (`roof_unstable`), so the roof was not reliable there; the numbers remain in the JSON.
+
+**Per-token GEMV time, Llama-3.2-1B** (model card values (config.json of the gated repository not read); 16 layers × (2 q/o + 2 k/v + 2 gate/up + 1 down) + lm_head, every matrix in the format shown; ours with rotated weights, ggml on the same weights every run; GEMVs only, not a tokens/s figure)
+
+- Q8_0, 1 thread: ours 41.40 ms, ggml 66.21 ms (1.60×)
+- Q8_0, 2 threads: ours 24.62 ms, ggml 36.32 ms (1.48×)
+- Q8_0, 4 threads: not computed (k_proj, v_proj, q_proj, o_proj not shown or not measured)
+- Q4_0, 1 thread: ours 26.31 ms, ggml 46.14 ms (1.75×)
+- Q4_0, 2 threads: ours 15.83 ms, ggml 26.33 ms (1.66×)
+- Q4_0, 4 threads: ours 11.57 ms, ggml 15.14 ms (1.31×)
+
+**FP32 / FP16 / BF16 decode GEMV** (x·Wᵀ, W [N, K]), same roof and scaling; PyTorch: `F.linear` at `torch.set_num_threads(N)`, timed alone after ours (two OpenMP runtimes would spin against each other), FP32 and BF16.
+
+| weights | N×K | threads | simd-ml-kernels µs | GB/s | % of read roof | scaling | PyTorch GB/s | ours / PyTorch | core GHz median (min–max) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| FP32 | 2048×8192 | 1 | 2034 | 33.0 | 100% | 100% | 31.6 | 1.04× | 4.35 (3.04–4.42) |
+| FP32 | 2048×8192 | 2 | 1140 | 58.9 | 94% | 89% | 55.9 | 1.05× | 4.08 (3.28–4.38) |
+| FP32 | 4096×4096 | 1 | 2014 | 33.3 | 99% | 100% | 33.6 | 0.99× | 3.88 (3.58–4.34) |
+| FP32 | 4096×4096 | 2 | 1175 | 57.1 | 93% | 86% | 55.4 | 1.03× | 4.03 (3.30–4.40) |
+| FP32 | 4096×11008 | 2 | 3116 | 57.9 | 96% | — | 56.6 | 1.02× | 4.22 (3.51–4.33) |
+| FP32 | 4096×11008 | 4 | 2178 | 82.9 | 87% | — | 81.5 | 1.02× | 3.49 (3.11–3.56) |
+| FP16 | 2048×8192 | 1 | 1103 | 30.5 | 89% | 100% | — | — | 4.01 (3.32–4.44) |
+| FP16 | 2048×8192 | 2 | 698 | 48.1 | 82% | 79% | — | — | 3.68 (3.18–4.33) |
+| FP16 | 2048×8192 | 4 | 475 | 70.7 | 79% | 58% | — | — | 3.53 (3.16–3.56) |
+| FP16 | 4096×4096 | 1 | 1092 | 30.8 | 90% | 100% | — | — | 4.29 (3.83–4.42) |
+| FP16 | 4096×4096 | 2 | 636 | 52.8 | 88% | 86% | — | — | 3.71 (3.46–4.32) |
+| FP16 | 4096×4096 | 4 | 439 | 76.5 | 81% | 62% | — | — | 3.44 (3.15–3.55) |
+| FP16 | 4096×11008 | 1 | 2684 | 33.6 | 97% | 100% | — | — | 4.15 (3.49–4.43) |
+| FP16 | 4096×11008 | 2 | 1624 | 55.6 | 93% | 83% | — | — | 4.03 (3.47–4.39) |
+| FP16 | 4096×11008 | 4 | 1140 | 79.1 | 88% | 59% | — | — | 3.45 (3.12–3.57) |
+| BF16 | 2048×8192 | 1 | 1126 | 29.8 | 88% | 100% | 16.6 | 1.80× | 4.18 (3.84–4.44) |
+| BF16 | 2048×8192 | 2 | 675 | 49.7 | 82% | 83% | 30.6 | 1.62× | 4.28 (3.43–4.40) |
+| BF16 | 2048×8192 | 4 | 458 | 73.4 | 77% | 62% | 47.2 | 1.56× | 3.50 (3.08–3.56) |
+| BF16 | 4096×4096 | 1 | 1078 | 31.1 | 91% | 100% | 18.8 | 1.66× | 4.13 (3.94–4.38) |
+| BF16 | 4096×4096 | 2 | 639 | 52.6 | 86% | 84% | 32.6 | 1.61× | 3.75 (3.34–4.32) |
+| BF16 | 4096×4096 | 4 | 443 | 75.7 | 84% | 61% | 53.3 | 1.42× | 3.48 (3.17–3.56) |
+| BF16 | 4096×11008 | 1 | 2718 | 33.2 | 94% | 100% | 16.3 | 2.04× | 4.38 (3.89–4.44) |
+| BF16 | 4096×11008 | 2 | 1653 | 54.6 | 91% | 82% | 28.9 | 1.89× | 4.13 (3.31–4.38) |
+Not shown: FP32 2048×8192 4T (median 3.51, min 2.49 GHz, 3 attempts), FP32 4096×4096 4T (median 3.38, min 2.90 GHz, 3 attempts), BF16 4096×11008 4T (median 3.47, min 2.99 GHz, 3 attempts). A clock sample stayed below the 3.0 GHz threshold on the slowest thread (`--min-ghz`) in every attempt, so these numbers are not published; they remain in the JSON.
+Not shown: FP32 4096×11008 1T (roof 31.9 GB/s). An implementation ran above 105% of the read roof measured in the same case (`roof_unstable`), so the roof was not reliable there; the numbers remain in the JSON.
+<!-- END GENERATED: threads-summary -->
 
 Run it on your hardware:
 

@@ -101,7 +101,7 @@ void q4_0_rows_scalar(int N, int nb, const std::int8_t* xq, const float* dx,
 }  // namespace
 
 void gemv_q4_0_scalar(int N, int K, const float* x, const std::uint8_t* Wq, float* y) {
-    gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_scalar);
+    gemv_q8_0_run(N, K, x, Wq, y, &q4_0_rows_scalar, kQ4_0Bytes);
 }
 
 }  // namespace quant

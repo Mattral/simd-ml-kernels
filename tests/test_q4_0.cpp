@@ -207,7 +207,7 @@ bool test_gemv(simd_ml::GemvQ4_0Fn fn, const char* path) {
 // The inner paths on their own, through the shared driver.
 template <q::Q8RowsFn Rows>
 void via_driver(int N, int K, const float* x, const std::uint8_t* Wq, float* y) {
-    q::gemv_q8_0_run(N, K, x, Wq, y, Rows);
+    q::gemv_q8_0_run(N, K, x, Wq, y, Rows, q::kQ4_0Bytes);
 }
 
 }  // namespace

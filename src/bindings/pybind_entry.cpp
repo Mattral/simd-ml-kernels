@@ -454,9 +454,8 @@ static py::dict build_info() {
  * the loop counter and branch (independent, on other ports) off the critical
  * path. Returns NaN on non-x86 or non-GNU compilers.
  */
-static double py_measure_core_ghz(double seconds) {
+static double core_ghz_loop(double seconds) noexcept {
 #if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
-    py::gil_scoped_release release;
     using Clock = std::chrono::steady_clock;
     // Register operand, not an immediate: Golden Cove-class and newer cores
     // fold chains of add-immediate in the renamer (an addq $1 chain measured
@@ -477,6 +476,40 @@ static double py_measure_core_ghz(double seconds) {
     (void)seconds;
     return std::numeric_limits<double>::quiet_NaN();
 #endif
+}
+
+static double py_measure_core_ghz(double seconds) {
+    py::gil_scoped_release release;
+    return core_ghz_loop(seconds);
+}
+
+/**
+ * _measure_core_ghz_team — the same clock measured at the same time on each
+ * thread of an OpenMP team of `threads` (OpenMP builds; else one thread):
+ * one value per thread, in thread order. A threaded benchmark gates on the
+ * slowest thread: on a hybrid CPU an E-core (or a vCPU that WSL2 placed on
+ * one) shows up as a low value.
+ */
+static py::list py_measure_core_ghz_team(double seconds, int threads) {
+    if (threads < 1) throw ArgumentError("_measure_core_ghz_team: threads must be >= 1");
+    std::vector<double> ghz(static_cast<std::size_t>(threads), std::numeric_limits<double>::quiet_NaN());
+    py::gil_scoped_release release;
+#ifdef SIMD_ML_OPENMP
+    int team = 1;
+#pragma omp parallel num_threads(threads)
+    {
+#pragma omp single
+        team = omp_get_num_threads();
+        ghz[static_cast<std::size_t>(omp_get_thread_num())] = core_ghz_loop(seconds);
+    }
+    ghz.resize(static_cast<std::size_t>(team));
+#else
+    ghz.assign(1, core_ghz_loop(seconds));
+#endif
+    py::gil_scoped_acquire acquire;
+    py::list out;
+    for (double g : ghz) out.append(g);
+    return out;
 }
 
 /**
@@ -596,10 +629,12 @@ static double py_stream_read(py::array_t<float, py::array::c_style> a, int threa
  * _stream_read_rows — sum of a float32 array read in a decode GEMV's pattern
  * (stream_read.hpp): rows of row_floats values, `rows` (4 or 8) rows side by
  * side with 32-byte loads, optionally prefetching the next group's rows.
- * Single thread; needs the AVX2 kernels (RuntimeError otherwise).
+ * threads > 1 (OpenMP builds): each thread reads one contiguous part, in whole
+ * row groups, as the threaded GEMV splits W. Needs the AVX2 kernels
+ * (RuntimeError otherwise).
  */
 static double py_stream_read_rows(py::array_t<float, py::array::c_style> a, int rows, std::ptrdiff_t row_floats,
-                                  bool prefetch) {
+                                  bool prefetch, int threads) {
     if (a.ndim() != 1) throw ArgumentError("_stream_read_rows: a must be a 1-D float32 array");
     if (rows != 4 && rows != 8) throw ArgumentError("_stream_read_rows: rows must be 4 or 8");
     if (row_floats < 16) throw ArgumentError("_stream_read_rows: row_floats must be >= 16");
@@ -608,6 +643,22 @@ static double py_stream_read_rows(py::array_t<float, py::array::c_style> a, int 
         const float* p = a.data();
         const auto n = static_cast<std::ptrdiff_t>(a.size());
         py::gil_scoped_release release;
+        if (threads > 1) {
+#ifdef SIMD_ML_OPENMP
+            const std::ptrdiff_t group = rows * row_floats, groups = n / group;
+            double total = 0.0;
+#pragma omp parallel num_threads(threads) reduction(+ : total)
+            {
+                const std::ptrdiff_t t = omp_get_thread_num(), nt = omp_get_num_threads();
+                const std::ptrdiff_t lo = groups * t / nt * group;
+                const std::ptrdiff_t hi = t + 1 == nt ? n : groups * (t + 1) / nt * group;
+                total += simd_ml::stream_read_rows_avx2(p + lo, hi - lo, rows, row_floats, prefetch);
+            }
+            return total;
+#else
+            throw std::runtime_error("_stream_read_rows(threads > 1) needs an OpenMP build");
+#endif
+        }
         return simd_ml::stream_read_rows_avx2(p, n, rows, row_floats, prefetch);
     }
 #endif
@@ -1152,16 +1203,17 @@ np.ndarray[float32] same shape as x.
 
     m.def("set_num_threads", &py_set_num_threads,
           py::arg("n"),
-          "Set the most OpenMP threads one sgemm call uses (default: OpenMP's own,\n"
-          "i.e. OMP_NUM_THREADS, else one per logical CPU). Products too small to\n"
-          "gain from threads, and calls made inside an OpenMP parallel region, use\n"
-          "fewer or one; the result is bitwise the same for any thread count. Does\n"
+          "Set the most OpenMP threads one GEMM or decode GEMV call uses (sgemm,\n"
+          "sgemm_f16, sgemm_bf16, gemv_q8_0, gemv_q4_0; default: OpenMP's own, i.e.\n"
+          "OMP_NUM_THREADS, else one per logical CPU). Calls too small to gain from\n"
+          "threads, and calls made inside an OpenMP parallel region, use fewer or\n"
+          "one; the result is bitwise the same for any thread count. Does\n"
           "not change the thread count of other OpenMP code in the process. In a\n"
           "build without OpenMP (build_info()['openmp'] is False) GEMM is\n"
           "single-threaded and n > 1 emits a RuntimeWarning.");
 
     m.def("get_num_threads", &py_get_num_threads,
-          "Return the most OpenMP threads one sgemm call uses (1 without OpenMP).");
+          "Return the most OpenMP threads one GEMM or decode GEMV call uses (1 without OpenMP).");
 
     m.def("build_info", &build_info,
           "Return build details: version, commit, compiler, the kernel tables compiled\n"
@@ -1504,6 +1556,17 @@ Example
     m.def("_measure_core_ghz", &py_measure_core_ghz, py::arg("seconds") = 0.05,
           "Core clock of the calling thread in GHz (dependent integer-add chain). "
           "Private: used by `python -m simd_ml_kernels bench`.");
+    m.def("_measure_core_ghz_team", &py_measure_core_ghz_team, py::arg("seconds") = 0.05,
+          py::arg("threads") = 1,
+          "The same clock measured at once on each thread of an OpenMP team (one value per thread; "
+          "one value without OpenMP). Private: used by `python -m simd_ml_kernels bench`.");
+    m.def("_gemv_min_bytes", [](double bytes) {
+        const double old = simd_ml::gemm::set_gemv_min_bytes_per_thread(bytes > 0 ? bytes : 1.0);
+        if (!(bytes > 0)) simd_ml::gemm::set_gemv_min_bytes_per_thread(old);
+        return old;
+    }, py::arg("bytes") = 0.0,
+          "Minimum weight bytes per thread of a threaded decode GEMV; bytes > 0 sets it. Returns the "
+          "previous value. Private: tests and the development probe that measured the default.");
     m.def("_set_isa", [](const std::string& isa) {
         for (int i = 0; i < simd_ml::kNumIsa; ++i) {
             const auto id = static_cast<simd_ml::Isa>(i);
@@ -1522,7 +1585,9 @@ Example
           "a = b + s*c over float32 arrays (STREAM triad), on this thread or (threads > 1, "
           "OpenMP builds) on that many threads. Private: used by `python -m simd_ml_kernels bench`.");
     m.def("_stream_read_rows", &py_stream_read_rows, py::arg("a"), py::arg("rows"), py::arg("row_floats"),
-          py::arg("prefetch") = false, "Private (bench): read-only stream in a GEMV's row pattern; AVX2 only.");
+          py::arg("prefetch") = false, py::arg("threads") = 1,
+          "Private (bench): read-only stream in a GEMV's row pattern, on this thread or (threads > 1, "
+          "OpenMP builds) on that many threads, one contiguous part each; AVX2 only.");
     m.def("_stream_read", &py_stream_read, py::arg("a"), py::arg("threads") = 1, py::arg("streams") = 4,
           "Sum of a float32 array (read-only stream) read as `streams` parts side by side, on this "
           "thread or (threads > 1, OpenMP builds) on that many threads. Private: used by "

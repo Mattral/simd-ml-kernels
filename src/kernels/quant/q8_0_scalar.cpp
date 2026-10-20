@@ -10,12 +10,16 @@
 
 #include "q8_0.hpp"
 #include "../../dispatch/kernels.hpp"
+#include "../gemm/avx2_gemm_packed.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <vector>
+#ifdef SIMD_ML_OPENMP
+#  include <omp.h>
+#endif
 
 namespace simd_ml {
 namespace quant {
@@ -112,7 +116,8 @@ bool quantize_x_q8(const float* x, int K, std::int8_t* qs, float* dx) noexcept {
     return true;
 }
 
-void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* y, Q8RowsFn rows) {
+void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* y, Q8RowsFn rows,
+                   int block_bytes) {
     if (N <= 0) return;
     if (K <= 0) { std::fill(y, y + N, 0.0f); return; }
     const int nb = K / kQ8_0Values;
@@ -126,6 +131,21 @@ void gemv_q8_0_run(int N, int K, const float* x, const std::uint8_t* Wq, float* 
         std::fill(y, y + N, std::numeric_limits<float>::quiet_NaN());
         return;
     }
+    const std::size_t row = static_cast<std::size_t>(nb) * block_bytes;
+#ifdef SIMD_ML_OPENMP
+    // x is quantized once, above, by the calling thread; the team only reads it.
+    if (const int threads = gemm::gemv_threads(N, static_cast<double>(N) * row); threads > 1) {
+        const std::int8_t* xq = qs.data();
+        const float* xd = dx.data();
+#pragma omp parallel num_threads(threads)
+        {
+            const gemm::GemvSlice s = gemm::gemv_slice(N, omp_get_thread_num(), omp_get_num_threads());
+            if (s.hi > s.lo) rows(s.hi - s.lo, nb, xq, xd, Wq + s.lo * row, y + s.lo);
+        }
+        return;
+    }
+#endif
+    (void)row;
     rows(N, nb, qs.data(), dx.data(), Wq, y);
 }
 
@@ -152,7 +172,7 @@ void q8_0_rows_scalar(int N, int nb, const std::int8_t* xq, const float* dx,
 }  // namespace
 
 void gemv_q8_0_scalar(int N, int K, const float* x, const std::uint8_t* Wq, float* y) {
-    gemv_q8_0_run(N, K, x, Wq, y, &q8_0_rows_scalar);
+    gemv_q8_0_run(N, K, x, Wq, y, &q8_0_rows_scalar, kQ8_0Bytes);
 }
 
 const char* q8_0_path() noexcept {

@@ -240,10 +240,12 @@ SIMD_ML_ALWAYS_INLINE void dot_rows(int K, const float* __restrict__ a, const ty
 
 /** C (prescaled by beta) += alpha · A · Bᵀ, A FP32, B stored N×K (EB::T), R rows of B at a time. */
 template <class EB>
-void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
+void dot_trans_b_rows(int M, int j0, int j1, int K, float alpha, const float* A, std::ptrdiff_t lda,
                       const typename EB::T* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
     constexpr int R = sizeof(typename EB::T) == 2 ? 8 : 4;
-    for (int j = 0; j < N; j += R) {
+    static_assert(kGemvRowGroup % R == 0, "thread slices must start on a row block");
+    const int N = j1;
+    for (int j = j0; j < N; j += R) {
         const typename EB::T* Bj = B + j * ldb;
         for (int i = 0; i < M; ++i) {
             const float* a = A + i * lda;
@@ -260,6 +262,29 @@ void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptr
             }
         }
     }
+}
+
+/**
+ * gemm_dot_trans_b — dot_trans_b_rows over all N rows of B; in OpenMP builds
+ * split into one contiguous slice of rows per thread (gemv_threads /
+ * gemv_slice): the A rows are shared read-only, each thread writes its own
+ * columns of C, and every element is computed as with one thread.
+ */
+template <class EB>
+void gemm_dot_trans_b(int M, int N, int K, float alpha, const float* A, std::ptrdiff_t lda,
+                      const typename EB::T* B, std::ptrdiff_t ldb, float* C, std::ptrdiff_t ldc) noexcept {
+#ifdef SIMD_ML_OPENMP
+    const double bytes = static_cast<double>(N) * K * sizeof(typename EB::T);
+    if (const int threads = gemv_threads(N, bytes); threads > 1) {
+#pragma omp parallel num_threads(threads)
+        {
+            const GemvSlice s = gemv_slice(N, omp_get_thread_num(), omp_get_num_threads());
+            dot_trans_b_rows<EB>(M, s.lo, s.hi, K, alpha, A, lda, B, ldb, C, ldc);
+        }
+        return;
+    }
+#endif
+    dot_trans_b_rows<EB>(M, 0, N, K, alpha, A, lda, B, ldb, C, ldc);
 }
 
 struct Blocking { int kc, mc, nc; };

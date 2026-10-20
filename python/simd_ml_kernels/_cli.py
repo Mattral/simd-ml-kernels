@@ -359,6 +359,8 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
 BENCH_SCHEMA = "simd-ml-kernels-bench/1"
 BENCH_CASES = ("sgemm", "lowp", "int8", "gemv", "q8_0", "q4_0", "act")
+# Run on their own (not in the default set): see _bench_threads.
+EXTRA_CASES = ("threads",)
 THREAD_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
 # Variables that change which kernel runs; recorded with the thread ones.
 KERNEL_ENV = ("SIMD_ML_ISA", "SIMD_ML_BF16_DOT")
@@ -387,27 +389,37 @@ def _blas_info() -> dict:
         return {"name": "unknown", "version": "unknown"}
 
 
-def _time_once(fns, warmup, reps):
+def _clock_sample(threads: int = 1) -> list[float]:
+    """One 5 ms clock sample of the calling thread, or (threads > 1) of every
+    thread of an OpenMP team of that size at the same time."""
+    if threads <= 1:
+        return [sk._core._measure_core_ghz(0.005)]
+    return list(sk._core._measure_core_ghz_team(0.005, threads))
+
+
+def _time_once(fns, warmup, reps, threads=1, block=None):
     import time
 
+    block = block or [1] * len(fns)
     for _ in range(warmup):
         for fn in fns:
             fn()
-    clock = [sk._core._measure_core_ghz(0.005)]
-    ts = np.empty((len(fns), reps))
+    clock = _clock_sample(threads)
+    ts = [[] for _ in fns]
     for i in range(reps):
         for j, fn in enumerate(fns):
-            t0 = time.perf_counter_ns()
-            fn()
-            ts[j, i] = (time.perf_counter_ns() - t0) * 1e-9
+            for _ in range(block[j]):
+                t0 = time.perf_counter_ns()
+                fn()
+                ts[j].append((time.perf_counter_ns() - t0) * 1e-9)
         if i % 5 == 4:
-            clock.append(sk._core._measure_core_ghz(0.005))
-    clock.append(sk._core._measure_core_ghz(0.005))
-    return ts, clock
+            clock += _clock_sample(threads)
+    clock += _clock_sample(threads)
+    return [np.asarray(t) for t in ts], clock
 
 
 def _time(fns: list[Callable[[], object]], warmup: int, reps: int,
-          min_ghz: float | None) -> tuple[list[dict], dict]:
+          min_ghz: float | None, threads: int = 1, block: list[int] | None = None) -> tuple[list[dict], dict]:
     """Time several implementations of the same case, interleaved call by call
     (A, B, A, B, ...), so that clock and thermal drift during the run affects
     all of them alike; on the reference laptop the core clock moved between
@@ -419,16 +431,19 @@ def _time(fns: list[Callable[[], object]], warmup: int, reps: int,
     came out at 37.8 flop/cycle, above the 32 flop/cycle an AVX2 core with two
     256-bit FMA pipes can do. With min_ghz set (e.g. just above the E-core
     maximum on a hybrid CPU), a case with any sample below it is repeated, up
-    to 3 attempts; the attempt count is recorded."""
+    to 3 attempts; the attempt count is recorded. threads > 1: every sample
+    is taken on each thread of a team of that size (min over all of them).
+    block[j]: fn j is called that many times back to back in each round
+    (each call timed), so it runs reps * block[j] times."""
     for attempt in range(1, 4):
-        ts, clock = _time_once(fns, warmup, reps)
+        ts, clock = _time_once(fns, warmup, reps, threads, block)
         if min_ghz is None or min(clock) >= min_ghz:
             break
     stats = []
     for row in ts:
         p25, med, p75 = np.percentile(row, [25, 50, 75])
         stats.append({"median_s": float(med), "p25_s": float(p25), "p75_s": float(p75),
-                      "min_s": float(row.min()), "reps": reps})
+                      "min_s": float(row.min()), "reps": int(row.size)})
     c = np.asarray(clock)
     return stats, {"median": float(np.median(c)), "min": float(c.min()), "max": float(c.max()),
                    "samples": len(c), "attempts": attempt,
@@ -759,9 +774,11 @@ def _watch_threads(p) -> dict:
 GGML_TYPES = {"q8_0": (8, 34), "q4_0": (2, 18)}
 
 
-def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace, fmt: str = "q8_0") -> dict:
+def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace, fmt: str = "q8_0",
+               threads: int = 1) -> dict:
     """Run test-backend-ops perf on one MUL_MAT [n, k] (fmt: q8_0 or q4_0
-    weights) x [k, 1] (f32), GGML_RUNS times, on our CPUs with one thread.
+    weights) x [k, 1] (f32), GGML_RUNS times, on our CPUs with `threads`
+    threads (OMP_THREAD_LIMIT; it asks for hardware_concurrency()/2).
     Returns the measurement (or why not)."""
     import subprocess
     import tempfile
@@ -771,17 +788,17 @@ def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace, fmt: str = 
     line = (f"{info['ggml_op_mul_mat']} 0 {n} 1 1 1 0 2 {tid} {k} {n} 1 1 {bb} {row} {row * n} {row * n} "
             f"0 {k} 1 1 1 4 {4 * k} {4 * k} {4 * k} -")
     cpus = _pinned_cpus() or []
-    env = dict(os.environ, OMP_THREAD_LIMIT="1")
-    out: dict = {"test_file_line": line, "env": {"OMP_THREAD_LIMIT": "1"}}
+    env = dict(os.environ, OMP_THREAD_LIMIT=str(threads))
+    out: dict = {"test_file_line": line, "env": {"OMP_THREAD_LIMIT": str(threads)}, "threads": threads}
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, f"mul_mat_{fmt}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(line + "\n")
         cmd = ([] if not cpus else ["taskset", "-c", ",".join(map(str, cpus))]) + \
               [info["binary"], "perf", "-b", "CPU", "-o", "MUL_MAT", "--test-file", path]
-        out["command"] = "OMP_THREAD_LIMIT=1 " + " ".join(cmd).replace(path, "<test file>")
+        out["command"] = f"OMP_THREAD_LIMIT={threads} " + " ".join(cmd).replace(path, "<test file>")
         for attempt in range(1, 4):
-            runs, clock = [], [sk._core._measure_core_ghz(0.005)]
+            runs, clock = [], _clock_sample(threads)
             for _ in range(GGML_RUNS):
                 # stdout to a file, not a pipe: nothing to drain while polling.
                 with open(os.path.join(tmp, "out.txt"), "w+", encoding="utf-8") as log:
@@ -797,13 +814,15 @@ def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace, fmt: str = 
                 ct = watch["cpu_ticks"]
                 runs.append({"runs": int(mm.group(1)), "us_per_run": float(mm.group(2)),
                              "kb_per_run": int(mm.group(3)), "tool_gb_per_s": float(mm.group(4)), **watch})
-                clock.append(sk._core._measure_core_ghz(0.005))
-                if watch["threads_timed"] != 1:
+                clock += _clock_sample(threads)
+                if watch["threads_timed"] != threads:
                     out["runs"] = runs
-                    out["not_measured"] = f"not measured (thread count {watch['threads_timed']} != 1)"
+                    out["not_measured"] = f"not measured (thread count {watch['threads_timed']} != {threads})"
                     return out
                 w = ct["timed_window"]
-                if w is None or w["other_threads"] > GGML_OTHER_CPU * max(w["main_thread"], 1):
+                # One thread: the init threads must be idle in the timed window.
+                # More: the worker threads are the measurement (count checked above).
+                if w is None or (threads == 1 and w["other_threads"] > GGML_OTHER_CPU * max(w["main_thread"], 1)):
                     out["runs"] = runs
                     out["not_measured"] = ("not measured (no timed window sampled)" if w is None else
                                            f"not measured (other threads used {w['other_threads']} CPU ticks in "
@@ -820,7 +839,8 @@ def _ggml_case(info: dict, n: int, k: int, args: argparse.Namespace, fmt: str = 
         out["core_ghz"] = {"median": float(np.median(cl)), "min": float(cl.min()), "max": float(cl.max()),
                            "samples": len(cl), "attempts": attempt,
                            "below_min_ghz": bool(args.min_ghz is not None and cl.min() < args.min_ghz),
-                           "note": "sampled by the bench process on the same CPUs before and after each run"}
+                           "note": "sampled by the bench process on the same CPUs before and after each run"
+                                   + ("" if threads == 1 else f", on each thread of a team of {threads}")}
     return out
 
 
@@ -855,6 +875,172 @@ def _pin_malloc() -> str | None:
     except (OSError, AttributeError):
         pass
     return None
+
+
+# Threaded decode GEMV (case "threads", not in the default set: it needs the
+# process on several CPUs, e.g. taskset -c 0-3, and an OpenMP build; it is
+# run on its own and written to its own JSON). For each thread count N in
+# --threads and each case, three phases, so that no two OpenMP runtimes spin
+# against each other (ours and PyTorch's each keep their idle threads
+# spinning for milliseconds after a parallel region):
+#   1. ours, interleaved call by call with the read roof at N threads (the
+#      2-16 part sums and the GEMV row patterns, each thread one contiguous
+#      part): weights rotated over copies of at least THREADS_ROTATE_BYTES,
+#      and (Q8_0/Q4_0) the same weights on every call, as ggml's
+#      test-backend-ops runs them;
+#   2. PyTorch F.linear at torch.set_num_threads(N) (FP32/BF16), alone;
+#   3. ggml's MUL_MAT with OMP_THREAD_LIMIT=N (Q8_0/Q4_0), a subprocess on
+#      the same CPUs; its thread check expects threads_timed == N.
+# Clock samples are taken on every thread of a team of N; --min-ghz applies
+# to the slowest. Rotation must beat every cache the N threads can use: with
+# 4 threads on the reference laptop, 24 MiB of rotated Q8_0 weights read
+# faster than the 4-thread read stream in dev runs (four 2.5 MiB L2s, the
+# 8 MiB L3 and the SoC's memory-side cache), so at least 64 MiB rotate here.
+THREADS_ROTATE_BYTES = 64 << 20
+# Our calls run THREADS_BLOCK at a time per round, then each roof loop once.
+# A small GEMV timed right after a 64 MiB roof sweep ran slower than after
+# another GEMV (dev, Q4_0 512x2048 = 576 KiB rotated over 64 MiB: 60 us on 1
+# thread and 38-48 on 4 after a sweep, 32 and 13 back to back); in decode the
+# previous operation is another layer's GEMV. Back to back also keeps the
+# "same weights" copy in cache, as test-backend-ops runs ggml.
+THREADS_BLOCK = 5
+THREAD_KERNELS = ("gemv_fp32", "gemv_fp16", "gemv_bf16", "gemv_q8_0", "gemv_q4_0")
+# Llama-3.2-1B decode, one token (M = 1): W [N, K] of each projection and how
+# many of that shape one layer has. Dimensions as the model card gives them
+# (config.json of the gated meta-llama/Llama-3.2-1B was not read): hidden
+# 2048, intermediate 8192, 32 query / 8 KV heads of head_dim 64, vocab
+# 128256, 16 layers; lm_head is once per token.
+LLAMA_1B = {"model": "meta-llama/Llama-3.2-1B", "layers": 16, "hidden_size": 2048,
+            "intermediate_size": 8192, "num_attention_heads": 32, "num_key_value_heads": 8,
+            "head_dim": 64, "vocab_size": 128256,
+            "source": "model card values (config.json of the gated repository not read)"}
+LLAMA_1B_SHAPES = [("q_proj, o_proj", 2048, 2048, 2), ("k_proj, v_proj", 512, 2048, 2),
+                   ("gate_proj, up_proj", 8192, 2048, 2), ("down_proj", 2048, 8192, 1),
+                   ("lm_head", 128256, 2048, 0)]
+
+
+def _thread_weights(kernel: str, n: int, k: int, rng) -> tuple[np.ndarray, int]:
+    """Standard-normal W [n, k] in the kernel's format (row chunks, so the
+    FP32 matrix of a 128256-row lm_head is never held whole), and the bytes
+    of one copy."""
+    parts = []
+    for r0 in range(0, n, 8192):
+        w = rng.standard_normal((min(8192, n - r0), k)).astype(np.float32)
+        if kernel == "gemv_q8_0":
+            parts.append(sk.quantize_q8_0(w))
+        elif kernel == "gemv_q4_0":
+            parts.append(sk.quantize_q4_0(w))
+        elif kernel == "gemv_fp16":
+            parts.append(w.astype(np.float16))
+        elif kernel == "gemv_bf16":
+            parts.append((w.view(np.uint32) >> 16).astype(np.uint16))
+        else:
+            parts.append(w)
+    wt = np.ascontiguousarray(np.concatenate(parts))
+    return wt, wt.nbytes
+
+
+def _bench_threads(args: argparse.Namespace, results: list, torch: Any, ggml: dict | None, show) -> None:
+    import time
+
+    rng = np.random.default_rng(0)
+    llc = _llc_bytes()
+    roof_buf = np.full(max(4 * llc, STREAM_MIN_ARRAY_BYTES) // 4, 1.0, np.float32)
+    rows_ok = "avx2" in sk.build_info()["isa_usable"].split()
+    cases: dict[tuple[str, int, int], list[str]] = {}
+    for _, n, k in GEMV_SHAPES:
+        for kernel in THREAD_KERNELS:
+            cases.setdefault((kernel, n, k), [])
+    for label, n, k, _ in LLAMA_1B_SHAPES:
+        for kernel in ("gemv_q8_0", "gemv_q4_0"):
+            cases.setdefault((kernel, n, k), []).append(label)
+    for (kernel, n, k), labels in cases.items():
+        w, wbytes = _thread_weights(kernel, n, k, rng)
+        copies = max(1, -(-THREADS_ROTATE_BYTES // wbytes))
+        ws = [w] + [w.copy() for _ in range(copies - 1)]
+        x32 = rng.standard_normal((1, k)).astype(np.float32)
+        x1 = np.ascontiguousarray(x32[0])
+        xin = {"gemv_fp16": x32.astype(np.float16),
+               "gemv_bf16": (x32.view(np.uint32) >> 16).astype(np.uint16)}.get(kernel, x32)
+        c = np.empty((1, n), np.float32)
+        esize = {"gemv_fp32": 4, "gemv_fp16": 2, "gemv_bf16": 2}.get(kernel, 4)
+        nbytes = wbytes + esize * k + 4 * n
+        rot = _Rotor(copies)
+        quant = kernel in ("gemv_q8_0", "gemv_q4_0")
+        if quant:
+            qfn = sk.gemv_q8_0 if kernel == "gemv_q8_0" else sk.gemv_q4_0
+            impls = [("simd_ml_kernels", lambda: qfn(x1, ws[rot()], n, k)),
+                     ("simd_ml_kernels same weights", lambda: qfn(x1, ws[0], n, k))]
+        else:
+            by_kernel: dict[str, Callable[..., Any]] = {"gemv_fp32": sk.sgemm, "gemv_fp16": sk.sgemm_f16,
+                                                        "gemv_bf16": sk.sgemm_bf16}
+            gfn = by_kernel[kernel]
+            impls = [("simd_ml_kernels", lambda: gfn(xin, ws[rot()], C=c, trans_b=True))]
+        for th in args.threads:
+            sk.set_num_threads(th)
+            roof_fns = [(f"{s} parts", functools.partial(sk._core._stream_read, roof_buf, th, s))
+                        for s in STREAM_READ_STREAMS]
+            if rows_ok:
+                roof_fns += [(f"{r} rows{' + prefetch' if pf else ''}",
+                              functools.partial(sk._core._stream_read_rows, roof_buf, r, STREAM_ROW_FLOATS, pf, th))
+                             for r, pf in STREAM_READ_ROWS]
+            stats, clock = _time([f for _, f in impls] + [f for _, f in roof_fns], args.warmup, args.reps,
+                                 args.min_ghz, th, [THREADS_BLOCK] * len(impls) + [1] * len(roof_fns))
+            streams = {nm: 4.0 * roof_buf.size / t["median_s"] * 1e-9
+                       for (nm, _), t in zip(roof_fns, stats[len(impls):])}
+            roof = max(streams.values())
+            case_rows = []
+            for (impl, _), t in zip(impls, stats):
+                r = _record(results, kernel, impl, (1, n, k), t, 2.0 * n * k, "flop", clock,
+                            nbytes=nbytes, roofs={"read": roof})
+                r.update(threads=th, roof_read_gbs=roof, roof_read_streams_gbs=streams,
+                         weight_copies=1 if impl.endswith("same weights") else copies)
+                case_rows.append(r)
+            # 2. PyTorch, alone, after our team's threads have stopped spinning.
+            if torch is not None and kernel in ("gemv_fp32", "gemv_bf16"):
+                time.sleep(0.05)
+                torch.set_num_threads(th)
+                tdtype = torch.float32 if kernel == "gemv_fp32" else torch.bfloat16
+                tws = [torch.from_numpy(wc).view(tdtype) for wc in ws]
+                xt = torch.from_numpy(xin).view(tdtype)
+                trot = _Rotor(copies)
+                tstats, tclock = _time([lambda: torch.nn.functional.linear(xt, tws[trot()])],
+                                       args.warmup, args.reps, args.min_ghz, th, [THREADS_BLOCK])
+                name = f"torch {torch.__version__} {str(tdtype).replace('torch.', '')} F.linear"
+                r = _record(results, kernel, name, (1, n, k), tstats[0], 2.0 * n * k, "flop", tclock,
+                            nbytes=nbytes, roofs={"read": roof})
+                r.update(threads=th, roof_read_gbs=roof, weight_copies=copies,
+                         timing="alone, after ours (not interleaved: two OpenMP runtimes)")
+                case_rows.append(r)
+                torch.set_num_threads(1)
+                del tws
+            # 3. ggml at the same thread count.
+            if ggml is not None and quant:
+                time.sleep(0.2)
+                gres = _ggml_case(ggml, n, k, args, kernel.replace("gemv_", ""), threads=th)
+                row = {"kernel": kernel, "impl": "ggml test-backend-ops", "shape": [1, n, k], "threads": th,
+                       **gres}
+                if "time_s" in gres:
+                    row["bytes"] = nbytes
+                    row["gb_per_s"] = nbytes / gres["time_s"] * 1e-9
+                    row["roof_read_gbs"] = roof
+                    row["pct_stream_read"] = 100.0 * row["gb_per_s"] / roof
+                results.append(row)
+                case_rows.append(row)
+            _mark_roof_unstable([r for r in case_rows if not r["impl"].endswith("same weights")])
+            for r in case_rows:
+                r.setdefault("roof_unstable", False)
+                if labels:
+                    r["llama_3_2_1b"] = labels
+                if "median_s" in r:
+                    print(f"  {th}T", end="")
+                    show(r)
+                else:
+                    print(f"  {th}T  {kernel:<16} ggml             {str((1, n, k)):<16} "
+                          + (f"{r['time_s'] * 1e3:9.3f} ms (mean, own timing)  {r['gb_per_s']:7.2f} GB/s "
+                             f"({r['pct_stream_read']:.0f}% read)" if "time_s" in r else r.get("not_measured", "")))
+        sk.set_num_threads(1)
+        del ws, impls
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
@@ -999,7 +1185,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
     # weights from DRAM (rotated qcp); then ggml's own Q8_0 MUL_MAT when
     # SIMD_ML_GGML_TEST_BACKEND_OPS points at llama.cpp's test-backend-ops.
     ggml_bin = os.environ.get(GGML_ENV)
-    ggml = _ggml_info(ggml_bin) if ggml_bin and ("q8_0" in args.cases or "q4_0" in args.cases) else None
+    ggml = (_ggml_info(ggml_bin) if ggml_bin and {"q8_0", "q4_0", "threads"} & set(args.cases)
+            else None)
     for m, n, k in GEMV_SHAPES if "q8_0" in args.cases else []:
         w32 = rng.standard_normal((n, k)).astype(np.float32)
         x32 = rng.standard_normal((m, k)).astype(np.float32)
@@ -1142,6 +1329,12 @@ def cmd_bench(args: argparse.Namespace) -> int:
                          f"({row['pct_stream_read']:.0f}% read)" if "time_s" in row else row.get("not_measured", "")))
         del w4s, w8s, wfs, impls
 
+    if "threads" in args.cases:
+        if not sk.build_info()["openmp"]:
+            print("bench: the threads case needs an OpenMP build (SIMD_ML_OPENMP=ON)", file=sys.stderr)
+            return 2
+        _bench_threads(args, results, torch, ggml, show)
+
     x = rng.standard_normal(args.elems).astype(np.float32)
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)
     g = rng.standard_normal(1024).astype(np.float32)
@@ -1198,7 +1391,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
             "baselines": {"numpy": np.__version__, "blas": _blas_info(),
                           "torch": None if torch is None else torch.__version__,
                           "ggml": ggml if ggml is not None else
-                          f"not measured ({GGML_ENV} not set)" if not ggml_bin else "not measured (no q8_0 or q4_0 cases)"},
+                          f"not measured ({GGML_ENV} not set)" if not ggml_bin else
+                          "not measured (no q8_0, q4_0 or threads cases)"},
             "env": {k: os.environ.get(k) for k in THREAD_ENV + KERNEL_ENV},
             "protocol": {"warmup": args.warmup, "reps": args.reps,
                          "statistic": "median; p25/p75 = interquartile range",
@@ -1218,6 +1412,18 @@ def cmd_bench(args: argparse.Namespace) -> int:
                                  "next copy on every call of any implementation, so no call finds its weights "
                                  "in the last-level cache (ggml's test-backend-ops reuses its weights)",
                          "gemv_roof": "per case",
+                         **({"threads": {
+                             "counts": args.threads,
+                             "method": "per thread count and case, reps rounds of: each of ours "
+                                       f"{THREADS_BLOCK} calls back to back (each timed), then each read-roof loop "
+                                       "once at the same thread count (part sums and GEMV row patterns, one "
+                                       "contiguous part per thread; roof_read_gbs = fastest), weights rotated over "
+                                       f"copies of at least {THREADS_ROTATE_BYTES >> 20} MiB; 'same weights': one "
+                                       "copy every call, as test-backend-ops; PyTorch F.linear alone after ours "
+                                       f"(torch.set_num_threads, {THREADS_BLOCK} calls per round); ggml with OMP_THREAD_LIMIT = threads, thread "
+                                       "check threads_timed == threads; clock sampled on every thread of a team "
+                                       "of that size, --min-ghz on the slowest",
+                             "llama_3_2_1b": LLAMA_1B}} if "threads" in args.cases else {}),
                          "malloc": malloc or "not pinned (allocator defaults)"},
             "command": " ".join(["python -m simd_ml_kernels"] + (args.argv or [])),
             "python": platform.python_version(),
@@ -1256,7 +1462,10 @@ def main(argv: list[str] | None = None) -> int:
                               "this; on hybrid CPUs set it just above the E-core maximum")
     p_bench.add_argument("--cases", type=lambda v: set(v.split(",")), default=set(BENCH_CASES),
                          help="comma-separated subset of " + ",".join(BENCH_CASES) +
-                              " (development; published runs use all)")
+                              " (development; published runs use all), or " + ",".join(EXTRA_CASES) +
+                              " (threaded decode GEMV: OpenMP build, several pinned CPUs, its own run)")
+    p_bench.add_argument("--threads", type=lambda v: [int(t) for t in v.split(",")], default=[1, 2, 4],
+                         help="thread counts of the threads case")
     p_bench.add_argument("--allow-threads", action="store_true",
                          help="run even if *_NUM_THREADS != 1 (results not publishable)")
     p_bench.set_defaults(func=cmd_bench)
