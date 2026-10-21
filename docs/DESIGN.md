@@ -1099,6 +1099,35 @@ and NumPy glue. Ours is a Python loop that makes about 500 library calls per
 token (per layer 7 GEMVs, 3 per KV head for attention, SiLU) plus NumPy for
 the rest; llama.cpp runs one compiled graph per token.
 
+**Measured** (BENCHMARKS.md, `lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama`,
+the laptop's 4 P-cores, llama.cpp v0.7.0 with its default build: native
+flags, OpenMP, llamafile, CPU repack; every row above the 3.0 GHz clock
+floor). Tokens/s, ours against llama.cpp at the same KV depth:
+
+- F32 6.1 / 10.8 / 15.2 at 1 / 2 / 4 threads against 5.1 / 8.8 / 14.3
+  (1.20×, 1.23×, 1.06×); Q8_0 21.5 / 35.6 / 45.9 against 13.7 / 21.1 / 35.5
+  (1.58×, 1.69×, 1.29×); Q4_0 34.1 / 54.1 / 73.8 against 26.7 / 47.9 / 72.1
+  (1.28×, 1.13×, 1.02×). Ours is faster in every case, by little where both
+  sides approach the 4-core memory limit (F32 and Q4_0 at 4 threads).
+- *Where the time goes*: GEMVs take 80–97% of our token (the per-core
+  efficiency of §2.8–§2.10 is the whole lead); attention 1.1–1.4 ms,
+  RMSNorm/RoPE/SiLU 1.4–2.8 ms and the remaining glue 0.2–0.3 ms per token,
+  in every configuration. At Q4_0 on 4 threads that fixed 2.7 ms is 20% of
+  our 13.6 ms: the GEMVs alone take 10.9 ms, against llama.cpp's whole
+  13.9 ms token, so the Python/NumPy part is what keeps that case level.
+  Fusing those steps (the RMSNorm/SwiGLU epilogues and decode attention in
+  ROADMAP W5 items 4 and 5) is where the next gain is.
+- *Perplexity* (11 chunks, 2805 scored tokens): F32 5.9625 against
+  llama-perplexity's 5.9623 (± 0.2275); Q8_0 5.9830 against 5.9782
+  (+0.0205 and +0.0159 over each side's F32); Q4_0 8.8892 against 8.8716
+  (+2.93 and +2.91). Pure Q4_0, including the tied embedding/output matrix,
+  costs Llama-3.2-1B about half its perplexity again; that is the format,
+  not the kernel, and both sides show it. The small Ours − llama.cpp gaps
+  (+0.0002 / +0.0048 / +0.0176, far inside llama-perplexity's ± 0.23–0.36)
+  are expected: llama.cpp keeps its KV cache in F16 and orders its
+  attention arithmetic differently; the weights and the Q8 quantization of
+  x are the same.
+
 ---
 
 ## Corrections to the documents this file replaces

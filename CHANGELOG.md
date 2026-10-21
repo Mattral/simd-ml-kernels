@@ -24,6 +24,14 @@ under **Changed** with a migration note.
   `tests/test_llama.py` checks it against transformers FP32: logits of the
   first 8 positions within 1e-4 + 1e-5·|ref| and 64 greedy tokens identical
   on 5 prompts (skipped without the variable). docs/DESIGN.md §9.
+- `examples/llama/` on llama.cpp's own GGUF files (F32, Q8_0, Q4_0; blocks
+  read as is by `gemv_q8_0` / `gemv_q4_0`), `generate.py --weights
+  q8_0|q4_0`, `bench.py` (tokens/s against `llama-bench`, per-token
+  breakdown, perplexity against `llama-perplexity`) and README/BENCHMARKS
+  tables from its JSON. Laptop, 4 P-cores
+  (`lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama`): 1.02–1.69× llama.cpp's
+  tokens/s at 1/2/4 threads (Q4_0 73.8 against 72.1 tokens/s at 4 threads);
+  perplexity within 0.018 of llama.cpp's.
 - **Threaded decode GEMV** in OpenMP builds (`-DSIMD_ML_OPENMP=ON`): `sgemm` /
   `sgemm_f16` / `sgemm_bf16` with `trans_b=True` and at most 8 rows of x, and
   `gemv_q8_0` / `gemv_q4_0`, split W's rows into one contiguous slice per

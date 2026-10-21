@@ -767,7 +767,47 @@ prefill one token at a time; llama.cpp is `llama-bench`. Both are pinned to
 the same CPUs (laptop: `taskset -c 0-3`, the P-cores).
 
 <!-- BEGIN GENERATED: llama-detail -->
-_Not measured (no committed run of examples/llama/bench.py, which needs SIMD_ML_LLAMA_DIR)._
+#### lnl-226v-wsl, 2026-10-21, commit `f4a501dd2db4`
+
+Source: Intel(R) Core(TM) Ultra 5 226V, P-cores 0-3 (taskset -c 0-3), CPUs [0, 1, 2, 3]; meta-llama/Llama-3.2-1B from llama.cpp's own GGUF files (`--pure`), the same bytes on both sides; llama.cpp v0.7.0 (`620d2225cc43`), CPU-only Release, GGML_NATIVE=ON, GGML_OPENMP=ON, GGML_CPU_REPACK=ON; Python 3.12.3, GNU 13.3.0; 2026-10-21T02:31:26+00:00; [`benchmarks/results/lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama.json`](../benchmarks/results/lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama.json).
+
+**Tokens/s, greedy decode of 128 tokens after a 32-token prompt.** Ours: the examples/llama/ loop, Python over our GEMVs, median of 3 runs. llama.cpp: `llama-bench -p 0 -n 128`, average, at a depth of 32 KV entries like ours (and at depth 0). × = ours / llama.cpp: above 1, ours is faster. † = clock below 3.0 GHz on some thread.
+
+| Weights | Threads | Ours tok/s | llama.cpp tok/s (depth 32) | Ours / llama.cpp | llama.cpp tok/s (depth 0) | Ours ms/token | Ours prefill ms/token | Clock GHz (min) |
+|---|---|---|---|---|---|---|---|---|
+| F32 | 1 | 6.1 | 5.1 | 1.20× | 5.1 | 162.7 | 159.9 | 3.83 (3.47) |
+| F32 | 2 | 10.8 | 8.8 | 1.23× | 8.8 | 92.9 | 91.2 | 4.38 (4.23) |
+| F32 | 4 | 15.2 | 14.3 | 1.06× | 14.3 | 65.9 | 65.5 | 3.60 (3.26) |
+| Q8_0 | 1 | 21.5 | 13.7 | 1.58× | 13.1 | 46.5 | 46.2 | 4.43 (3.75) |
+| Q8_0 | 2 | 35.6 | 21.1 | 1.69× | 21.5 | 28.1 | 27.1 | 4.20 (3.72) |
+| Q8_0 | 4 | 45.9 | 35.5 | 1.29× | 34.2 | 21.8 | 21.3 | 3.60 (3.10) |
+| Q4_0 | 1 | 34.1 | 26.7 | 1.28× | 27.2 | 29.3 | 28.7 | 4.50 (3.83) |
+| Q4_0 | 2 | 54.1 | 47.9 | 1.13× | 47.5 | 18.5 | 18.1 | 4.35 (3.78) |
+| Q4_0 | 4 | 73.8 | 72.1 | 1.02× | 73.2 | 13.6 | 13.2 | 3.55 (3.25) |
+
+
+**Where our time goes** (one extra profiled run per row; ms per decode token)
+
+| Weights | Threads | GEMVs | Attention | Norms, RoPE, SiLU | Other (Python/NumPy glue) | Total (profiled) |
+|---|---|---|---|---|---|---|
+| F32 | 1 | 157.89 ms (97%) | 1.35 ms (1%) | 2.83 ms (2%) | 0.33 ms (0%) | 162.41 ms |
+| F32 | 2 | 92.64 ms (96%) | 1.32 ms (1%) | 2.65 ms (3%) | 0.30 ms (0%) | 96.91 ms |
+| F32 | 4 | 62.10 ms (94%) | 1.37 ms (2%) | 2.54 ms (4%) | 0.30 ms (0%) | 66.31 ms |
+| Q8_0 | 1 | 43.44 ms (92%) | 1.25 ms (3%) | 2.22 ms (5%) | 0.27 ms (1%) | 47.18 ms |
+| Q8_0 | 2 | 25.47 ms (89%) | 1.22 ms (4%) | 1.85 ms (6%) | 0.22 ms (1%) | 28.76 ms |
+| Q8_0 | 4 | 18.51 ms (85%) | 1.31 ms (6%) | 1.75 ms (8%) | 0.21 ms (1%) | 21.78 ms |
+| Q4_0 | 1 | 26.94 ms (90%) | 1.12 ms (4%) | 1.55 ms (5%) | 0.20 ms (1%) | 29.81 ms |
+| Q4_0 | 2 | 17.22 ms (85%) | 1.18 ms (6%) | 1.59 ms (8%) | 0.21 ms (1%) | 20.21 ms |
+| Q4_0 | 4 | 10.91 ms (80%) | 1.17 ms (9%) | 1.37 ms (10%) | 0.19 ms (1%) | 13.64 ms |
+
+
+**Perplexity** on `examples/llama/data/alice_ch1-2.txt` (5742 tokens; llama-perplexity's method: chunks of 512, second half scored), ours and `llama-perplexity -c 512` on the same GGUFs
+
+| Weights | Ours PPL | Δ vs our F32 | llama.cpp PPL | Δ vs llama.cpp F32 | Ours − llama.cpp |
+|---|---|---|---|---|---|
+| F32 | 5.9625 | — | 5.9623 ± 0.2275 | — | +0.0002 |
+| Q8_0 | 5.9830 | +0.0205 | 5.9782 ± 0.2281 | +0.0159 | +0.0048 |
+| Q4_0 | 8.8892 | +2.9267 | 8.8716 ± 0.3637 | +2.9093 | +0.0176 |
 <!-- END GENERATED: llama-detail -->
 
 ## What is not measured yet
