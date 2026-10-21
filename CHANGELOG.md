@@ -17,6 +17,13 @@ under **Changed** with a migration note.
   shapes come from its config.json when `SIMD_ML_LLAMA_CONFIG` points at it.
 
 ### Added
+- `examples/llama/`: Llama-3.x greedy decode built from the decode GEMV,
+  `silu`, `softmax` and NumPy (`generate.py --prompt ... --tokens 64
+  --threads N --weights fp32`); an example, not library API. With
+  `SIMD_ML_LLAMA_DIR` pointing at meta-llama/Llama-3.2-1B,
+  `tests/test_llama.py` checks it against transformers FP32: logits of the
+  first 8 positions within 1e-4 + 1e-5·|ref| and 64 greedy tokens identical
+  on 5 prompts (skipped without the variable). docs/DESIGN.md §9.
 - **Threaded decode GEMV** in OpenMP builds (`-DSIMD_ML_OPENMP=ON`): `sgemm` /
   `sgemm_f16` / `sgemm_bf16` with `trans_b=True` and at most 8 rows of x, and
   `gemv_q8_0` / `gemv_q4_0`, split W's rows into one contiguous slice per

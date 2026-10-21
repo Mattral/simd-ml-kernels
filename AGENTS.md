@@ -75,6 +75,8 @@ tests/test_*.py                              float64 references, edge cases, CLI
 tests/data/                                  fixtures from other projects (q4_0: llama.cpp's own blocks)
 benchmarks/results/*.json                    committed benchmark results; make_tables.py renders them
 examples/                                    short runnable scripts, run in CI
+examples/llama/                              Llama-3.x decode from our GEMVs + NumPy (not API; needs SIMD_ML_LLAMA_DIR,
+                                             not run in CI); tests/test_llama.py checks it against transformers
 ```
 
 ## Rules

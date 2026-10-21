@@ -1005,6 +1005,61 @@ the core the calling thread runs on.
 | `bench.yml` | weekly, manual | `python -m simd_ml_kernels bench --json` on a shared runner, uploaded as an artifact; not used for any claim |
 | `guardrail.yml` | push, pull requests, weekly | clang-tidy (fails on errors), pip-audit and codespell (report-only), license file check |
 
+## 9. End-to-end decode: Llama-3.2-1B (`examples/llama/`)
+
+The kernels above are judged one at a time; `examples/llama/` checks that
+they compose into a real model. It is an example, not library API: a module
+(`llama.py`) and a CLI (`generate.py --prompt ... --tokens 64 --threads N
+--weights fp32`), written for meta-llama/Llama-3.2-1B and run only where
+`SIMD_ML_LLAMA_DIR` points at its Hugging Face checkpoint directory.
+
+**Forward pass, one token** (every dimension from config.json):
+embedding → 16 × [RMSNorm → q/k/v GEMV → RoPE → GQA attention over the KV
+cache → o GEMV → residual → RMSNorm → gate/up GEMV → `silu(gate)·up` → down
+GEMV → residual] → RMSNorm → lm_head GEMV, where lm_head is the embedding
+matrix (`tie_word_embeddings`, one 1 GB array used twice). Every projection is
+`sgemm(x, W, trans_b=True)` with M = 1 (§2.7, threaded in OpenMP builds,
+§2.10); attention runs per KV head as `sgemm(q_group, K, trans_b=True)`,
+`softmax`, `sgemm(p, V)` over the 4 query heads that share it; RMSNorm and
+RoPE are NumPy in transformers' order of operations. The prompt is prefilled
+through the same one-token step, token by token (no batched prefill yet).
+
+- *Weights*: the checkpoint is BF16; widening to FP32 is exact (the 16 bits
+  become the high half of the word), so "FP32" here computes on the same
+  values transformers uses at `dtype=float32`. The `safetensors` package
+  cannot return BF16 to NumPy, which has no bfloat16, so `llama.py` parses
+  the format itself (an 8-byte header length, a JSON header, raw data).
+- *RoPE*: Llama 3.x sets `rope_theta` = 500000 and `rope_scaling` type
+  `llama3`: wavelengths longer than `original_max_position_embeddings /
+  low_freq_factor` are divided by `factor` (32), shorter than `... /
+  high_freq_factor` are kept, the band between is interpolated. Computed in
+  float32 as transformers does, and tested against transformers' own init
+  function. Plain RoPE is a plausible-looking mistake: in a dev run it moved
+  the first-8-position logits by 2.3e-2 to 4.7e-2 (100–250× the tolerance
+  below), yet the 64 greedy tokens still matched on 3 of the 5 prompts.
+  q/k use the HF layout (`rotate_half`: the two elements of a rotated pair
+  are half a head apart), which the logits test checks.
+- *Tokenizer*: `tokenizers` from tokenizer.json; its post-processor adds
+  `<|begin_of_text|>` as transformers' fast tokenizer does (ids tested
+  equal on the 5 prompts).
+
+**Correctness** (`tests/test_llama.py`, against transformers 5.20.2 with
+PyTorch 2.14.1 CPU at FP32, SDPA attention; the reference runs in a
+subprocess, since two FP32 copies of the model do not fit next to each other
+in the 8 GB WSL VM, and is cached in `.pytest_cache`). Five fixed prompts:
+
+- logits of the first 8 positions within `1e-4 + 1e-5·|ref|`; measured max
+  |error| 1.0e-5 to 1.9e-5 per prompt on logits up to |29|, max relative
+  error (|ref| ≥ 1) 1.7e-5, 0.17 of the bound at worst (AVX2 table);
+- 64 greedy tokens identical on every prompt (EOS does not stop either side,
+  so every prompt compares 64 tokens). The smallest top-2 logit margin on
+  the way is 0.0043 (prompt 0), about 200× the logits error, so the
+  identical tokens are not luck at a near-tie.
+
+The GEMVs are bitwise the same for any thread count (§2.10), and the test
+gives the same errors at 1 and 4 threads. Speed: not measured (ms/token
+against llama.cpp on the same GGUF weights is the next step).
+
 ---
 
 ## Corrections to the documents this file replaces
