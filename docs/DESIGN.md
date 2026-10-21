@@ -1057,8 +1057,47 @@ in the 8 GB WSL VM, and is cached in `.pytest_cache`). Five fixed prompts:
   identical tokens are not luck at a near-tie.
 
 The GEMVs are bitwise the same for any thread count (§2.10), and the test
-gives the same errors at 1 and 4 threads. Speed: not measured (ms/token
-against llama.cpp on the same GGUF weights is the next step).
+gives the same errors at 1 and 4 threads.
+
+**GGUF weights** (`gguf_reader.py`, `Llama(model_dir, gguf=path)`). For the
+comparison with llama.cpp both sides read the same files, written by
+llama.cpp's own tools:
+
+```bash
+python convert_hf_to_gguf.py $SIMD_ML_LLAMA_DIR --outtype f32 --outfile $SIMD_ML_LLAMA_DIR/gguf/Llama-3.2-1B-F32.gguf
+llama-quantize --pure $SIMD_ML_LLAMA_DIR/gguf/Llama-3.2-1B-F32.gguf $SIMD_ML_LLAMA_DIR/gguf/Llama-3.2-1B-Q8_0.gguf Q8_0
+llama-quantize --pure $SIMD_ML_LLAMA_DIR/gguf/Llama-3.2-1B-F32.gguf $SIMD_ML_LLAMA_DIR/gguf/Llama-3.2-1B-Q4_0.gguf Q4_0
+```
+
+`--pure` makes every weight matrix the named type (without it the output
+and some other tensors get higher-precision types). The reader maps the
+file and hands the Q8_0 / Q4_0 tensors to `gemv_q8_0` / `gemv_q4_0` as they
+are: llama.cpp's blocks are byte-identical to `quantize_q8_0` /
+`quantize_q4_0` of the F32 file's values (all 113 matrices of each file;
+`tests/test_llama_gguf.py` checks a sample and the embedding). Two
+differences from the safetensors layout: the converter permutes the q/k rows
+back to Meta's order, where the two elements of a rotated pair are adjacent,
+so the GGUF path rotates adjacent pairs (llama.cpp's "normal" RoPE); and
+with tied embeddings there is no `output.weight`, so lm_head is the
+quantized `token_embd` (as in llama.cpp), and the embedding row of a token is
+dequantized from it. The F32 GGUF path gives the same 64 greedy tokens as
+transformers on the 5 prompts (logits within the same bound).
+
+**Perplexity** (`perplexity()`) follows llama-perplexity: the text with BOS
+is cut into chunks of 512 tokens, each evaluated from an empty cache with its
+first token replaced by BOS, and only the second half is scored. The text is
+chapters I–II of *Alice's Adventures in Wonderland* (Project Gutenberg #11,
+public domain), `examples/llama/data/alice_ch1-2.txt`, 5742 tokens, 11
+chunks; our token ids equal llama.cpp's (`llama-tokenize`, tested).
+
+**Speed** (`examples/llama/bench.py`, BENCHMARKS.md): tokens/s of 128
+greedy tokens after a fixed 32-token prompt, at 1, 2 and 4 threads pinned to
+the P-cores, against `llama-bench -p 0 -n 128` on the same GGUF and threads,
+at depth 0 and at depth 32 (the KV length ours runs at); one profiled run
+splits our step time into GEMVs, attention, norms/RoPE/SiLU and the Python
+and NumPy glue. Ours is a Python loop that makes about 500 library calls per
+token (per layer 7 GEMVs, 3 per KV head for attention, SiLU) plus NumPy for
+the rest; llama.cpp runs one compiled graph per token.
 
 ---
 
