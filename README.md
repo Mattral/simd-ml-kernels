@@ -17,6 +17,16 @@ in the same run. You call it from Python on NumPy arrays; the reasons behind
 each kernel's design are written next to the code and in
 [docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md).
 
+**End to end.** [`examples/llama/`](https://github.com/Mattral/simd-ml-kernels/tree/main/examples/llama)
+generates text with Llama-3.2-1B from these kernels and NumPy (a Python loop,
+not a runtime), on the same GGUF weight files as llama.cpp; its FP32 output is
+token-identical to Hugging Face transformers. Measured against llama.cpp on
+the same cores:
+
+<!-- BEGIN GENERATED: llama-summary -->
+_Not measured (no committed run of examples/llama/bench.py, which needs SIMD_ML_LLAMA_DIR)._
+<!-- END GENERATED: llama-summary -->
+
 **Preprint**: [IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for ML Workloads](https://zenodo.org/records/20616502)
 
 ## Who it is for

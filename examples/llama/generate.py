@@ -18,7 +18,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import simd_ml_kernels as sk  # noqa: E402
-from llama import Llama, encode, load_tokenizer  # noqa: E402
+from llama import Llama, encode, find_gguf, load_tokenizer  # noqa: E402
 
 p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 p.add_argument("--model", default=os.environ.get("SIMD_ML_LLAMA_DIR"),
@@ -26,7 +26,9 @@ p.add_argument("--model", default=os.environ.get("SIMD_ML_LLAMA_DIR"),
 p.add_argument("--prompt", required=True)
 p.add_argument("--tokens", type=int, default=64, help="new tokens to generate (stops early at EOS)")
 p.add_argument("--threads", type=int, default=1)
-p.add_argument("--weights", choices=["fp32"], default="fp32")
+p.add_argument("--weights", choices=["fp32", "q8_0", "q4_0"], default="fp32",
+               help="fp32: the safetensors checkpoint; q8_0/q4_0: model/gguf/*-Q8_0.gguf / *-Q4_0.gguf")
+p.add_argument("--gguf", help="read every weight from this GGUF instead (F32, Q8_0 or Q4_0)")
 args = p.parse_args()
 if not args.model:
     p.error("--model or SIMD_ML_LLAMA_DIR is required")
@@ -35,9 +37,10 @@ if args.threads > 1 and not sk.build_info()["openmp"]:
 sk.set_num_threads(args.threads)
 
 t = time.perf_counter()
-model = Llama(args.model, weights=args.weights)
+gguf = args.gguf or (None if args.weights == "fp32" else find_gguf(args.model, args.weights))
+model = Llama(args.model, weights=args.weights, gguf=gguf)
 tok = load_tokenizer(args.model)
-print(f"loaded {args.model} ({args.weights}, {model.cfg.num_hidden_layers} layers) in "
+print(f"loaded {gguf or args.model} ({model.weight_types}, {model.cfg.num_hidden_layers} layers) in "
       f"{time.perf_counter() - t:.1f} s; ISA {sk.detected_isa()}, threads {sk.get_num_threads()}",
       file=sys.stderr)
 

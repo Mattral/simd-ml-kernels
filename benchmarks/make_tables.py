@@ -525,7 +525,8 @@ def per_token(doc: dict) -> str:
 
 
 def threads_section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool) -> str:
-    docs = sorted([d for d in docs if _is_threads(d)], key=lambda d: d["timestamp_utc"], reverse=True)
+    docs = sorted([d for d in docs if _is_threads(d) and not _is_llama(d)], key=lambda d: d["timestamp_utc"],
+                  reverse=True)
     if not docs:
         return "_No committed threaded runs._\n"
     if latest_only:   # newest threaded run per machine label
@@ -560,7 +561,7 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
     """One block per result file, newest first; latest_only keeps the newest
     file per machine label (README), otherwise every run is listed (BENCHMARKS).
     Threaded runs are left to threads_section."""
-    docs = [d for d in docs if not _is_threads(d)]
+    docs = [d for d in docs if not _is_threads(d) and not _is_llama(d)]
     if not docs:
         return "_No committed benchmark results._\n"
     docs = sorted(docs, key=lambda d: d["timestamp_utc"], reverse=True)
@@ -614,6 +615,140 @@ def section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool)
     return "\n".join(out).rstrip() + "\n"
 
 
+# ─── Llama-3.2-1B end to end (examples/llama/bench.py) ───────────────────────
+
+LLAMA_W = (("fp32", "F32"), ("q8_0", "Q8_0"), ("q4_0", "Q4_0"))
+
+
+def _is_llama(doc: dict) -> bool:
+    """An end-to-end run (examples/llama/bench.py): its own tables."""
+    return "model" in doc and any(r["kernel"].startswith("llama_") for r in doc["results"])
+
+
+def _llama_rows(doc: dict, kernel: str) -> dict:
+    """{(weights, threads, impl, n_depth): row}; n_depth is None for our rows."""
+    out: dict = {}
+    for r in doc["results"]:
+        if r["kernel"] == kernel and "not_measured" not in r:
+            out[(r["weights"], r["threads"], r["impl"], r.get("n_depth"))] = r
+    return out
+
+
+def _tps(r: dict | None) -> str:
+    if r is None:
+        return "not measured"
+    mark = " †" if r.get("core_ghz", {}).get("below_min_ghz") else ""
+    return f"{r['tokens_per_s']:.1f}{mark}"
+
+
+def _llama_prompt(doc: dict) -> tuple:
+    o = next((r for r in doc["results"] if r["kernel"] == "llama_decode" and r["impl"] == "ours"), {})
+    return o.get("prompt_tokens", 0), o.get("gen_tokens", "?")
+
+
+def llama_speed_table(doc: dict, detail: bool) -> str:
+    rows = _llama_rows(doc, "llama_decode")
+    depth, _ = _llama_prompt(doc)
+    head = ["Weights", "Threads", "Ours tok/s", f"llama.cpp tok/s (depth {depth})", "Ours / llama.cpp"]
+    if detail:
+        head += ["llama.cpp tok/s (depth 0)", "Ours ms/token", "Ours prefill ms/token", "Clock GHz (min)"]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for w, label in LLAMA_W:
+        for th in sorted({k[1] for k in rows}):
+            o = rows.get((w, th, "ours", None))
+            if o is None:
+                continue
+            lc = rows.get((w, th, "llama.cpp", depth))
+            cells = [label, str(th), _tps(o), _tps(lc),
+                     f"{o['tokens_per_s'] / lc['tokens_per_s']:.2f}×" if lc else "—"]
+            if detail:
+                c = o["core_ghz"]
+                cells += [_tps(rows.get((w, th, "llama.cpp", 0))), f"{o['ms_per_token']:.1f}",
+                          f"{o['prefill_ms_per_token']:.1f}", f"{c['median']:.2f} ({c['min']:.2f})"]
+            lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def llama_breakdown_table(doc: dict) -> str:
+    rows = _llama_rows(doc, "llama_decode")
+    head = ["Weights", "Threads", "GEMVs", "Attention", "Norms, RoPE, SiLU", "Other (Python/NumPy glue)",
+            "Total (profiled)"]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for w, label in LLAMA_W:
+        for th in sorted({k[1] for k in rows}):
+            o = rows.get((w, th, "ours", None))
+            if o is None:
+                continue
+            b = o["breakdown_ms_per_token"]
+            tot = b["total"]
+
+            def cell(k: str) -> str:
+                return f"{b[k]:.2f} ms ({100 * b[k] / tot:.0f}%)"
+            lines.append("| " + " | ".join([label, str(th), cell("gemv"), cell("attention"),
+                                            cell("norm_rope_silu"), cell("other"), f"{tot:.2f} ms"]) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def llama_ppl_table(doc: dict) -> str:
+    rows = _llama_rows(doc, "llama_perplexity")
+    if not rows:
+        return ""
+
+    def get(w: str, impl: str) -> dict | None:
+        return next((r for k, r in rows.items() if k[0] == w and k[2] == impl), None)
+
+    def delta(r: dict | None, f: dict | None) -> str:
+        return f"{r['ppl'] - f['ppl']:+.4f}" if r and f and r is not f else "—"
+
+    head = ["Weights", "Ours PPL", "Δ vs our F32", "llama.cpp PPL", "Δ vs llama.cpp F32", "Ours − llama.cpp"]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    fo, fg = get("fp32", "ours"), get("fp32", "llama.cpp")
+    for w, label in LLAMA_W:
+        o, g = get(w, "ours"), get(w, "llama.cpp")
+        if o is None and g is None:
+            continue
+        lines.append("| " + " | ".join([
+            label, f"{o['ppl']:.4f}" if o else "not measured", delta(o, fo),
+            f"{g['ppl']:.4f} ± {g['ppl_stderr']:.4f}" if g else "not measured", delta(g, fg),
+            f"{o['ppl'] - g['ppl']:+.4f}" if o and g else "—"]) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def llama_section(docs: list[dict], detail: bool, link_prefix: str, latest_only: bool) -> str:
+    docs = sorted([d for d in docs if _is_llama(d)], key=lambda d: d["timestamp_utc"], reverse=True)
+    if not docs:
+        return "_Not measured (no committed run of examples/llama/bench.py, which needs SIMD_ML_LLAMA_DIR)._\n"
+    if latest_only:
+        docs = docs[:1]
+    out = []
+    for d in docs:
+        m, b, lc, p = d["machine"], d["build"], d["baselines"]["llama_cpp"], d["protocol"]
+        lcs = (f"llama.cpp {lc.get('tag')} (`{(lc.get('commit') or '')[:12]}`), CPU-only Release, "
+               f"GGML_NATIVE={lc['cmake'].get('GGML_NATIVE')}, GGML_OPENMP={lc['cmake'].get('GGML_OPENMP')}, "
+               f"GGML_CPU_REPACK={lc['cmake'].get('GGML_CPU_REPACK')}" if isinstance(lc, dict) else lc)
+        pt, gen = _llama_prompt(d)
+        out.append(f"#### {m['label']}, {d['timestamp_utc'][:10]}, commit `{b['git_commit']}`\n")
+        out.append(f"Source: {m['cpu_model']}, {m['core']}, CPUs {m.get('pinned_cpus')}; {d['model']['name']} "
+                   "from llama.cpp's own GGUF files (`--pure`), the same bytes on both sides; "
+                   f"{lcs}; Python {d['python']}, {b['compiler']}; {d['timestamp_utc']}; "
+                   f"[`{d['_file']}`]({link_prefix}{d['_file']}).\n")
+        out.append(f"**Tokens/s, greedy decode of {gen} tokens after a {pt}-token prompt.** Ours: the "
+                   f"examples/llama/ loop, Python over our GEMVs, median of {p['runs']} runs. llama.cpp: "
+                   f"`llama-bench -p 0 -n {gen}`, average, at a depth of {pt} KV entries like ours"
+                   + (" (and at depth 0)" if detail else "") + ". × = ours / llama.cpp: above 1, ours is "
+                   f"faster. † = clock below {p['min_ghz']} GHz on some thread.\n")
+        out.append(llama_speed_table(d, detail) + "\n")
+        out.append("**Where our time goes** (one extra profiled run per row; ms per decode token)\n")
+        out.append(llama_breakdown_table(d) + "\n")
+        ppl = llama_ppl_table(d)
+        if ppl:
+            t = d["model"]["text"]
+            out.append(f"**Perplexity** on `{t['path']}` ({t['tokens']} tokens; llama-perplexity's method: chunks "
+                       "of 512, second half scored), ours and `llama-perplexity -c 512` on the same GGUFs\n")
+            out.append(ppl + "\n")
+    return "\n".join(out).rstrip() + "\n"
+
+
 def replace_block(text: str, name: str, body: str) -> str:
     pat = re.compile(rf"(<!-- BEGIN GENERATED: {name} -->\n).*?(<!-- END GENERATED: {name} -->)", re.S)
     if not pat.search(text):
@@ -642,6 +777,13 @@ def main() -> int:
         "docs/BENCHMARKS.md": ("threads-detail",
                                threads_section(docs, detail=True, link_prefix="../", latest_only=False)),
     }
+    llama = {
+        "README.md": ("llama-summary",
+                      llama_section(docs, detail=False, latest_only=True,
+                                    link_prefix="https://github.com/Mattral/simd-ml-kernels/blob/main/")),
+        "docs/BENCHMARKS.md": ("llama-detail",
+                               llama_section(docs, detail=True, link_prefix="../", latest_only=False)),
+    }
     stale = []
     for rel, (name, body) in targets.items():
         path = os.path.join(ROOT, rel)
@@ -649,6 +791,7 @@ def main() -> int:
             old = f.read()
         new = replace_block(old, name, body)
         new = replace_block(new, *threads[rel])
+        new = replace_block(new, *llama[rel])
         if new != old:
             stale.append(rel)
             if not args.check:

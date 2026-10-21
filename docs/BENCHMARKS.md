@@ -754,6 +754,22 @@ laptop: 1.571, 1.612 and 0.368 Gelem/s in the runs on `7a698867be89`,
 so its ratio (1.54×, 1.64×, 6.60×) mostly tracks PyTorch. The cause is not
 investigated.
 
+## Llama-3.2-1B end to end
+
+`examples/llama/bench.py` (DESIGN.md §9), its own run and JSON
+(`..._llama.json`), with `SIMD_ML_LLAMA_DIR` pointing at the checkpoint
+directory (config.json, tokenizer.json and `gguf/*.gguf`) and
+`SIMD_ML_GGML_TEST_BACKEND_OPS` at a llama.cpp build. Both sides run the same
+GGUF files, written by llama.cpp's `convert_hf_to_gguf.py --outtype f32` and
+`llama-quantize --pure` (Q8_0, Q4_0; without `--pure` some tensors get other
+types). Ours is the Python decode loop over our kernels, single sequence,
+prefill one token at a time; llama.cpp is `llama-bench`. Both are pinned to
+the same CPUs (laptop: `taskset -c 0-3`, the P-cores).
+
+<!-- BEGIN GENERATED: llama-detail -->
+_Not measured (no committed run of examples/llama/bench.py, which needs SIMD_ML_LLAMA_DIR)._
+<!-- END GENERATED: llama-detail -->
+
 ## What is not measured yet
 
 - AVX-512 on bare metal: the only AVX-512 results (FP32, FP16/BF16 and INT8
