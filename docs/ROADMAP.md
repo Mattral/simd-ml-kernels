@@ -220,8 +220,14 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
      RoPE, GQA, our GEMVs and SiLU, `tokenizers`; logits of the first 8
      positions and 64 greedy tokens against transformers FP32 on 5 prompts
      (`tests/test_llama.py`). DESIGN.md §9. Prefill runs one token at a time.
-  2. Q8_0/Q4_0 weights from llama.cpp's own GGUF (`--pure`) into
-     `gemv_q8_0`/`gemv_q4_0`, and ms/token against llama.cpp.
+  2. *GGUF weights and speed* (W6 PR2): llama.cpp's own F32/Q8_0/Q4_0 GGUF
+     (`--pure`) straight into our GEMVs (byte-identical blocks); tokens/s
+     against `llama-bench` and perplexity against `llama-perplexity`
+     (`lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama`): ours 1.20–1.23× (F32),
+     1.29–1.69× (Q8_0), 1.02–1.28× (Q4_0) faster at 1/2/4 threads; GEMVs
+     80–97% of our token; perplexity within 0.018 of llama.cpp. DESIGN.md §9.
+  3. Next: fuse the non-GEMV steps (2.7 ms per token, 20% at Q4_0 / 4
+     threads) and batch the prefill.
 
 ---
 

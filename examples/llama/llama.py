@@ -187,40 +187,95 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
     return weight * (x * np.float32(1.0 / math.sqrt(float(var) + eps)))
 
 
-def gemv(x: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """x [K] -> x @ w.T [N] with the decode GEMV (w is [N, K], nn.Linear layout)."""
-    return sk.sgemm(x.reshape(1, -1), w, trans_b=True)[0]
+class Linear:
+    """y = x @ W.T for one row x [K]; W [N, K] (nn.Linear layout) as FP32, or
+    as ggml Q8_0 / Q4_0 blocks read from a GGUF (byte-identical to
+    quantize_q8_0 / quantize_q4_0), each through its decode GEMV."""
+
+    def __init__(self, kind: str, data: np.ndarray, n: int, k: int):
+        self.kind, self.data, self.shape = kind, data, (n, k)
+        if kind == "f32":
+            self._call = lambda x: sk.sgemm(x.reshape(1, -1), data, trans_b=True)[0]
+        elif kind == "q8_0":
+            self._call = lambda x: sk.gemv_q8_0(x, data, n, k)
+        elif kind == "q4_0":
+            self._call = lambda x: sk.gemv_q4_0(x, data, n, k)
+        else:
+            raise ValueError(f"weight kind {kind!r}")
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        return self._call(x)
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.data.nbytes)
 
 
 @dataclass
 class Layer:
     attn_norm: np.ndarray
-    wq: np.ndarray
-    wk: np.ndarray
-    wv: np.ndarray
-    wo: np.ndarray
+    wq: Linear
+    wk: Linear
+    wv: Linear
+    wo: Linear
     mlp_norm: np.ndarray
-    w_gate: np.ndarray
-    w_up: np.ndarray
-    w_down: np.ndarray
+    w_gate: Linear
+    w_up: Linear
+    w_down: Linear
+
+
+# GGUF tensor names (llama.cpp) for each layer field.
+_GGUF_NAMES = {"attn_norm": "attn_norm", "wq": "attn_q", "wk": "attn_k", "wv": "attn_v",
+               "wo": "attn_output", "mlp_norm": "ffn_norm", "w_gate": "ffn_gate",
+               "w_up": "ffn_up", "w_down": "ffn_down"}
+_GGUF_KIND = {0: "f32", 8: "q8_0", 2: "q4_0"}  # ggml type -> Linear kind
+
+# Sections of step() timed when profiling (Llama.profile).
+SECTIONS = ("gemv", "attention", "norm_rope_silu")
 
 
 class Llama:
-    """FP32 weights in memory (BF16 checkpoints are widened exactly)."""
+    """Llama-3.x decoder for one sequence.
 
-    def __init__(self, model_dir: str, weights: str = "fp32"):
-        if weights != "fp32":
-            raise ValueError(f"weights={weights!r}: only 'fp32' is implemented")
+    weights="fp32": the safetensors checkpoint in model_dir (BF16 widened
+    exactly to FP32). gguf=path: every tensor from a GGUF written by llama.cpp
+    (F32, Q8_0 or Q4_0 weight matrices, F32 norms); config.json and
+    tokenizer.json still come from model_dir, and the GGUF's own metadata
+    must agree with config.json.
+    """
+
+    def __init__(self, model_dir: str, weights: str = "fp32", gguf: str | None = None):
         self.cfg = cfg = Config.from_dir(model_dir)
+        if gguf is not None:
+            self._load_gguf(gguf)
+        elif weights == "fp32":
+            self._load_safetensors(model_dir)
+        else:
+            raise ValueError(f"weights={weights!r} needs a GGUF file (gguf=...)")
+        self._check_shapes()
+        self.inv_freq = rope_inv_freq(cfg)
+        self.k_cache: np.ndarray | None = None
+        self.v_cache: np.ndarray | None = None
+        self.pos = 0
+        self.profile: dict[str, float] | None = None  # set to {} to time SECTIONS in step()
+
+    def _load_safetensors(self, model_dir: str) -> None:
+        cfg = self.cfg
         t: dict[str, np.ndarray] = {}
         for path in _safetensors_files(model_dir):
             t.update(load_safetensors_fp32(path))
+
+        def lin(name: str) -> Linear:
+            w = t.pop(name)
+            return Linear("f32", w, *w.shape)
+
         p = "model."
-        self.embed = t.pop(p + "embed_tokens.weight")
+        embed = t.pop(p + "embed_tokens.weight")
+        self._embed_row = lambda tok: embed[tok].copy()
         if "lm_head.weight" in t:
-            self.lm_head = t.pop("lm_head.weight")
+            self.lm_head = lin("lm_head.weight")
         elif cfg.tie_word_embeddings:
-            self.lm_head = self.embed  # same array: 1 GB once, not twice
+            self.lm_head = Linear("f32", embed, *embed.shape)  # same array: 1 GB once, not twice
         else:
             raise KeyError("lm_head.weight missing and tie_word_embeddings is false")
         self.norm = t.pop(p + "norm.weight")
@@ -229,23 +284,78 @@ class Llama:
             q = f"{p}layers.{i}."
             self.layers.append(Layer(
                 attn_norm=t.pop(q + "input_layernorm.weight"),
-                wq=t.pop(q + "self_attn.q_proj.weight"),
-                wk=t.pop(q + "self_attn.k_proj.weight"),
-                wv=t.pop(q + "self_attn.v_proj.weight"),
-                wo=t.pop(q + "self_attn.o_proj.weight"),
+                wq=lin(q + "self_attn.q_proj.weight"),
+                wk=lin(q + "self_attn.k_proj.weight"),
+                wv=lin(q + "self_attn.v_proj.weight"),
+                wo=lin(q + "self_attn.o_proj.weight"),
                 mlp_norm=t.pop(q + "post_attention_layernorm.weight"),
-                w_gate=t.pop(q + "mlp.gate_proj.weight"),
-                w_up=t.pop(q + "mlp.up_proj.weight"),
-                w_down=t.pop(q + "mlp.down_proj.weight"),
+                w_gate=lin(q + "mlp.gate_proj.weight"),
+                w_up=lin(q + "mlp.up_proj.weight"),
+                w_down=lin(q + "mlp.down_proj.weight"),
             ))
         leftover = [k for k in t if not k.endswith("rotary_emb.inv_freq")]
         if leftover:
             raise KeyError(f"unused tensors in checkpoint: {leftover[:5]}")
-        self._check_shapes()
-        self.inv_freq = rope_inv_freq(cfg)
-        self.k_cache: np.ndarray | None = None
-        self.v_cache: np.ndarray | None = None
-        self.pos = 0
+        self.rope_interleaved = False  # HF layout: rotate_half
+        self.weight_types = {"all": "f32 (safetensors)"}
+
+    def _load_gguf(self, path: str) -> None:
+        from gguf_reader import GGUF, dequantize_rows
+
+        cfg = self.cfg
+        g = GGUF(path)
+        self.gguf = g
+        md = g.metadata
+        if md.get("general.architecture") != "llama":
+            raise ValueError(f"{path}: architecture {md.get('general.architecture')!r}, expected llama")
+        want = {"llama.block_count": cfg.num_hidden_layers, "llama.embedding_length": cfg.hidden_size,
+                "llama.feed_forward_length": cfg.intermediate_size,
+                "llama.attention.head_count": cfg.num_attention_heads,
+                "llama.attention.head_count_kv": cfg.num_key_value_heads}
+        for key, val in want.items():
+            if int(md[key]) != val:
+                raise ValueError(f"{path}: {key} = {md[key]}, config.json says {val}")
+        used: set[str] = set()
+
+        def tensor(name: str):
+            used.add(name)
+            return g.tensors[name]
+
+        def lin(name: str) -> Linear:
+            t = tensor(name)
+            if t.type not in _GGUF_KIND:
+                raise ValueError(f"{path}: {name} is {t.type_name}; F32, Q8_0 or Q4_0 expected")
+            return Linear(_GGUF_KIND[t.type], t.data, *t.shape)
+
+        def vec(name: str) -> np.ndarray:
+            t = tensor(name)
+            if t.type_name != "F32":
+                raise ValueError(f"{path}: {name} is {t.type_name}, F32 expected")
+            return np.asarray(t.data)
+
+        emb = tensor("token_embd.weight")
+        self._embed_row = lambda tok: dequantize_rows(emb, tok)[0]
+        # Tied embeddings: convert_hf_to_gguf writes no output.weight, and
+        # llama.cpp multiplies by token_embd (same bytes, same type).
+        self.lm_head = lin("output.weight" if "output.weight" in g.tensors else "token_embd.weight")
+        self.norm = vec("output_norm.weight")
+        self.layers = []
+        for i in range(cfg.num_hidden_layers):
+            f = {k: f"blk.{i}.{v}.weight" for k, v in _GGUF_NAMES.items()}
+            self.layers.append(Layer(attn_norm=vec(f["attn_norm"]), mlp_norm=vec(f["mlp_norm"]),
+                                     **{k: lin(f[k]) for k in f if k not in ("attn_norm", "mlp_norm")}))
+        # rope_freqs.weight holds llama3's per-frequency divisors; we compute
+        # the same frequencies from config.json (rope_inv_freq, tested).
+        leftover = sorted(set(g.tensors) - used - {"rope_freqs.weight"})
+        if leftover:
+            raise KeyError(f"{path}: unused tensors {leftover[:5]}")
+        # convert_hf_to_gguf permutes q/k rows back to Meta's order, where each
+        # rotated pair is two adjacent elements (llama.cpp's "normal" RoPE).
+        self.rope_interleaved = True
+        types: dict[str, int] = {}
+        for t in g.tensors.values():
+            types[t.type_name] = types.get(t.type_name, 0) + 1
+        self.weight_types = types
 
     def _check_shapes(self) -> None:
         c = self.cfg
@@ -257,8 +367,14 @@ class Llama:
             for name, shape in want.items():
                 if getattr(layer, name).shape != shape:
                     raise ValueError(f"layer {i} {name}: shape {getattr(layer, name).shape}, config says {shape}")
-        if self.embed.shape != (c.vocab_size, d) or self.lm_head.shape != (c.vocab_size, d):
-            raise ValueError("embedding / lm_head shape does not match config")
+        if self.lm_head.shape != (c.vocab_size, d):
+            raise ValueError("lm_head shape does not match config")
+
+    def weight_bytes(self) -> int:
+        """Bytes of weight matrices read per token (every Linear once)."""
+        lins = [self.lm_head] + [getattr(L, k) for L in self.layers
+                                 for k in ("wq", "wk", "wv", "wo", "w_gate", "w_up", "w_down")]
+        return sum(w.nbytes for w in lins)
 
     def reset(self, capacity: int) -> None:
         """Empty KV cache for up to `capacity` positions: [layers, kv_heads, capacity, head_dim] each."""
@@ -268,34 +384,98 @@ class Llama:
         self.v_cache = np.zeros(shape, np.float32)
         self.pos = 0
 
-    def step(self, token: int) -> np.ndarray:
-        """Run one token at position self.pos; returns float32 logits [vocab]."""
+    def _rope(self, x: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
+        if self.rope_interleaved:  # pairs (2i, 2i+1), angle i: cos/sin halves are equal
+            half = x.shape[-1] // 2
+            a, b = x[:, 0::2], x[:, 1::2]
+            c, s = cos[:half], sin[:half]
+            out = np.empty_like(x)
+            out[:, 0::2] = a * c - b * s
+            out[:, 1::2] = b * c + a * s
+            return out
+        return apply_rope(x, cos, sin)
+
+    def _attention(self, li: int, q: np.ndarray, k: np.ndarray, v: np.ndarray, pos: int) -> np.ndarray:
+        """Write k, v at pos into layer li's cache; GQA attention of q [heads, hd] over positions 0..pos."""
+        c = self.cfg
+        nh, nkv, hd = c.num_attention_heads, c.num_key_value_heads, c.head_dim
+        rep = nh // nkv
+        kc, vc = self.k_cache[li], self.v_cache[li]
+        kc[:, pos] = k
+        vc[:, pos] = v
+        out = np.empty((nh, hd), np.float32)
+        scale = 1.0 / math.sqrt(hd)
+        for g in range(nkv):  # rep query heads share KV head g
+            qg = np.ascontiguousarray(q[g * rep:(g + 1) * rep])
+            scores = sk.sgemm(qg, kc[g, :pos + 1], alpha=scale, trans_b=True)  # [rep, pos+1]
+            out[g * rep:(g + 1) * rep] = sk.sgemm(sk.softmax(scores), vc[g, :pos + 1])
+        return out.reshape(-1)
+
+    def step(self, token: int, logits: bool = True) -> np.ndarray | None:
+        """Run one token at position self.pos; returns float32 logits [vocab]
+        (logits=False skips the lm_head GEMV and returns None)."""
+        if self.profile is not None:
+            return self._step_profiled(token)
         c = self.cfg
         assert self.k_cache is not None and self.v_cache is not None, "call reset() first"
         pos = self.pos
         if pos >= self.k_cache.shape[2]:
             raise ValueError(f"KV cache full ({self.k_cache.shape[2]} positions)")
-        nh, nkv, hd = c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        rep = nh // nkv
-        scale = 1.0 / math.sqrt(hd)
+        nh, nkv, hd, eps = c.num_attention_heads, c.num_key_value_heads, c.head_dim, c.rms_norm_eps
         cos, sin = rope_cos_sin(self.inv_freq, pos)
-        x = self.embed[token].copy()
-        attn = np.empty((nh, hd), np.float32)
+        rope = self._rope
+        x = self._embed_row(token)
         for li, L in enumerate(self.layers):
-            h = rms_norm(x, L.attn_norm, c.rms_norm_eps)
-            q = apply_rope(gemv(h, L.wq).reshape(nh, hd), cos, sin)
-            kc, vc = self.k_cache[li], self.v_cache[li]
-            kc[:, pos] = apply_rope(gemv(h, L.wk).reshape(nkv, hd), cos, sin)
-            vc[:, pos] = gemv(h, L.wv).reshape(nkv, hd)
-            for g in range(nkv):  # GQA: rep query heads share KV head g
-                qg = np.ascontiguousarray(q[g * rep:(g + 1) * rep])
-                scores = sk.sgemm(qg, kc[g, :pos + 1], alpha=scale, trans_b=True)  # [rep, pos+1]
-                attn[g * rep:(g + 1) * rep] = sk.sgemm(sk.softmax(scores), vc[g, :pos + 1])
-            x = x + gemv(attn.reshape(-1), L.wo)
-            h = rms_norm(x, L.mlp_norm, c.rms_norm_eps)
-            x = x + gemv(sk.silu(gemv(h, L.w_gate)) * gemv(h, L.w_up), L.w_down)
+            h = rms_norm(x, L.attn_norm, eps)
+            q = rope(L.wq(h).reshape(nh, hd), cos, sin)
+            k = rope(L.wk(h).reshape(nkv, hd), cos, sin)
+            x = x + L.wo(self._attention(li, q, k, L.wv(h).reshape(nkv, hd), pos))
+            h = rms_norm(x, L.mlp_norm, eps)
+            x = x + L.w_down(sk.silu(L.w_gate(h)) * L.w_up(h))
         self.pos = pos + 1
-        self.last_logits = gemv(rms_norm(x, self.norm, c.rms_norm_eps), self.lm_head)
+        if not logits:
+            return None
+        self.last_logits = self.lm_head(rms_norm(x, self.norm, eps))
+        return self.last_logits
+
+    def _step_profiled(self, token: int) -> np.ndarray:
+        """step() with each section timed into self.profile (seconds, summed):
+        gemv (every Linear), attention (cache write, per-KV-head sgemm/softmax),
+        norm_rope_silu (RMSNorm, RoPE, SiLU and the gate*up product), total.
+        total minus the sections is Python and NumPy glue (embedding row,
+        residual adds, reshapes, call overhead outside the timed calls) plus
+        the timer calls themselves (about 0.1 us each, ~200 per token)."""
+        c = self.cfg
+        P = self.profile
+        clock = time.perf_counter
+        t_start = clock()
+        pos = self.pos
+        nh, nkv, hd, eps = c.num_attention_heads, c.num_key_value_heads, c.head_dim, c.rms_norm_eps
+        gemv_s = attn_s = misc_s = 0.0
+        t = clock()
+        cos, sin = rope_cos_sin(self.inv_freq, pos)
+        misc_s += clock() - t
+        x = self._embed_row(token)
+        for li, L in enumerate(self.layers):
+            t = clock(); h = rms_norm(x, L.attn_norm, eps); misc_s += clock() - t
+            t = clock(); q, k, v = L.wq(h), L.wk(h), L.wv(h); gemv_s += clock() - t
+            t = clock(); q = self._rope(q.reshape(nh, hd), cos, sin); k = self._rope(k.reshape(nkv, hd), cos, sin)
+            misc_s += clock() - t
+            t = clock(); a = self._attention(li, q, k, v.reshape(nkv, hd), pos); attn_s += clock() - t
+            t = clock(); o = L.wo(a); gemv_s += clock() - t
+            x = x + o
+            t = clock(); h = rms_norm(x, L.mlp_norm, eps); misc_s += clock() - t
+            t = clock(); gate, up = L.w_gate(h), L.w_up(h); gemv_s += clock() - t
+            t = clock(); m = sk.silu(gate) * up; misc_s += clock() - t
+            t = clock(); d = L.w_down(m); gemv_s += clock() - t
+            x = x + d
+        t = clock(); h = rms_norm(x, self.norm, eps); misc_s += clock() - t
+        t = clock(); self.last_logits = self.lm_head(h); gemv_s += clock() - t
+        self.pos = pos + 1
+        total = clock() - t_start
+        for key, val in (("gemv", gemv_s), ("attention", attn_s), ("norm_rope_silu", misc_s), ("total", total)):
+            P[key] = P.get(key, 0.0) + val
+        P["steps"] = P.get("steps", 0) + 1
         return self.last_logits
 
     def generate(self, prompt_ids: Sequence[int], max_new_tokens: int,
@@ -323,6 +503,52 @@ class Llama:
             if stats is not None:
                 stats["decode_s"] += time.perf_counter() - t
                 stats["decode_steps"] += 1
+
+
+GGUF_TYPES = {"fp32": "F32", "q8_0": "Q8_0", "q4_0": "Q4_0"}
+
+
+def find_gguf(model_dir: str, weights: str) -> str:
+    """model_dir/gguf/*-<F32|Q8_0|Q4_0>.gguf (where the README's commands put them)."""
+    import glob
+
+    hits = sorted(glob.glob(os.path.join(model_dir, "gguf", f"*-{GGUF_TYPES[weights]}.gguf")))
+    if not hits:
+        raise FileNotFoundError(f"no {model_dir}/gguf/*-{GGUF_TYPES[weights]}.gguf (see examples/llama/README "
+                                "commands in DESIGN.md section 9)")
+    return hits[0]
+
+
+def perplexity(model: Llama, ids: Sequence[int], n_ctx: int = 512, bos: int | None = None,
+               progress=None) -> dict:
+    """Perplexity as llama.cpp's llama-perplexity computes it: the token ids
+    (BOS first) are cut into len(ids) // n_ctx chunks of n_ctx; each chunk
+    starts from an empty cache with its first token replaced by BOS, and only
+    the second half is scored: the logits at positions n_ctx/2 .. n_ctx-2
+    predict the next token (n_ctx/2 - 1 tokens per chunk). PPL = exp(mean NLL).
+    Positions before n_ctx/2 skip the lm_head GEMV (their logits are unused)."""
+    bos = model.cfg.bos_token_id if bos is None else bos
+    first = n_ctx // 2
+    n_chunk = len(ids) // n_ctx
+    if n_chunk < 1:
+        raise ValueError(f"{len(ids)} tokens: at least n_ctx = {n_ctx} needed")
+    nll, count, per_chunk = 0.0, 0, []
+    for c in range(n_chunk):
+        toks = [int(t) for t in ids[c * n_ctx:(c + 1) * n_ctx]]
+        toks[0] = bos
+        model.reset(n_ctx)
+        for pos, t in enumerate(toks[:-1]):
+            lg = model.step(t, logits=pos >= first)
+            if lg is not None:
+                z = lg.astype(np.float64)
+                m = z.max()
+                nll += m + math.log(np.exp(z - m).sum()) - z[toks[pos + 1]]
+                count += 1
+        per_chunk.append(math.exp(nll / count))
+        if progress:
+            progress(c + 1, n_chunk, per_chunk[-1])
+    return {"ppl": math.exp(nll / count), "nll_mean": nll / count, "tokens_scored": count,
+            "chunks": n_chunk, "n_ctx": n_ctx, "running_ppl": per_chunk}
 
 
 def load_tokenizer(model_dir: str):

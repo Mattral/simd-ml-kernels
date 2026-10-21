@@ -1,0 +1,907 @@
+{
+ "schema": "simd-ml-kernels-bench/1",
+ "machine": {
+  "label": "lnl-226v-wsl",
+  "cpu_model": "Intel(R) Core(TM) Ultra 5 226V",
+  "core": "P-cores 0-3 (taskset -c 0-3)",
+  "pinned_cpus": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "caches": [
+   {
+    "level": 1,
+    "type": "D",
+    "size_kib": 48,
+    "ways": 12,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 1,
+    "type": "I",
+    "size_kib": 64,
+    "ways": 16,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 2,
+    "type": "U",
+    "size_kib": 2560,
+    "ways": 10,
+    "line_bytes": 64,
+    "max_sharing_cpus": 1
+   },
+   {
+    "level": 3,
+    "type": "U",
+    "size_kib": 8192,
+    "ways": 8,
+    "line_bytes": 64,
+    "max_sharing_cpus": 8
+   }
+  ],
+  "logical_cpus": 8,
+  "os": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "note": "MyASUS fan profile Performance; MyASUS, Lively, watchdog and mpv closed; AC power"
+ },
+ "build": {
+  "version": "0.3.0",
+  "git_commit": "f4a501dd2db4",
+  "compiler": "GNU 13.3.0",
+  "kernel_flags": "-O3 -DNDEBUG -Wall -Wextra -Wshadow -Wno-unused-parameter -mavx2 -mfma -mf16c -ffast-math -fno-finite-math-only",
+  "isa_compiled": "scalar avx2 avx512",
+  "openmp": true,
+  "sgemm_tile": "6x16 (12 YMM accumulators)",
+  "sgemm_blocking": {
+   "kc": 384,
+   "mc": 426,
+   "nc": 2720
+  },
+  "u8s8_path": "avx_vnni",
+  "q8_0_path": "avx_vnni"
+ },
+ "baselines": {
+  "numpy": "2.5.4",
+  "llama_cpp": {
+   "tool": "llama.cpp llama-bench / llama-perplexity",
+   "binary": "/home/min_htet/code/llama.cpp/build/bin/test-backend-ops",
+   "tag": "v0.7.0",
+   "commit": "620d2225cc436ab0b001e3200e590e3b286ef9ab",
+   "cmake": {
+    "CMAKE_BUILD_TYPE": "Release",
+    "GGML_NATIVE": "ON",
+    "GGML_OPENMP": "ON",
+    "GGML_LLAMAFILE": "ON",
+    "GGML_CPU_REPACK": "ON",
+    "CMAKE_CXX_COMPILER": "/usr/bin/c++",
+    "CMAKE_C_FLAGS": "",
+    "CMAKE_CXX_FLAGS": ""
+   },
+   "system_info": "CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX_VNNI = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 |"
+  }
+ },
+ "env": {
+  "OPENBLAS_NUM_THREADS": "1",
+  "OMP_NUM_THREADS": null,
+  "MKL_NUM_THREADS": "1",
+  "SIMD_ML_ISA": null,
+  "SIMD_ML_BF16_DOT": null
+ },
+ "model": {
+  "name": "meta-llama/Llama-3.2-1B",
+  "config_sha256": "bfb5d39c327ee5c3a65e3574596ff30b052a445cfc59a25bdf3b4c0c5a44f4d2",
+  "gguf": {
+   "fp32": {
+    "path": "/home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf",
+    "sha256": "d7b264c40db089958b201dd2a3eed11637737c9d8353464d053f65a8b059fc47",
+    "type": "F32",
+    "tensor_types": {
+     "F32": 147
+    },
+    "matrix_bytes_per_token": 4942987264
+   },
+   "q8_0": {
+    "path": "/home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf",
+    "sha256": "981ba6879fcbeca491e3da47f9f3e4ed30a13386d73d5799d68373aa0010ef47",
+    "type": "Q8_0",
+    "tensor_types": {
+     "F32": 34,
+     "Q8_0": 113
+    },
+    "matrix_bytes_per_token": 1312980992
+   },
+   "q4_0": {
+    "path": "/home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf",
+    "sha256": "3e9b2ee49e608514de989a617947e27377b3e9d3fb863e0b4302c01d3e1bb149",
+    "type": "Q4_0",
+    "tensor_types": {
+     "F32": 34,
+     "Q4_0": 113
+    },
+    "matrix_bytes_per_token": 695107584
+   }
+  },
+  "text": {
+   "path": "examples/llama/data/alice_ch1-2.txt",
+   "sha256": "64bbece64843ed77f77ec2a7cb06582508bd98de5c322aeeff88e03784514b87",
+   "tokens": 5742
+  }
+ },
+ "protocol": {
+  "decode": "greedy decode of gen_tokens tokens after the first prompt_tokens tokens of the text (BOS included), prefill one token at a time; tokens_per_s = gen_tokens / sum of the decode step times, median of 3 runs after a warm-up; clock sampled on every thread of a team of `threads` before and after each run, all runs repeated (up to 3 attempts) if a sample is below min_ghz; 20 s idle before each case",
+  "breakdown": "one more run with each section of the step timed (perf_counter around each call): gemv = every projection and lm_head; attention = KV-cache write and per-KV-head sgemm/softmax/sgemm; norm_rope_silu = RMSNorm, RoPE, SiLU and gate*up; other = total - those (embedding row, residual adds, reshapes, Python, timer calls)",
+  "llama_cpp": "llama-bench -p 0 -n 128 -d 0,32 -t <threads> -r 5 on the same GGUF and CPUs (avg_ts; n_depth = KV entries before the generated tokens); llama-perplexity -c 512 -b 512",
+  "perplexity": "examples/llama/llama.py perplexity(): llama-perplexity's chunks of n_ctx = 512 (first token BOS, second half scored)",
+  "min_ghz": 3.0,
+  "runs": 3,
+  "cooldown_s": 20.0
+ },
+ "command": "python examples/llama/bench.py --threads 1,2,4 --label lnl-226v-wsl --core P-cores 0-3 (taskset -c 0-3) --note MyASUS fan profile Performance; MyASUS, Lively, watchdog and mpv closed; AC power --json benchmarks/results/lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama.json",
+ "python": "3.12.3",
+ "timestamp_utc": "2026-10-21T02:31:26+00:00",
+ "results": [
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "fp32",
+   "threads": 1,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 6.146702415517725,
+   "runs_tokens_per_s": [
+    6.146702415517725,
+    6.07097711829061,
+    6.304812123919833
+   ],
+   "ms_per_token": 162.68885857812785,
+   "prefill_ms_per_token": 159.9486536250012,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 3.8265733773478843,
+    "min": 3.4678285690506323,
+    "max": 4.436546106419625,
+    "samples": 6,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 157.89258484380397,
+    "attention": 1.3533255749869966,
+    "norm_rope_silu": 2.8302931750026517,
+    "total": 162.406177674999,
+    "other": 0.3299740812053642
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 1,
+   "gen_tokens": 128,
+   "tokens_per_s": 5.10594,
+   "stddev_tokens_per_s": 0.075862,
+   "runs_tokens_per_s": [
+    5.076,
+    5.22874,
+    5.12765,
+    5.05091,
+    5.0464
+   ],
+   "n_depth": 0,
+   "n_threads": 1,
+   "n_gen": 128,
+   "model_type": "llama 1B all F32",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -p 0 -n 128 -d 0,32 -t 1 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 1,
+   "gen_tokens": 128,
+   "tokens_per_s": 5.110189,
+   "stddev_tokens_per_s": 0.103638,
+   "runs_tokens_per_s": [
+    5.2021,
+    5.05098,
+    5.02364,
+    5.03207,
+    5.24216
+   ],
+   "n_depth": 32,
+   "n_threads": 1,
+   "n_gen": 128,
+   "model_type": "llama 1B all F32",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -p 0 -n 128 -d 0,32 -t 1 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "fp32",
+   "threads": 2,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 10.765813984674493,
+   "runs_tokens_per_s": [
+    10.911084641681592,
+    10.765813984674493,
+    10.732160671679683
+   ],
+   "ms_per_token": 92.88661325781167,
+   "prefill_ms_per_token": 91.19466593750047,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 4.379989825020068,
+    "min": 4.229447528416601,
+    "max": 4.554919055127591,
+    "samples": 12,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 92.64240711250693,
+    "attention": 1.3164742687592934,
+    "norm_rope_silu": 2.645924112539433,
+    "total": 96.90634587500142,
+    "other": 0.301540381195764
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 2,
+   "gen_tokens": 128,
+   "tokens_per_s": 8.789455,
+   "stddev_tokens_per_s": 0.338624,
+   "runs_tokens_per_s": [
+    9.22256,
+    9.00067,
+    8.43421,
+    8.81592,
+    8.47391
+   ],
+   "n_depth": 0,
+   "n_threads": 2,
+   "n_gen": 128,
+   "model_type": "llama 1B all F32",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -p 0 -n 128 -d 0,32 -t 2 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 2,
+   "gen_tokens": 128,
+   "tokens_per_s": 8.754691,
+   "stddev_tokens_per_s": 0.227081,
+   "runs_tokens_per_s": [
+    8.72188,
+    8.48205,
+    8.98529,
+    8.59863,
+    8.98561
+   ],
+   "n_depth": 32,
+   "n_threads": 2,
+   "n_gen": 128,
+   "model_type": "llama 1B all F32",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -p 0 -n 128 -d 0,32 -t 2 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "fp32",
+   "threads": 4,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 15.1809008057506,
+   "runs_tokens_per_s": [
+    15.285471282545119,
+    15.1809008057506,
+    14.328177850877223
+   ],
+   "ms_per_token": 65.87224386718837,
+   "prefill_ms_per_token": 65.4567008124971,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 3.596506373237921,
+    "min": 3.261205068986957,
+    "max": 3.6519338046634426,
+    "samples": 24,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 62.099217337507184,
+    "attention": 1.370970356221335,
+    "norm_rope_silu": 2.5389496001082534,
+    "total": 66.30536655624724,
+    "other": 0.29622926241046343
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 4,
+   "gen_tokens": 128,
+   "tokens_per_s": 14.340485,
+   "stddev_tokens_per_s": 0.57538,
+   "runs_tokens_per_s": [
+    14.7453,
+    14.5333,
+    14.599,
+    13.3251,
+    14.4998
+   ],
+   "n_depth": 0,
+   "n_threads": 4,
+   "n_gen": 128,
+   "model_type": "llama 1B all F32",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -p 0 -n 128 -d 0,32 -t 4 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 4,
+   "gen_tokens": 128,
+   "tokens_per_s": 14.260157,
+   "stddev_tokens_per_s": 0.618754,
+   "runs_tokens_per_s": [
+    14.5406,
+    14.5155,
+    13.1652,
+    14.6668,
+    14.4127
+   ],
+   "n_depth": 32,
+   "n_threads": 4,
+   "n_gen": 128,
+   "model_type": "llama 1B all F32",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -p 0 -n 128 -d 0,32 -t 4 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_perplexity",
+   "impl": "ours",
+   "weights": "fp32",
+   "threads": 4,
+   "time_s": 341.80161173400006,
+   "ppl": 5.962487095212987,
+   "nll_mean": 1.7854876918872515,
+   "tokens_scored": 2805,
+   "chunks": 11,
+   "n_ctx": 512
+  },
+  {
+   "kernel": "llama_perplexity",
+   "impl": "llama.cpp",
+   "weights": "fp32",
+   "threads": 4,
+   "ppl": 5.9623,
+   "ppl_stderr": 0.22753,
+   "chunks": 11,
+   "n_ctx": 512,
+   "time_s": 40.708547501999874,
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-perplexity -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-F32.gguf -f /home/min_htet/code/simd-ml-kernels-w6/examples/llama/data/alice_ch1-2.txt -c 512 -b 512 -t 4",
+   "tokens_equal_ours": true
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "q8_0",
+   "threads": 1,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 21.514096684847885,
+   "runs_tokens_per_s": [
+    21.516955571532467,
+    21.514096684847885,
+    21.49385640984293
+   ],
+   "ms_per_token": 46.481152085938504,
+   "prefill_ms_per_token": 46.246574156249665,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 4.430367955522609,
+    "min": 3.751579414933687,
+    "max": 4.563572650390057,
+    "samples": 6,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 43.43787221872475,
+    "attention": 1.251557287525884,
+    "norm_rope_silu": 2.216578868872432,
+    "total": 47.17866014999572,
+    "other": 0.27265177487265646
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 1,
+   "gen_tokens": 128,
+   "tokens_per_s": 13.086546,
+   "stddev_tokens_per_s": 0.951319,
+   "runs_tokens_per_s": [
+    11.7739,
+    13.5596,
+    13.7319,
+    12.3969,
+    13.9704
+   ],
+   "n_depth": 0,
+   "n_threads": 1,
+   "n_gen": 128,
+   "model_type": "llama 1B Q8_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -p 0 -n 128 -d 0,32 -t 1 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 1,
+   "gen_tokens": 128,
+   "tokens_per_s": 13.651679,
+   "stddev_tokens_per_s": 0.580526,
+   "runs_tokens_per_s": [
+    13.9277,
+    13.8633,
+    12.6144,
+    13.9238,
+    13.9292
+   ],
+   "n_depth": 32,
+   "n_threads": 1,
+   "n_gen": 128,
+   "model_type": "llama 1B Q8_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -p 0 -n 128 -d 0,32 -t 1 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "q8_0",
+   "threads": 2,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 35.58413082839825,
+   "runs_tokens_per_s": [
+    36.12405551104123,
+    35.58413082839825,
+    34.77021765774967
+   ],
+   "ms_per_token": 28.102414664065382,
+   "prefill_ms_per_token": 27.14335153124381,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 4.197877929552787,
+    "min": 3.7155049586346967,
+    "max": 4.545998987230488,
+    "samples": 12,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 25.4706022250474,
+    "attention": 1.2214462500239165,
+    "norm_rope_silu": 1.8459394311335586,
+    "total": 28.760278293763974,
+    "other": 0.2222903875590987
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 2,
+   "gen_tokens": 128,
+   "tokens_per_s": 21.467857,
+   "stddev_tokens_per_s": 1.322994,
+   "runs_tokens_per_s": [
+    22.18,
+    22.2085,
+    19.117,
+    22.0052,
+    21.8286
+   ],
+   "n_depth": 0,
+   "n_threads": 2,
+   "n_gen": 128,
+   "model_type": "llama 1B Q8_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -p 0 -n 128 -d 0,32 -t 2 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 2,
+   "gen_tokens": 128,
+   "tokens_per_s": 21.059661,
+   "stddev_tokens_per_s": 1.413453,
+   "runs_tokens_per_s": [
+    21.7031,
+    21.6903,
+    18.5351,
+    21.5738,
+    21.796
+   ],
+   "n_depth": 32,
+   "n_threads": 2,
+   "n_gen": 128,
+   "model_type": "llama 1B Q8_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -p 0 -n 128 -d 0,32 -t 2 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "q8_0",
+   "threads": 4,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 45.8883559652165,
+   "runs_tokens_per_s": [
+    46.30895749490838,
+    45.75803829214648,
+    45.8883559652165
+   ],
+   "ms_per_token": 21.792020632815934,
+   "prefill_ms_per_token": 21.32689362500173,
+   "attempts": 3,
+   "core_ghz": {
+    "median": 3.5960186529560723,
+    "min": 3.103526867329076,
+    "max": 3.793898652187552,
+    "samples": 24,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 18.508862756164035,
+    "attention": 1.3110056625151856,
+    "norm_rope_silu": 1.74868320630992,
+    "total": 21.783051862504976,
+    "other": 0.21450023751583558
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 4,
+   "gen_tokens": 128,
+   "tokens_per_s": 34.16151,
+   "stddev_tokens_per_s": 3.78377,
+   "runs_tokens_per_s": [
+    36.2506,
+    35.9842,
+    27.42,
+    35.3219,
+    35.8308
+   ],
+   "n_depth": 0,
+   "n_threads": 4,
+   "n_gen": 128,
+   "model_type": "llama 1B Q8_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -p 0 -n 128 -d 0,32 -t 4 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 4,
+   "gen_tokens": 128,
+   "tokens_per_s": 35.52303,
+   "stddev_tokens_per_s": 0.280385,
+   "runs_tokens_per_s": [
+    35.9797,
+    35.6049,
+    35.3799,
+    35.3427,
+    35.308
+   ],
+   "n_depth": 32,
+   "n_threads": 4,
+   "n_gen": 128,
+   "model_type": "llama 1B Q8_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -p 0 -n 128 -d 0,32 -t 4 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_perplexity",
+   "impl": "ours",
+   "weights": "q8_0",
+   "threads": 4,
+   "time_s": 118.90700106300028,
+   "ppl": 5.982968654394607,
+   "nll_mean": 1.7889168752824551,
+   "tokens_scored": 2805,
+   "chunks": 11,
+   "n_ctx": 512
+  },
+  {
+   "kernel": "llama_perplexity",
+   "impl": "llama.cpp",
+   "weights": "q8_0",
+   "threads": 4,
+   "ppl": 5.9782,
+   "ppl_stderr": 0.2281,
+   "chunks": 11,
+   "n_ctx": 512,
+   "time_s": 42.55067429000019,
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-perplexity -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q8_0.gguf -f /home/min_htet/code/simd-ml-kernels-w6/examples/llama/data/alice_ch1-2.txt -c 512 -b 512 -t 4",
+   "tokens_equal_ours": true
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "q4_0",
+   "threads": 1,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 34.08302644999629,
+   "runs_tokens_per_s": [
+    34.08302644999629,
+    34.2009070385722,
+    33.924698374305706
+   ],
+   "ms_per_token": 29.340117476571944,
+   "prefill_ms_per_token": 28.712187812487855,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 4.501789844803135,
+    "min": 3.830641222526163,
+    "max": 4.596020765221471,
+    "samples": 6,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 26.936890012436265,
+    "attention": 1.121153100018546,
+    "norm_rope_silu": 1.5528207253595383,
+    "total": 29.806249362493986,
+    "other": 0.19538552467963655
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 1,
+   "gen_tokens": 128,
+   "tokens_per_s": 27.245398,
+   "stddev_tokens_per_s": 2.340888,
+   "runs_tokens_per_s": [
+    28.2437,
+    28.1451,
+    23.0621,
+    28.3604,
+    28.4157
+   ],
+   "n_depth": 0,
+   "n_threads": 1,
+   "n_gen": 128,
+   "model_type": "llama 1B Q4_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -p 0 -n 128 -d 0,32 -t 1 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 1,
+   "gen_tokens": 128,
+   "tokens_per_s": 26.692987,
+   "stddev_tokens_per_s": 2.18902,
+   "runs_tokens_per_s": [
+    28.1043,
+    28.237,
+    27.1212,
+    27.1089,
+    22.8936
+   ],
+   "n_depth": 32,
+   "n_threads": 1,
+   "n_gen": 128,
+   "model_type": "llama 1B Q4_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -p 0 -n 128 -d 0,32 -t 1 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "q4_0",
+   "threads": 2,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 54.10647623771048,
+   "runs_tokens_per_s": [
+    54.92866306816998,
+    54.10647623771048,
+    53.566761006839464
+   ],
+   "ms_per_token": 18.482075890631222,
+   "prefill_ms_per_token": 18.136886687500464,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 4.351299370560152,
+    "min": 3.7848752599736195,
+    "max": 4.565449590588345,
+    "samples": 12,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 17.222032974794388,
+    "attention": 1.1815354938107703,
+    "norm_rope_silu": 1.5917810813050437,
+    "total": 20.207485600050745,
+    "other": 0.21213605014054338
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 2,
+   "gen_tokens": 128,
+   "tokens_per_s": 47.543044,
+   "stddev_tokens_per_s": 6.275551,
+   "runs_tokens_per_s": [
+    50.6479,
+    50.3771,
+    50.3562,
+    36.3243,
+    50.0098
+   ],
+   "n_depth": 0,
+   "n_threads": 2,
+   "n_gen": 128,
+   "model_type": "llama 1B Q4_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -p 0 -n 128 -d 0,32 -t 2 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 2,
+   "gen_tokens": 128,
+   "tokens_per_s": 47.862466,
+   "stddev_tokens_per_s": 0.523615,
+   "runs_tokens_per_s": [
+    48.6189,
+    48.195,
+    47.3891,
+    47.5416,
+    47.5678
+   ],
+   "n_depth": 32,
+   "n_threads": 2,
+   "n_gen": 128,
+   "model_type": "llama 1B Q4_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -p 0 -n 128 -d 0,32 -t 2 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "ours",
+   "weights": "q4_0",
+   "threads": 4,
+   "prompt_tokens": 32,
+   "gen_tokens": 128,
+   "tokens_per_s": 73.76536750509241,
+   "runs_tokens_per_s": [
+    73.80440941937749,
+    73.60152430400642,
+    73.76536750509241
+   ],
+   "ms_per_token": 13.556497226574038,
+   "prefill_ms_per_token": 13.208206500010533,
+   "attempts": 1,
+   "core_ghz": {
+    "median": 3.5463797842410676,
+    "min": 3.246846261829502,
+    "max": 3.665129819862728,
+    "samples": 24,
+    "below_min_ghz": false
+   },
+   "breakdown_ms_per_token": {
+    "gemv": 10.9100367997911,
+    "attention": 1.1653640875351812,
+    "norm_rope_silu": 1.367556068694853,
+    "total": 13.635535737503801,
+    "other": 0.19257878148266627
+   },
+   "breakdown_steps": 160
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 4,
+   "gen_tokens": 128,
+   "tokens_per_s": 73.246942,
+   "stddev_tokens_per_s": 1.446433,
+   "runs_tokens_per_s": [
+    73.5858,
+    73.4874,
+    74.0528,
+    74.3692,
+    70.7395
+   ],
+   "n_depth": 0,
+   "n_threads": 4,
+   "n_gen": 128,
+   "model_type": "llama 1B Q4_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -p 0 -n 128 -d 0,32 -t 4 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_decode",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 4,
+   "gen_tokens": 128,
+   "tokens_per_s": 72.124272,
+   "stddev_tokens_per_s": 0.915938,
+   "runs_tokens_per_s": [
+    73.1754,
+    72.7267,
+    70.9109,
+    72.3035,
+    71.5048
+   ],
+   "n_depth": 32,
+   "n_threads": 4,
+   "n_gen": 128,
+   "model_type": "llama 1B Q4_0",
+   "build_commit": "620d222",
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-bench -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -p 0 -n 128 -d 0,32 -t 4 -r 5 -o json"
+  },
+  {
+   "kernel": "llama_perplexity",
+   "impl": "ours",
+   "weights": "q4_0",
+   "threads": 4,
+   "time_s": 79.12767331499981,
+   "ppl": 8.889178965894924,
+   "nll_mean": 2.184834690468375,
+   "tokens_scored": 2805,
+   "chunks": 11,
+   "n_ctx": 512
+  },
+  {
+   "kernel": "llama_perplexity",
+   "impl": "llama.cpp",
+   "weights": "q4_0",
+   "threads": 4,
+   "ppl": 8.8716,
+   "ppl_stderr": 0.36372,
+   "chunks": 11,
+   "n_ctx": 512,
+   "time_s": 23.14285347899977,
+   "command": "/home/min_htet/code/llama.cpp/build/bin/llama-perplexity -m /home/min_htet/code/models/Llama-3.2-1B/gguf/Llama-3.2-1B-Q4_0.gguf -f /home/min_htet/code/simd-ml-kernels-w6/examples/llama/data/alice_ch1-2.txt -c 512 -b 512 -t 4",
+   "tokens_equal_ours": true
+  }
+ ]
+}
