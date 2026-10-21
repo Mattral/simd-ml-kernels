@@ -116,6 +116,7 @@ set(SIMD_ML_AVX2_SRCS
     src/kernels/activations/silu_avx2.cpp
     src/kernels/activations/softmax_avx2.cpp
     src/kernels/activations/layer_norm_avx2.cpp
+    src/kernels/activations/rms_norm_avx2.cpp
     src/kernels/quant/q8_0_avx2.cpp
     src/kernels/quant/q4_0_avx2.cpp
     src/kernels/stream_read_avx2.cpp

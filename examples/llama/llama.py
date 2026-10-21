@@ -166,25 +166,17 @@ def rope_cos_sin(inv_freq: np.ndarray, pos: int) -> tuple[np.ndarray, np.ndarray
     return np.cos(emb), np.sin(emb)
 
 
-def apply_rope(x: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
-    """x [heads, head_dim] -> x*cos + rotate_half(x)*sin.
-
-    rotate_half(x) = cat(-x[half:], x[:half]): the HF Llama layout, where the
-    conversion from Meta's checkpoint permuted q/k rows so that the two
-    elements of each rotated pair are half a head apart (not adjacent).
-    """
-    half = x.shape[-1] // 2
-    rot = np.concatenate([-x[:, half:], x[:, :half]], axis=-1)
-    return x * cos + rot * sin
-
-
 # ─── Model ────────────────────────────────────────────────────────────────────
 
 
-def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float) -> np.ndarray:
-    """weight * x / sqrt(mean(x^2) + eps), float32, in transformers' order."""
-    var = np.mean(x * x, dtype=np.float32)
-    return weight * (x * np.float32(1.0 / math.sqrt(float(var) + eps)))
+
+
+def unpermute_qk_rows(w: np.ndarray, heads: int) -> np.ndarray:
+    """Inverse of convert_hf_to_gguf's LlamaModel.permute on the rows of a q/k
+    weight [heads*head_dim, ...]: GGUF row (h, j, i) is HF row (h, i, j), for
+    i in {0, 1} (half) and j < head_dim/2."""
+    n = w.shape[0]
+    return np.ascontiguousarray(w.reshape(heads, n // heads // 2, 2, -1).swapaxes(1, 2).reshape(w.shape))
 
 
 class Linear:
@@ -231,7 +223,11 @@ _GGUF_NAMES = {"attn_norm": "attn_norm", "wq": "attn_q", "wk": "attn_k", "wv": "
 _GGUF_KIND = {0: "f32", 8: "q8_0", 2: "q4_0"}  # ggml type -> Linear kind
 
 # Sections of step() timed when profiling (Llama.profile).
-SECTIONS = ("gemv", "attention", "norm_rope_silu")
+SECTIONS = ("gemv", "attention", "rms_norm", "rope", "silu_mul", "residual")
+
+
+def _no_clock() -> float:
+    return 0.0
 
 
 class Llama:
@@ -258,6 +254,7 @@ class Llama:
         self.v_cache: np.ndarray | None = None
         self.pos = 0
         self.profile: dict[str, float] | None = None  # set to {} to time SECTIONS in step()
+        self._buffers()
 
     def _load_safetensors(self, model_dir: str) -> None:
         cfg = self.cfg
@@ -296,7 +293,6 @@ class Llama:
         leftover = [k for k in t if not k.endswith("rotary_emb.inv_freq")]
         if leftover:
             raise KeyError(f"unused tensors in checkpoint: {leftover[:5]}")
-        self.rope_interleaved = False  # HF layout: rotate_half
         self.weight_types = {"all": "f32 (safetensors)"}
 
     def _load_gguf(self, path: str) -> None:
@@ -325,7 +321,15 @@ class Llama:
             t = tensor(name)
             if t.type not in _GGUF_KIND:
                 raise ValueError(f"{path}: {name} is {t.type_name}; F32, Q8_0 or Q4_0 expected")
-            return Linear(_GGUF_KIND[t.type], t.data, *t.shape)
+            data = t.data
+            # convert_hf_to_gguf permutes q/k rows to Meta's order (rotated pairs
+            # adjacent); undo it here, so both sources use the HF rotate_half
+            # layout. Rows are whole quantization blocks, so the bytes of each
+            # row are unchanged (a 2.8 MB copy per layer at Q4_0).
+            if name.endswith(("attn_q.weight", "attn_k.weight")):
+                heads = cfg.num_attention_heads if "attn_q" in name else cfg.num_key_value_heads
+                data = unpermute_qk_rows(data, heads)
+            return Linear(_GGUF_KIND[t.type], data, *t.shape)
 
         def vec(name: str) -> np.ndarray:
             t = tensor(name)
@@ -349,9 +353,6 @@ class Llama:
         leftover = sorted(set(g.tensors) - used - {"rope_freqs.weight"})
         if leftover:
             raise KeyError(f"{path}: unused tensors {leftover[:5]}")
-        # convert_hf_to_gguf permutes q/k rows back to Meta's order, where each
-        # rotated pair is two adjacent elements (llama.cpp's "normal" RoPE).
-        self.rope_interleaved = True
         types: dict[str, int] = {}
         for t in g.tensors.values():
             types[t.type_name] = types.get(t.type_name, 0) + 1
@@ -384,99 +385,120 @@ class Llama:
         self.v_cache = np.zeros(shape, np.float32)
         self.pos = 0
 
-    def _rope(self, x: np.ndarray, cos: np.ndarray, sin: np.ndarray) -> np.ndarray:
-        if self.rope_interleaved:  # pairs (2i, 2i+1), angle i: cos/sin halves are equal
-            half = x.shape[-1] // 2
-            a, b = x[:, 0::2], x[:, 1::2]
-            c, s = cos[:half], sin[:half]
-            out = np.empty_like(x)
-            out[:, 0::2] = a * c - b * s
-            out[:, 1::2] = b * c + a * s
-            return out
-        return apply_rope(x, cos, sin)
+    def _buffers(self) -> None:
+        """Scratch arrays reused by every step (no per-op NumPy allocations
+        for the norms, RoPE and the residual stream)."""
+        c = self.cfg
+        f32 = np.float32
+        h = c.head_dim // 2
+        self._x = np.empty(c.hidden_size, f32)          # residual stream
+        self._tq = np.empty((2, c.num_attention_heads, h), f32)   # RoPE temporaries for q
+        self._tk = np.empty((2, c.num_key_value_heads, h), f32)   # and for k
+
+    def _rms_norm(self, x: np.ndarray, weight: np.ndarray) -> np.ndarray:
+        """weight * (x * r), r = 1/sqrt(mean(x^2) + eps), in transformers' order:
+        one library call (simd_ml_kernels.rms_norm). The NumPy form took four
+        operations, each starting with caches the preceding GEMV had flushed
+        (DESIGN.md 9)."""
+        return sk.rms_norm(x, weight, self.cfg.rms_norm_eps)
+
+    @staticmethod
+    def _rope(x: np.ndarray, cos: np.ndarray, sin: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """RoPE in place on x [heads, head_dim], HF rotate_half layout, with
+        cos/sin the first half of rope_cos_sin's: x1*c - x2*s, x2*c + x1*s,
+        bit-identical to transformers' x*cos + rotate_half(x)*sin, where
+        rotate_half(x) = cat(-x2, x1): the conversion from Meta's checkpoint
+        permuted q/k rows so that the two elements of each rotated pair are
+        half a head apart."""
+        half = x.shape[-1] // 2
+        x1, x2 = x[:, :half], x[:, half:]
+        np.multiply(x2, sin, out=t[0])
+        np.multiply(x1, sin, out=t[1])
+        np.multiply(x1, cos, out=x1)
+        np.subtract(x1, t[0], out=x1)
+        np.multiply(x2, cos, out=x2)
+        np.add(x2, t[1], out=x2)
+        return x
 
     def _attention(self, li: int, q: np.ndarray, k: np.ndarray, v: np.ndarray, pos: int) -> np.ndarray:
-        """Write k, v at pos into layer li's cache; GQA attention of q [heads, hd] over positions 0..pos."""
+        """Write k, v at pos into layer li's cache; GQA attention of q [heads, hd]
+        over positions 0..pos, every KV head in one batched product:
+        scores [kv, rep, T] = q·Kᵀ, softmax over T (one call for all heads),
+        out [kv, rep, hd] = p·V. Three calls per layer instead of three per
+        KV head (24) plus 8 copies; in the decode step 1.18 -> 0.95 ms per
+        token (dev run, Q4_0, 4 threads, DESIGN.md 9)."""
         c = self.cfg
         nh, nkv, hd = c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        rep = nh // nkv
+        rep, T = nh // nkv, pos + 1
         kc, vc = self.k_cache[li], self.v_cache[li]
         kc[:, pos] = k
         vc[:, pos] = v
-        out = np.empty((nh, hd), np.float32)
-        scale = 1.0 / math.sqrt(hd)
-        for g in range(nkv):  # rep query heads share KV head g
-            qg = np.ascontiguousarray(q[g * rep:(g + 1) * rep])
-            scores = sk.sgemm(qg, kc[g, :pos + 1], alpha=scale, trans_b=True)  # [rep, pos+1]
-            out[g * rep:(g + 1) * rep] = sk.sgemm(sk.softmax(scores), vc[g, :pos + 1])
-        return out.reshape(-1)
+        scores = np.matmul(q.reshape(nkv, rep, hd), kc[:, :T].transpose(0, 2, 1))
+        scores *= np.float32(1.0 / math.sqrt(hd))
+        p = sk.softmax(scores.reshape(nh, T))
+        return np.matmul(p.reshape(nkv, rep, T), vc[:, :T]).reshape(-1)
 
     def step(self, token: int, logits: bool = True) -> np.ndarray | None:
         """Run one token at position self.pos; returns float32 logits [vocab]
-        (logits=False skips the lm_head GEMV and returns None)."""
-        if self.profile is not None:
-            return self._step_profiled(token)
+        (logits=False skips the lm_head GEMV and returns None).
+
+        With self.profile a dict, each section's time is added to it
+        (seconds; SECTIONS): gemv (every Linear), attention (cache write and
+        the batched products), rms_norm, rope, silu_mul (SiLU(gate)*up),
+        residual (the two adds per layer), and total; total minus the
+        sections is the rest (embedding row, cos/sin, reshapes, Python, the
+        timer calls). Without profiling the timer is a no-op function, so
+        both runs execute the same code."""
         c = self.cfg
         assert self.k_cache is not None and self.v_cache is not None, "call reset() first"
         pos = self.pos
         if pos >= self.k_cache.shape[2]:
             raise ValueError(f"KV cache full ({self.k_cache.shape[2]} positions)")
-        nh, nkv, hd, eps = c.num_attention_heads, c.num_key_value_heads, c.head_dim, c.rms_norm_eps
-        cos, sin = rope_cos_sin(self.inv_freq, pos)
-        rope = self._rope
-        x = self._embed_row(token)
-        for li, L in enumerate(self.layers):
-            h = rms_norm(x, L.attn_norm, eps)
-            q = rope(L.wq(h).reshape(nh, hd), cos, sin)
-            k = rope(L.wk(h).reshape(nkv, hd), cos, sin)
-            x = x + L.wo(self._attention(li, q, k, L.wv(h).reshape(nkv, hd), pos))
-            h = rms_norm(x, L.mlp_norm, eps)
-            x = x + L.w_down(sk.silu(L.w_gate(h)) * L.w_up(h))
-        self.pos = pos + 1
-        if not logits:
-            return None
-        self.last_logits = self.lm_head(rms_norm(x, self.norm, eps))
-        return self.last_logits
-
-    def _step_profiled(self, token: int) -> np.ndarray:
-        """step() with each section timed into self.profile (seconds, summed):
-        gemv (every Linear), attention (cache write, per-KV-head sgemm/softmax),
-        norm_rope_silu (RMSNorm, RoPE, SiLU and the gate*up product), total.
-        total minus the sections is Python and NumPy glue (embedding row,
-        residual adds, reshapes, call overhead outside the timed calls) plus
-        the timer calls themselves (about 0.1 us each, ~200 per token)."""
-        c = self.cfg
         P = self.profile
-        clock = time.perf_counter
+        clock = time.perf_counter if P is not None else _no_clock
+        acc = dict.fromkeys(SECTIONS, 0.0)
         t_start = clock()
-        pos = self.pos
-        nh, nkv, hd, eps = c.num_attention_heads, c.num_key_value_heads, c.head_dim, c.rms_norm_eps
-        gemv_s = attn_s = misc_s = 0.0
-        t = clock()
+        nh, nkv, hd = c.num_attention_heads, c.num_key_value_heads, c.head_dim
         cos, sin = rope_cos_sin(self.inv_freq, pos)
-        misc_s += clock() - t
-        x = self._embed_row(token)
+        cos, sin = cos[:hd // 2], sin[:hd // 2]
+        x = self._x
+        x[:] = self._embed_row(token)
         for li, L in enumerate(self.layers):
-            t = clock(); h = rms_norm(x, L.attn_norm, eps); misc_s += clock() - t
-            t = clock(); q, k, v = L.wq(h), L.wk(h), L.wv(h); gemv_s += clock() - t
-            t = clock(); q = self._rope(q.reshape(nh, hd), cos, sin); k = self._rope(k.reshape(nkv, hd), cos, sin)
-            misc_s += clock() - t
-            t = clock(); a = self._attention(li, q, k, v.reshape(nkv, hd), pos); attn_s += clock() - t
-            t = clock(); o = L.wo(a); gemv_s += clock() - t
-            x = x + o
-            t = clock(); h = rms_norm(x, L.mlp_norm, eps); misc_s += clock() - t
-            t = clock(); gate, up = L.w_gate(h), L.w_up(h); gemv_s += clock() - t
-            t = clock(); m = sk.silu(gate) * up; misc_s += clock() - t
-            t = clock(); d = L.w_down(m); gemv_s += clock() - t
-            x = x + d
-        t = clock(); h = rms_norm(x, self.norm, eps); misc_s += clock() - t
-        t = clock(); self.last_logits = self.lm_head(h); gemv_s += clock() - t
+            t0 = clock(); h = self._rms_norm(x, L.attn_norm)
+            t1 = clock(); q, k, v = L.wq(h), L.wk(h), L.wv(h)
+            t2 = clock(); q = self._rope(q.reshape(nh, hd), cos, sin, self._tq)
+            k = self._rope(k.reshape(nkv, hd), cos, sin, self._tk)
+            t3 = clock(); a = self._attention(li, q, k, v.reshape(nkv, hd), pos)
+            t4 = clock(); o = L.wo(a)
+            t5 = clock(); np.add(x, o, out=x)
+            t6 = clock(); h = self._rms_norm(x, L.mlp_norm)
+            t7 = clock(); gate, up = L.w_gate(h), L.w_up(h)
+            t8 = clock(); m = sk.silu_mul(gate, up)
+            t9 = clock(); d = L.w_down(m)
+            t10 = clock(); np.add(x, d, out=x)
+            t11 = clock()
+            if P is not None:
+                acc["rms_norm"] += (t1 - t0) + (t7 - t6)
+                acc["gemv"] += (t2 - t1) + (t5 - t4) + (t8 - t7) + (t10 - t9)
+                acc["rope"] += t3 - t2
+                acc["attention"] += t4 - t3
+                acc["residual"] += (t6 - t5) + (t11 - t10)
+                acc["silu_mul"] += t9 - t8
         self.pos = pos + 1
-        total = clock() - t_start
-        for key, val in (("gemv", gemv_s), ("attention", attn_s), ("norm_rope_silu", misc_s), ("total", total)):
-            P[key] = P.get(key, 0.0) + val
-        P["steps"] = P.get("steps", 0) + 1
-        return self.last_logits
+        out = None
+        if logits:
+            t0 = clock(); h = self._rms_norm(x, self.norm)
+            t1 = clock(); out = self.last_logits = self.lm_head(h)
+            t2 = clock()
+            if P is not None:
+                acc["rms_norm"] += t1 - t0
+                acc["gemv"] += t2 - t1
+        if P is not None:
+            acc["total"] = clock() - t_start
+            for key, val in acc.items():
+                P[key] = P.get(key, 0.0) + val
+            P["steps"] = P.get("steps", 0) + 1
+        return out
 
     def generate(self, prompt_ids: Sequence[int], max_new_tokens: int,
                  stats: dict | None = None, stop_at_eos: bool = True) -> Iterator[int]:

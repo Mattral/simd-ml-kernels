@@ -28,6 +28,7 @@ const KernelTable& kernel_table_avx2() noexcept {
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,
         &activations::softmax_row_avx2, &activations::layer_norm_avx2,
+        &activations::rms_norm_avx2, &activations::silu_mul_avx2,
     };
     return t;
 }

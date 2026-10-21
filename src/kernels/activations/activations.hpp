@@ -36,4 +36,20 @@ void layer_norm_avx2(const float* input, float* output, int n,
                      const float* gamma, const float* beta,
                      float eps = 1e-5f);
 
+/**
+ * rms_norm_avx2 — RMSNorm of one row (Llama, T5):
+ *   output[i] = weight[i] * (input[i] * r),  r = 1 / sqrt(Σx²/n + eps)
+ * in that order of operations (as transformers' LlamaRMSNorm); weight may be
+ * nullptr. Σx² accumulates in float lanes added into a double every 1024
+ * elements. |err| <= 1e-30 + 1e-6*|ref| against float64 (rms_norm_avx2.cpp).
+ */
+void rms_norm_avx2(const float* input, float* output, int n, const float* weight, float eps);
+
+/**
+ * silu_mul_avx2 — output[i] = SiLU(gate[i]) * up[i], the gated MLP product of
+ * Llama's SwiGLU, in one pass (SiLU as silu_avx2, then one multiply).
+ * |err| <= 1e-35*|up| + 1.1e-6*|ref| for finite inputs (silu_avx2.cpp).
+ */
+void silu_mul_avx2(const float* gate, const float* up, float* output, int n);
+
 } // namespace activations

@@ -75,6 +75,34 @@ class TestInputValidation:
         with pytest.raises(simd_ml_kernels.ArgumentError, match="gamma"):
             simd_ml_kernels.layer_norm(x, gamma=gamma)
 
+    def test_rms_norm_weight_wrong_size(self):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="weight"):
+            simd_ml_kernels.rms_norm(np.ones(64, np.float32), np.ones(32, np.float32))
+
+    def test_rms_norm_wrong_dtype(self):
+        with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
+            simd_ml_kernels.rms_norm(np.ones(64, np.float64))
+        with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
+            simd_ml_kernels.rms_norm(np.ones(64, np.float32), np.ones(64, np.float64))
+
+    def test_rms_norm_negative_eps(self):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="eps"):
+            simd_ml_kernels.rms_norm(np.ones(8, np.float32), eps=-1.0)
+
+    def test_rms_norm_non_contiguous(self):
+        with pytest.raises(simd_ml_kernels.ArgumentError):
+            simd_ml_kernels.rms_norm(np.ones((8, 8), np.float32)[:, ::2])
+
+    def test_silu_mul_shape_mismatch(self):
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="same shape"):
+            simd_ml_kernels.silu_mul(np.ones(8, np.float32), np.ones(9, np.float32))
+        with pytest.raises(simd_ml_kernels.ArgumentError, match="same shape"):
+            simd_ml_kernels.silu_mul(np.ones((2, 4), np.float32), np.ones(8, np.float32))
+
+    def test_silu_mul_wrong_dtype(self):
+        with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
+            simd_ml_kernels.silu_mul(np.ones(8, np.float32), np.ones(8, np.float64))
+
     def test_softmax_wrong_dtype(self):
         x = np.random.randn(64).astype(np.float64)
         with pytest.raises(simd_ml_kernels.DTypeError, match="float32"):
@@ -606,6 +634,14 @@ class TestLowpTransB:
     @pytest.mark.parametrize("shape", [(0,), (3, 0), (0, 5)])
     def test_layer_norm_empty(self, shape):
         assert simd_ml_kernels.layer_norm(np.ones(shape, np.float32)).shape == shape
+
+    @pytest.mark.parametrize("shape", [(0,), (3, 0), (0, 5)])
+    def test_rms_norm_empty(self, shape):
+        assert simd_ml_kernels.rms_norm(np.ones(shape, np.float32)).shape == shape
+
+    def test_silu_mul_empty(self):
+        e = np.ones((0, 4), np.float32)
+        assert simd_ml_kernels.silu_mul(e, e).shape == (0, 4)
 
     @pytest.mark.parametrize("shape", [(0,), (3, 0), (0, 5)])
     def test_softmax_empty(self, shape):

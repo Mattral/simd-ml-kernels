@@ -51,10 +51,9 @@ def test_gguf_blocks_match_our_quantizers(llama_module, weights):
 
 def test_gguf_f32_greedy_matches_transformers(reference, llama_module):
     # The GGUF stores q/k rows in Meta's interleaved RoPE order (the converter
-    # permutes them); the GGUF path rotates adjacent pairs, and must give the
-    # same tokens as transformers.
+    # permutes them); the loader permutes them back to the HF order
+    # (unpermute_qk_rows), and the tokens must be transformers'.
     m = llama_module.Llama(LLAMA_DIR, gguf=_gguf(llama_module, "fp32"))
-    assert m.rope_interleaved
     for i in range(len(PROMPTS)):
         ids = reference[f"ids{i}"]
         m.reset(NPOS)

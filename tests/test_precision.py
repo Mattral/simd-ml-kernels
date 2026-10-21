@@ -1129,6 +1129,122 @@ class TestLayerNorm:
                     label="vs PyTorch LayerNorm")
 
 
+# ─── RMSNorm and SiLU·up Tests ────────────────────────────────────────────────
+
+def rms_norm_numpy(x, weight=None, eps=1e-5):
+    x64 = x.astype(np.float64)
+    r = 1.0 / np.sqrt(np.mean(x64 * x64, axis=-1, keepdims=True) + eps)
+    return x64 * r * (1.0 if weight is None else weight.astype(np.float64))
+
+
+class TestRMSNorm:
+    # Documented bound (rms_norm_avx2.cpp, docstring): 1e-30 + 1e-6*|ref|.
+    RTOL = 1e-6
+    ATOL = 1e-30
+
+    @pytest.mark.parametrize("use_weight", [False, True])
+    @pytest.mark.parametrize("n", [1, 7, 8, 9, 31, 32, 33, 1023, 1024, 1025, 2048, 4099])
+    def test_rms_norm_vs_float64(self, n, use_weight):
+        x = (3.0 * RNG.standard_normal((3, n))).astype(np.float32)
+        w = RNG.uniform(0.5, 1.5, n).astype(np.float32) if use_weight else None
+        assert_close(simd_ml_kernels.rms_norm(x, w), rms_norm_numpy(x, w), rtol=self.RTOL,
+                     atol=self.ATOL, label=f"RMSNorm n={n} weight={use_weight}")
+
+    @pytest.mark.parametrize("scale", [1e-20, 1e-3, 1e15])
+    def test_rms_norm_scales(self, scale):
+        """Rows far below sqrt(eps) (eps dominates) and far above 1."""
+        x = (scale * RNG.standard_normal(2048)).astype(np.float32)
+        w = RNG.uniform(0.5, 1.5, 2048).astype(np.float32)
+        assert_close(simd_ml_kernels.rms_norm(x, w, eps=1e-5), rms_norm_numpy(x, w, 1e-5),
+                     rtol=self.RTOL, atol=self.ATOL, label=f"RMSNorm scale={scale}")
+
+    def test_rms_norm_unaligned(self):
+        buf = (2.0 * RNG.standard_normal(2049)).astype(np.float32)
+        x = buf[1:]   # offset 4 bytes from the allocation
+        w = RNG.uniform(0.5, 1.5, 2048).astype(np.float32)
+        assert_close(simd_ml_kernels.rms_norm(x, w), rms_norm_numpy(x, w), rtol=self.RTOL,
+                     atol=self.ATOL, label="RMSNorm unaligned")
+
+    def test_rms_norm_special_values(self):
+        x = RNG.standard_normal((3, 37)).astype(np.float32)
+        x[0, 20] = np.nan
+        x[1, 5] = np.inf
+        x[2] = 0.0
+        out = simd_ml_kernels.rms_norm(x)
+        assert np.isnan(out[0]).all()
+        assert np.isnan(out[1, 5]) and (np.delete(out[1], 5) == 0.0).all()
+        assert (out[2] == 0.0).all()
+
+    def test_rms_norm_matches_llama_numpy_order(self):
+        """The Llama example's NumPy RMSNorm (transformers' order) agrees to
+        the bound; the kernel only sums x² more accurately."""
+        x = (4.0 * RNG.standard_normal(2048)).astype(np.float32)
+        w = RNG.uniform(0.5, 1.5, 2048).astype(np.float32)
+        ref = w * (x * np.float32(1.0 / np.sqrt(float(np.mean(x * x, dtype=np.float32)) + 1e-5)))
+        assert_close(simd_ml_kernels.rms_norm(x, w), ref.astype(np.float64), rtol=2e-6, atol=self.ATOL,
+                     label="RMSNorm vs NumPy float32")
+
+    @pytest.mark.skipif(not HAS_TORCH or not hasattr(torch.nn.functional, "rms_norm"),
+                        reason="PyTorch with F.rms_norm not installed")
+    def test_rms_norm_vs_pytorch(self):
+        x = RNG.standard_normal((4, 2048)).astype(np.float32)
+        w = RNG.uniform(0.5, 1.5, 2048).astype(np.float32)
+        ref = F.rms_norm(torch.from_numpy(x), (2048,), torch.from_numpy(w), 1e-5).numpy()
+        assert_close(simd_ml_kernels.rms_norm(x, w), ref, rtol=2e-6, atol=self.ATOL,
+                     label="vs PyTorch rms_norm")
+
+
+class TestSiluMul:
+    # Documented bound (silu_avx2.cpp): 1e-35*|up| + 1.1e-6*|ref| for finite inputs.
+    RTOL = 1.1e-6
+
+    def _check(self, g, u, label):
+        out = simd_ml_kernels.silu_mul(g, u).astype(np.float64)
+        with np.errstate(over="ignore"):
+            ref = silu_numpy(g.astype(np.float64)) * u.astype(np.float64)
+        over = np.abs(ref) > np.finfo(np.float32).max   # the float32 product overflows: ±inf
+        assert (out[over] == np.sign(ref[over]) * np.inf).all(), f"{label}: overflow not ±inf"
+        out, ref, u = out[~over], ref[~over], u[~over]
+        err = np.abs(out - ref)
+        bound = 1e-35 * np.abs(u.astype(np.float64)) + self.RTOL * np.abs(ref)
+        worst = np.max(err / np.maximum(bound, 1e-300)) if err.size else 0.0
+        assert (err <= bound).all(), f"{label}: worst error {worst:.3g}x the bound"
+
+    @pytest.mark.parametrize("n", [0, 1, 7, 8, 9, 15, 16, 17, 1023, 8192, 8193])
+    def test_silu_mul_vs_float64(self, n):
+        g = RNG.uniform(-200.0, 200.0, n).astype(np.float32)   # past the x < -88 cut-off
+        u = (5.0 * RNG.standard_normal(n)).astype(np.float32)
+        self._check(g, u, f"SiLU*up n={n}")
+
+    def test_silu_mul_every_binade(self):
+        e = np.arange(-126, 128)
+        mags = np.concatenate([np.ldexp(m, e) for m in (1.0, 1.3, 1.9999999)])
+        g = np.concatenate([mags, -mags]).astype(np.float32)
+        u = RNG.uniform(-3.0, 3.0, g.size).astype(np.float32)
+        self._check(g, u, "SiLU*up every binade")
+
+    def test_silu_mul_equals_silu_times_up_bitwise(self):
+        """One rounding after SiLU: the same bits as silu(g) * up on the same table."""
+        g = RNG.uniform(-30.0, 30.0, 1027).astype(np.float32)
+        u = RNG.standard_normal(1027).astype(np.float32)
+        np.testing.assert_array_equal(simd_ml_kernels.silu_mul(g, u), simd_ml_kernels.silu(g) * u)
+
+    def test_silu_mul_unaligned_and_2d(self):
+        gb = RNG.uniform(-10, 10, 2 * 1024 + 1).astype(np.float32)
+        ub = RNG.standard_normal(2 * 1024 + 1).astype(np.float32)
+        g, u = gb[1:].reshape(2, 1024), ub[1:].reshape(2, 1024)
+        out = simd_ml_kernels.silu_mul(g, u)
+        assert out.shape == (2, 1024)
+        self._check(g.ravel(), u.ravel(), "SiLU*up unaligned 2-D")
+
+    def test_silu_mul_special_values(self):
+        g = np.array([np.inf, -np.inf, np.nan, 0.0, 1.0], np.float32)
+        u = np.array([2.0, 2.0, 2.0, 5.0, np.nan], np.float32)
+        out = simd_ml_kernels.silu_mul(g, u)
+        assert out[0] == np.inf and np.isnan(out[1]) and np.isnan(out[2])
+        assert out[3] == 0.0 and np.isnan(out[4])
+
+
 # ─── Alignment / build_info Tests ─────────────────────────────────────────────
 
 class TestBuildInfo:

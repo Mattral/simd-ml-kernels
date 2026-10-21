@@ -29,12 +29,14 @@ from ._core import (
     quantize_q4_0,
     quantize_q8_0,
     relu,
+    rms_norm,
     set_num_threads,
     sgemm,
     sgemm_bf16,
     sgemm_u8s8,
     sgemm_f16,
     silu,
+    silu_mul,
     softmax,
 )
 
@@ -62,11 +64,13 @@ __all__ = [
     "quantize_q4_0",
     "quantize_q8_0",
     "relu",
+    "rms_norm",
     "set_num_threads",
     "sgemm",
     "sgemm_bf16",
     "sgemm_u8s8",
     "sgemm_f16",
     "silu",
+    "silu_mul",
     "softmax",
 ]

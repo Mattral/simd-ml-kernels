@@ -234,10 +234,11 @@ def main() -> int:
                           f"decode step times, median of {args.runs} runs after a warm-up; clock sampled on every "
                           f"thread of a team of `threads` before and after each run, all runs repeated (up to 3 "
                           f"attempts) if a sample is below min_ghz; {args.cooldown:g} s idle before each case",
-                "breakdown": "one more run with each section of the step timed (perf_counter around each call): "
-                             "gemv = every projection and lm_head; attention = KV-cache write and per-KV-head "
-                             "sgemm/softmax/sgemm; norm_rope_silu = RMSNorm, RoPE, SiLU and gate*up; other = "
-                             "total - those (embedding row, residual adds, reshapes, Python, timer calls)",
+                "breakdown": "one more run with the step's sections timed (perf_counter between them; the "
+                             "timed run executes the same code, its clock otherwise a no-op): gemv = every "
+                             "projection and lm_head; attention = KV-cache write, q·Kᵀ, softmax, p·V; rms_norm; "
+                             "rope; silu_mul = SiLU(gate)·up; residual = the two adds per layer; other = total - "
+                             "those (embedding row, cos/sin, reshapes, Python, timer calls)",
                 "llama_cpp": f"llama-bench -p 0 -n {args.gen} -d 0,{args.prompt_tokens} -t <threads> "
                              f"-r {args.llama_reps} on the same GGUF and CPUs (avg_ts; n_depth = KV entries before "
                              "the generated tokens); llama-perplexity -c 512 -b 512",

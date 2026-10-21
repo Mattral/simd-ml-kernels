@@ -35,6 +35,7 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -375,6 +376,52 @@ static py::array_t<float> py_layer_norm(py::array x,
             float*       row_out = out_ptr + static_cast<std::size_t>(r) * row_size;
             layer_norm_row(row_in, row_out, row_size, gamma_ptr, beta_ptr, eps);
         }
+    }
+    return out;
+}
+
+// ─── Binding: rms_norm ───────────────────────────────────────────────────────
+static py::array_t<float> py_rms_norm(py::array x, py::object weight_obj = py::none(), float eps = 1e-5f) {
+    validate_array(x, "x");
+    if (x.ndim() < 1) throw ArgumentError("rms_norm requires an array with at least 1 dimension");
+    if (!(eps >= 0.0f)) throw ArgumentError("rms_norm: eps must be >= 0");
+    const int ndim = static_cast<int>(x.ndim());
+    const int row_size = static_cast<int>(x.shape(ndim - 1));
+    const int rows = row_size > 0 ? static_cast<int>(x.size()) / row_size : 0;
+    const float* weight_ptr = nullptr;
+    py::array weight;
+    if (!weight_obj.is_none()) {
+        weight = weight_obj.cast<py::array>();
+        validate_array(weight, "weight");
+        if (weight.ndim() != 1 || weight.shape(0) != row_size)
+            throw ArgumentError("rms_norm: weight must be 1-D with the size of x's last dimension");
+        weight_ptr = static_cast<const float*>(weight.data());
+    }
+    py::array_t<float> out(x.request().shape);
+    const float* in_ptr = static_cast<const float*>(x.data());
+    float* out_ptr = out.mutable_data();
+    const simd_ml::RmsNormFn rms_norm_row = simd_ml::kernels().rms_norm_row;
+    {
+        py::gil_scoped_release release;
+        for (int r = 0; r < rows; ++r)
+            rms_norm_row(in_ptr + static_cast<std::size_t>(r) * row_size,
+                         out_ptr + static_cast<std::size_t>(r) * row_size, row_size, weight_ptr, eps);
+    }
+    return out;
+}
+
+// ─── Binding: silu_mul ───────────────────────────────────────────────────────
+static py::array_t<float> py_silu_mul(py::array gate, py::array up) {
+    validate_array(gate, "gate");
+    validate_array(up, "up");
+    if (gate.ndim() != up.ndim() || !std::equal(gate.shape(), gate.shape() + gate.ndim(), up.shape()))
+        throw ArgumentError("silu_mul: gate and up must have the same shape");
+    py::array_t<float> out(gate.request().shape);
+    const int n = static_cast<int>(gate.size());
+    {
+        py::gil_scoped_release release;
+        simd_ml::kernels().silu_mul(static_cast<const float*>(gate.data()),
+                                    static_cast<const float*>(up.data()), out.mutable_data(), n);
     }
     return out;
 }
@@ -1200,6 +1247,37 @@ Returns
 -------
 np.ndarray[float32] same shape as x.
 )doc");
+
+    m.def("rms_norm", &py_rms_norm,
+          py::arg("x"),
+          py::arg("weight") = py::none(),
+          py::arg("eps")    = 1e-5f,
+          R"doc(
+Apply RMS normalization over the last axis (Llama's LlamaRMSNorm).
+
+output = weight * (x * r),  r = 1 / sqrt(mean(x**2) + eps)
+
+in that order of operations, as transformers computes it in float32.
+Error vs float64: |err| <= 1e-30 + 1e-6*|ref| (tested). A NaN in a row
+makes that row NaN; an infinity makes its row 0 except NaN at the infinity.
+
+Parameters
+----------
+x      : np.ndarray[float32], any shape (rows along the last axis)
+weight : np.ndarray[float32], shape [last_dim], optional scale
+eps    : float >= 0 (default 1e-5)
+
+Returns
+-------
+np.ndarray[float32] same shape as x.
+)doc");
+
+    m.def("silu_mul", &py_silu_mul,
+          py::arg("gate"), py::arg("up"),
+          "Return SiLU(gate) * up elementwise in one pass (the SwiGLU product of\n"
+          "Llama's MLP). gate and up: float32, same shape, C-contiguous.\n\n"
+          "Error vs float64: |err| <= 1e-35*|up| + 1.1e-6*|SiLU(gate)*up| for finite\n"
+          "inputs (tested); SiLU as silu(), then one float32 multiply.");
 
     m.def("set_num_threads", &py_set_num_threads,
           py::arg("n"),

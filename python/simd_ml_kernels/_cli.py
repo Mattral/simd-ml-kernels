@@ -293,6 +293,32 @@ def _layer_norm_check():
     return worst, 1.0, "max err / (1e-5 + 1e-4*|ref|), gamma and beta"
 
 
+def _rms_norm_check():
+    rng = np.random.default_rng(4)
+    worst = 0.0
+    for n in (1, 7, 9, 33, 1025, 2048):
+        x = (3.0 * rng.standard_normal((3, n))).astype(np.float32)
+        w = rng.uniform(0.5, 1.5, n).astype(np.float32)
+        x64 = x.astype(np.float64)
+        r = x64 / np.sqrt(np.mean(x64 * x64, -1, keepdims=True) + 1e-5) * w
+        err = np.abs(sk.rms_norm(x, w) - r)
+        worst = max(worst, float(np.max(err / (1e-30 + 1e-6 * np.abs(r)))))
+    return worst, 1.0, "max err / (1e-30 + 1e-6*|ref|), with weight"
+
+
+def _silu_mul_check():
+    rng = np.random.default_rng(5)
+    worst = 0.0
+    for n in (1, 7, 9, 15, 8192):
+        g = rng.uniform(-200.0, 200.0, n).astype(np.float32)
+        u = (5.0 * rng.standard_normal(n)).astype(np.float32)
+        g64, u64 = g.astype(np.float64), u.astype(np.float64)
+        r = g64 / (1.0 + np.exp(-g64)) * u64
+        err = np.abs(sk.silu_mul(g, u) - r)
+        worst = max(worst, float(np.max(err / (1e-35 * np.abs(u64) + 1.1e-6 * np.abs(r) + 1e-300))))
+    return worst, 1.0, "max err / (1e-35*|up| + 1.1e-6*|ref|) on [-200, 200]"
+
+
 def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
     checks = [
         ("sgemm", _gemm_check(lambda a, b: sk.sgemm(a, b), _as_f32)),
@@ -314,6 +340,8 @@ def selftest_checks() -> list[tuple[str, Callable[[], tuple]]]:
                                     rtol=1e-6, lo=-200.0, hi=200.0)),
         ("softmax", _softmax_check),
         ("layer_norm", _layer_norm_check),
+        ("rms_norm", _rms_norm_check),
+        ("silu_mul", _silu_mul_check),
     ]
     checks.insert(1, ("sgemm_f16", _gemm_check(lambda a, b: sk.sgemm_f16(a, b), _as_f16)))
     checks.insert(2, ("sgemm_f16 tb", _gemm_check(
@@ -1366,6 +1394,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     rows = rng.standard_normal((args.elems // 1024, 1024)).astype(np.float32)
     g = rng.standard_normal(1024).astype(np.float32)
     be = rng.standard_normal(1024).astype(np.float32)
+    x2 = rng.standard_normal(args.elems).astype(np.float32)
     ours = {
         "gelu_exact": (lambda: sk.gelu(x), x.shape),
         "gelu_tanh": (lambda: sk.gelu(x, approximate="tanh"), x.shape),
@@ -1373,11 +1402,13 @@ def cmd_bench(args: argparse.Namespace) -> int:
         "relu": (lambda: sk.relu(x), x.shape),
         "softmax": (lambda: sk.softmax(rows), rows.shape),
         "layer_norm": (lambda: sk.layer_norm(rows, gamma=g, beta=be), rows.shape),
+        "rms_norm": (lambda: sk.rms_norm(rows, g), rows.shape),
+        "silu_mul": (lambda: sk.silu_mul(x, x2), x.shape),
     }
     theirs = {}
     if torch is not None:
         F = torch.nn.functional
-        xt, rt = torch.from_numpy(x), torch.from_numpy(rows)
+        xt, rt, x2t = torch.from_numpy(x), torch.from_numpy(rows), torch.from_numpy(x2)
         gt, bt = torch.from_numpy(g), torch.from_numpy(be)
         theirs = {
             "gelu_exact": lambda: F.gelu(xt),
@@ -1386,7 +1417,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
             "relu": lambda: torch.relu(xt),
             "softmax": lambda: torch.softmax(rt, dim=-1),
             "layer_norm": lambda: F.layer_norm(rt, (1024,), gt, bt, 1e-5),
+            "silu_mul": lambda: F.silu(xt) * x2t,
         }
+        if hasattr(F, "rms_norm"):
+            theirs["rms_norm"] = lambda: F.rms_norm(rt, (1024,), gt, 1e-5)
     for name, (fn, shape) in ours.items() if "act" in args.cases else []:
         impls = [("simd_ml_kernels", fn)]
         if name in theirs:

@@ -61,6 +61,10 @@ const KernelTable& kernel_table_avx512() noexcept {
         &gelu_erf_forward_avx2, &gelu_forward_avx2,
         &activations::relu_avx2, &activations::silu_avx2,
         &activations::softmax_row_avx2, &activations::layer_norm_avx2,
+        // AVX2 versions: a 2048-value row is ~1 µs of work against a call
+        // that starts with cold caches; a ZMM version is not measured faster
+        // (no AVX-512 machine here, AGENTS.md "Adding a kernel" step 2).
+        &activations::rms_norm_avx2, &activations::silu_mul_avx2,
     };
     return t;
 }

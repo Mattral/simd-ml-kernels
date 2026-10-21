@@ -334,6 +334,36 @@ y = simd_ml_kernels.layer_norm(x, gamma=gamma, beta=beta)
 
 **Implementation**: 3 passes (mean → variance → normalize); the statistics are summed in float lanes, shifted by the row's first element, and added into a double every 1024 elements (`docs/DESIGN.md` §3.5).
 
+### `rms_norm(x, weight=None, eps=1e-5) → np.ndarray`
+
+RMS normalization over the last axis of `x`, as Llama's `LlamaRMSNorm`
+computes it in float32 (the same order of operations):
+
+```
+output = weight * (x * r),   r = 1 / sqrt(mean(x**2) + eps)
+```
+
+`weight` is optional, 1-D with the size of the last dimension; `eps >= 0`.
+Error vs float64: `|err| ≤ 1e-30 + 1e-6·|ref|` (tests and `selftest`). A NaN in
+a row makes the row NaN; an infinity makes its row 0, except NaN at the
+infinity (as PyTorch). One pass for Σx² (float lanes added into a double every
+1024 elements), one to scale (`docs/DESIGN.md` §3.6).
+
+```python
+x = np.random.randn(4, 2048).astype(np.float32)
+w = np.ones(2048, np.float32)
+y = simd_ml_kernels.rms_norm(x, w)
+```
+
+### `silu_mul(gate, up) → np.ndarray`
+
+`SiLU(gate) * up` elementwise in one pass: the gated product of a SwiGLU MLP
+(Llama: `down(silu(gate(x)) * up(x))`). `gate` and `up` are float32 arrays of
+the same shape. Error vs float64: `|err| ≤ 1e-35·|up| + 1.1e-6·|ref|` for finite
+inputs; the result is bitwise `silu(gate) * up` on the same table (SiLU as
+`silu`, then one float32 multiply), without the intermediate array
+(`docs/DESIGN.md` §3.3).
+
 ---
 
 ## Threading

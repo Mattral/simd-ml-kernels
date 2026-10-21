@@ -49,4 +49,25 @@ void silu_avx2(const float* input, float* output, int n) {
     apply_elementwise_avx2(input, output, static_cast<std::size_t>(n), silu8);
 }
 
+// SiLU(gate)·up in one pass: in a decode step the two NumPy calls it replaces
+// (silu, then a multiply that allocates) each ran with caches just flushed by
+// the preceding GEMV, 6.0 µs against 3.8 for the single silu call (dev run,
+// 8192 values, Lunar Lake P-core, right after a 4-thread Q4_0 GEMV). One
+// multiply after silu8 adds one rounding (2^-24 relative) to SiLU's bound.
+// The tail uses masked loads, as apply_elementwise_avx2, so every element
+// gets the same arithmetic and nothing past n is read or written.
+void silu_mul_avx2(const float* gate, const float* up, float* output, int n) {
+    if (n <= 0) return;
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm256_storeu_ps(output + i, _mm256_mul_ps(silu8(_mm256_loadu_ps(gate + i)),
+                                                   _mm256_loadu_ps(up + i)));
+    if (i < n) {
+        const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        const __m256i mask = _mm256_cmpgt_epi32(_mm256_set1_epi32(n - i), lane);
+        _mm256_maskstore_ps(output + i, mask, _mm256_mul_ps(silu8(_mm256_maskload_ps(gate + i, mask)),
+                                                            _mm256_maskload_ps(up + i, mask)));
+    }
+}
+
 } // namespace activations

@@ -55,6 +55,10 @@ using UnaryFn  = void (*)(const float* in, float* out, std::size_t n);
 using RowFn    = void (*)(const float* in, float* out, int n);
 using LayerNormFn = void (*)(const float* in, float* out, int n,
                              const float* gamma, const float* beta, float eps);
+/** out = weight·(in·r), r = 1/sqrt(mean(in²) + eps); weight may be nullptr. */
+using RmsNormFn = void (*)(const float* in, float* out, int n, const float* weight, float eps);
+/** out = f(a, b) elementwise over n floats. */
+using BinaryRowFn = void (*)(const float* a, const float* b, float* out, int n);
 using BlockingFn = void (*)(int* kc, int* mc, int* nc);
 
 struct KernelTable {
@@ -75,6 +79,8 @@ struct KernelTable {
     RowFn       silu;
     RowFn       softmax_row;
     LayerNormFn layer_norm_row;
+    RmsNormFn   rms_norm_row;  ///< RMSNorm of one row (LlamaRMSNorm order of operations)
+    BinaryRowFn silu_mul;      ///< SiLU(gate)·up, the SwiGLU product
 };
 
 /** CPUID/XGETBV results, detected once. */

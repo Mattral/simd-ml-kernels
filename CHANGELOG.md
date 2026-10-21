@@ -17,6 +17,18 @@ under **Changed** with a migration note.
   shapes come from its config.json when `SIMD_ML_LLAMA_CONFIG` points at it.
 
 ### Added
+- `rms_norm(x, weight=None, eps=1e-5)`: RMSNorm over the last axis in
+  Llama's order of operations, error ≤ 1e-30 + 1e-6·|ref|; and
+  `silu_mul(gate, up)`: SiLU(gate)·up in one pass (SwiGLU), bitwise
+  `silu(gate) * up`. Scalar and AVX2 kernels (the AVX-512 table uses the AVX2
+  ones), tests against float64, selftest checks, bench cases against
+  PyTorch. docs/DESIGN.md §3.3, §3.6.
+- `examples/llama/`: the decode step uses `rms_norm` and `silu_mul`,
+  attention batched over the KV heads (3 calls per layer instead of 32),
+  preallocated buffers, GGUF q/k rows permuted back to the HF order at load
+  (one RoPE layout), and a profile split into GEMVs, attention, RMSNorm,
+  RoPE, SiLU·up and residual adds. Non-GEMV time per token at Q4_0 / 4
+  threads: 2.86–2.88 → 2.07–2.12 ms in a dev A/B (DESIGN.md §9).
 - `examples/llama/`: Llama-3.x greedy decode built from the decode GEMV,
   `silu`, `softmax` and NumPy (`generate.py --prompt ... --tokens 64
   --threads N --weights fp32`); an example, not library API. With

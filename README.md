@@ -216,6 +216,8 @@ is in
 | **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
 | **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
+| **SiLU·up** | `activations/silu_avx2.cpp` | `silu_mul(gate, up)`: SiLU(gate)·up in one pass (SwiGLU); error ≤ 1e-35·\|up\| + 1.1e-6·\|ref\| |
+| **RMSNorm** | `activations/rms_norm_avx2.cpp` | `rms_norm(x, weight)`: weight·(x·r), r = 1/sqrt(mean(x²) + ε), Llama's order of operations; error ≤ 1e-30 + 1e-6·\|ref\| |
 | **LayerNorm** | `activations/layer_norm_avx2.cpp` | Two-pass statistics (float lanes, flushed to double), then normalize; optional γ/β; error ≤ 1e-5 + 1e-4·\|ref\| for \|mean\| ≤ 30·std |
 
 Every kernel has a scalar, an AVX2 and (GEMM only) an AVX-512 version, each

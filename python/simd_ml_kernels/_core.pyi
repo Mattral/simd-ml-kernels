@@ -215,6 +215,37 @@ def layer_norm(
     ...
 
 
+def rms_norm(
+    x: NDArray[np.float32],
+    weight: Optional[NDArray[np.float32]] = None,
+    eps: float = 1e-5,
+) -> NDArray[np.float32]:
+    """
+    RMS normalization over the last axis (Llama's LlamaRMSNorm).
+
+    output = weight * (x * r),  r = 1 / sqrt(mean(x**2) + eps)
+
+    Error vs float64: |err| <= 1e-30 + 1e-6*|ref| (tested). A NaN in a row
+    makes that row NaN; an infinity makes its row 0 except NaN at the infinity.
+
+    Parameters
+    ----------
+    x      : ndarray[float32], any shape (rows along the last axis)
+    weight : ndarray[float32], shape [last_dim], optional scale
+    eps    : float >= 0 (default 1e-5)
+    """
+    ...
+
+
+def silu_mul(gate: NDArray[np.float32], up: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Return SiLU(gate) * up elementwise in one pass (the SwiGLU product).
+
+    Error vs float64: |err| <= 1e-35*|up| + 1.1e-6*|SiLU(gate)*up| for finite
+    inputs (tested); SiLU as silu(), then one float32 multiply.
+    """
+    ...
+
+
 # ─── Threading ────────────────────────────────────────────────────────────────
 
 def set_num_threads(n: int) -> None:

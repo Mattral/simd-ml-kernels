@@ -349,7 +349,7 @@ def _roofs(doc: dict) -> str:
             f"(all-core: read {gbs('stream_read_allcore_gbs')}, triad {gbs('stream_triad_allcore_gbs')})")
 
 
-ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm"]
+ACT_ORDER = ["gelu_exact", "gelu_tanh", "silu", "relu", "softmax", "layer_norm", "rms_norm", "silu_mul"]
 
 
 def act_table(doc: dict, detail: bool) -> str:
@@ -671,8 +671,13 @@ def llama_speed_table(doc: dict, detail: bool) -> str:
 
 def llama_breakdown_table(doc: dict) -> str:
     rows = _llama_rows(doc, "llama_decode")
-    head = ["Weights", "Threads", "GEMVs", "Attention", "Norms, RoPE, SiLU", "Other (Python/NumPy glue)",
-            "Total (profiled)"]
+    # Runs before the split profile (f4a501d) recorded RMSNorm, RoPE and SiLU·up
+    # as one section, norm_rope_silu, and the residual adds inside "other".
+    split = any("rms_norm" in r.get("breakdown_ms_per_token", {}) for r in rows.values())
+    cols = ([("rms_norm", "RMSNorm"), ("rope", "RoPE"), ("silu_mul", "SiLU·up"), ("residual", "Residual adds")]
+            if split else [("norm_rope_silu", "Norms, RoPE, SiLU")])
+    head = (["Weights", "Threads", "GEMVs", "Attention"] + [c[1] for c in cols]
+            + ["Other (Python/NumPy glue)", "Total (profiled)"])
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for w, label in LLAMA_W:
         for th in sorted({k[1] for k in rows}):
@@ -684,8 +689,8 @@ def llama_breakdown_table(doc: dict) -> str:
 
             def cell(k: str) -> str:
                 return f"{b[k]:.2f} ms ({100 * b[k] / tot:.0f}%)"
-            lines.append("| " + " | ".join([label, str(th), cell("gemv"), cell("attention"),
-                                            cell("norm_rope_silu"), cell("other"), f"{tot:.2f} ms"]) + " |")
+            lines.append("| " + " | ".join([label, str(th), cell("gemv"), cell("attention")]
+                                           + [cell(k) for k, _ in cols] + [cell("other"), f"{tot:.2f} ms"]) + " |")
     return "\n".join(lines) + "\n"
 
 

@@ -241,6 +241,19 @@ void layer_norm_scalar(const float* in, float* out, int n,
     }
 }
 
+void rms_norm_scalar(const float* in, float* out, int n, const float* weight, float eps) {
+    if (n <= 0) return;
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i) sum += static_cast<double>(in[i]) * in[i];
+    // In double, as rms_norm_avx2.cpp: no rsqrt estimate under -ffast-math.
+    const float r = static_cast<float>(1.0 / std::sqrt(static_cast<double>(static_cast<float>(sum / n) + eps)));
+    for (int i = 0; i < n; ++i) out[i] = weight ? weight[i] * (in[i] * r) : in[i] * r;
+}
+
+void silu_mul_scalar(const float* gate, const float* up, float* out, int n) {
+    for (int i = 0; i < n; ++i) out[i] = gate[i] / (1.0f + std::exp(-gate[i])) * up[i];
+}
+
 }  // namespace
 
 // Exact GeLU with libm erff: the scalar kernel and the tests' float32 oracle.
@@ -263,6 +276,7 @@ const KernelTable& kernel_table_scalar() noexcept {
         &quant::gemv_q4_0_scalar,
         &gelu_forward_scalar, &gelu_tanh_scalar,
         &relu_scalar, &silu_scalar, &softmax_row_scalar, &layer_norm_scalar,
+        &rms_norm_scalar, &silu_mul_scalar,
     };
     return t;
 }

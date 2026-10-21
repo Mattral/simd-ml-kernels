@@ -709,6 +709,15 @@ for every finite x (tested; an exhaustive sweep measured 2.9e-7 relative), and
 was faster in the dev timing at the top of `silu_avx2.cpp`.
 ReLU is `max(x, 0)`.
 
+`silu_mul(gate, up)` is SiLU(gate)·up in one pass, the product a SwiGLU MLP
+computes between its gate/up and down projections: the same `silu8` and one
+multiply, so its bits equal `silu(gate) * up` on the same table and its bound
+gains one rounding (`1e-35·|up| + 1.1e-6·|ref|`). It exists for the decode
+step (§9): after a GEMV the caches hold weights, and every separate NumPy
+operation then starts cold; one call replaced two (dev run, 8192 values right
+after a 4-thread Q4_0 GEMV: 3.8 µs for one library call, 6.0 for silu plus
+the multiply).
+
 ### 3.4 Softmax (`softmax_avx2.cpp`)
 
 Three passes over a row: max (with NaN and +inf detection on the integer bit
@@ -740,6 +749,24 @@ Accuracy: `|err| ≤ 1e-5 + 1e-4·|ref|` for rows with `|mean| ≤ 30·std`
 (tests: up to 65536 elements, and a first element far from the mean). Beyond
 that, rounding the mean to float32 dominates (about `6e-8·|mean|/std`), as it
 does in PyTorch.
+
+### 3.6 RMSNorm (`rms_norm_avx2.cpp`)
+
+`rms_norm(x, weight, eps)` = `weight·(x·r)`, `r = 1/sqrt(mean(x²) + ε)`,
+Llama's normalization, with transformers' order of operations (x·r first).
+One pass sums x² (four 8-float FMA accumulators added into a double every
+1024 elements, as LayerNorm), then r with the square root and division in
+double (no `rsqrt` estimate: under `-ffast-math` clang-15 compiled the float
+form to `vrsqrtss` plus a Newton step, which returned NaN for an infinite
+row), then one pass to scale. No mean is subtracted,
+so there is no conditioning limit: `|err| ≤ 1e-30 + 1e-6·|ref|` for any row
+(tests: 0 to 65537 elements, rows of 1e-20 to 1e15, unaligned). A NaN makes
+its row NaN; an infinity makes Σx² infinite and r = 0, so its row is 0 except
+NaN at the infinity, as PyTorch. The reason for a kernel is the same as for
+`silu_mul`: in the decode step the NumPy form took four operations, each
+after a GEMV had flushed the caches, 25 µs per call in the step against
+3.9 µs alone (dev run, §9). The AVX-512 table uses the AVX2 function for both
+(no AVX-512 machine to show a ZMM version faster).
 
 ---
 

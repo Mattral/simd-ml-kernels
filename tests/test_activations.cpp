@@ -7,7 +7,9 @@
 
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <algorithm>
 #include <numeric>
 #include "../src/kernels/cache_alloc.hpp"
@@ -214,6 +216,76 @@ static bool test_layer_norm(int n, bool use_gamma, bool use_beta, unsigned seed 
     return pass;
 }
 
+// ─── RMSNorm and SiLU·up ─────────────────────────────────────────────────────
+// RMSNorm vs float64: |out - ref| <= 1e-30 + 1e-6*|ref| (rms_norm_avx2.cpp).
+// `off` shifts the pointers by that many floats (unaligned rows).
+static bool test_rms_norm(int n, bool use_weight, float scale, int off = 0) {
+    auto inb = make_aligned_array<float>(n + 1), outb = make_aligned_array<float>(n + 1);
+    auto wb = make_aligned_array<float>(n + 1);
+    float *inp = inb.get() + off, *out = outb.get() + off, *w = wb.get() + off;
+    fill_random(inp, n, 77u + static_cast<unsigned>(n));
+    for (int i = 0; i < n; ++i) {
+        inp[i] *= scale;
+        w[i] = 0.5f + static_cast<float>(i % 13) / 13.0f;
+    }
+    T->rms_norm_row(inp, out, n, use_weight ? w : nullptr, 1e-5f);
+    double ss = 0.0;
+    for (int i = 0; i < n; ++i) ss += static_cast<double>(inp[i]) * inp[i];
+    const double r = n > 0 ? 1.0 / std::sqrt(ss / n + 1e-5) : 0.0;
+    double worst = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double ref = (use_weight ? w[i] : 1.0) * (inp[i] * r);
+        worst = std::max(worst, std::abs(out[i] - ref) / (1e-30 + 1e-6 * std::abs(ref)));
+    }
+    const bool pass = worst <= 1.0;
+    printf("  RMSNorm n=%-6d %-9s scale=%-6g off=%d err/bound=%.3f  %s\n", n,
+           use_weight ? "weight" : "no weight", scale, off, worst, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// A NaN makes the row NaN; an infinity gives 0 for finite x and NaN at the
+// infinity (sum of squares = inf, r = 0). Checked on bit patterns: kernels
+// are built with -ffast-math (AGENTS.md rule 6).
+static bool test_rms_norm_special() {
+    auto is_nan = [](float v) { std::uint32_t b; std::memcpy(&b, &v, 4); return (b & 0x7fffffffu) > 0x7f800000u; };
+    const int n = 37;
+    auto inp = make_aligned_array<float>(n), out = make_aligned_array<float>(n);
+    bool pass = true;
+    fill_random(inp.get(), n, 3u);
+    inp[20] = std::numeric_limits<float>::quiet_NaN();
+    T->rms_norm_row(inp.get(), out.get(), n, nullptr, 1e-5f);
+    for (int i = 0; i < n; ++i) pass &= is_nan(out[i]);
+    fill_random(inp.get(), n, 3u);
+    inp[5] = std::numeric_limits<float>::infinity();
+    T->rms_norm_row(inp.get(), out.get(), n, nullptr, 1e-5f);
+    for (int i = 0; i < n; ++i) pass &= (i == 5) ? is_nan(out[i]) : (out[i] == 0.0f);
+    for (int i = 0; i < n; ++i) inp[i] = 0.0f;   // all zero: r = 1/sqrt(eps), output 0
+    T->rms_norm_row(inp.get(), out.get(), n, nullptr, 1e-5f);
+    for (int i = 0; i < n; ++i) pass &= out[i] == 0.0f;
+    printf("  RMSNorm NaN / inf / zero rows  %s\n", pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// SiLU(g)·u vs float64: |out - ref| <= 1e-35*|u| + 1.1e-6*|ref| (silu_avx2.cpp:
+// SiLU's 1e-35 + 1e-6*|SiLU| bound times |u|, plus one float multiply).
+static bool test_silu_mul(int n, float lo, float hi, int off = 0) {
+    auto gb = make_aligned_array<float>(n + 1), ub = make_aligned_array<float>(n + 1);
+    auto ob = make_aligned_array<float>(n + 1);
+    float *g = gb.get() + off, *u = ub.get() + off, *out = ob.get() + off;
+    fill_sweep(g, n, lo, hi);
+    fill_random(u, n, 11u + static_cast<unsigned>(n));
+    T->silu_mul(g, u, out, n);
+    double worst = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double x = g[i];
+        const double ref = x / (1.0 + std::exp(-x)) * u[i];
+        worst = std::max(worst, std::abs(out[i] - ref) / (1e-35 * std::abs(u[i]) + 1.1e-6 * std::abs(ref) + 1e-45));
+    }
+    const bool pass = worst <= 1.0;
+    printf("  SiLU*up n=%-6d [%g, %g] off=%d err/bound=%.3f  %s\n", n, lo, hi, off, worst, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 // ─── Test runner ─────────────────────────────────────────────────────────────
 // Rows the documented bound covers (|mean| <= 30*std) at lengths where float
 // lane sums would drift (65536), and a first element far from the mean (pass 1
@@ -286,6 +358,21 @@ int run_activation_tests() {
                 for (bool use_beta : {false, true})
                     ok &= test_layer_norm(n, use_gamma, use_beta);
         ok &= test_layer_norm_conditioning();
+
+        printf(" RMSNorm:\n");
+        // 32-float body blocks (4 accumulators), the 1024-element flush, tails.
+        for (int n : {0, 1, 7, 8, 9, 31, 32, 33, 1023, 1024, 1025, 2048, 65537})
+            for (bool use_weight : {false, true})
+                ok &= test_rms_norm(n, use_weight, 1.0f);
+        ok &= test_rms_norm(2048, true, 1e-15f);   // tiny rows: eps dominates
+        ok &= test_rms_norm(2048, true, 1e15f);    // large rows
+        ok &= test_rms_norm(1027, true, 3.0f, 1);  // unaligned
+        ok &= test_rms_norm_special();
+
+        printf(" SiLU*up:\n");
+        for (int n : {0, 1, 7, 8, 9, 15, 16, 17, 1023, 8192, 65537})
+            ok &= test_silu_mul(n, -200.0f, 200.0f);   // crosses the -88 cut-off
+        ok &= test_silu_mul(1027, -10.0f, 10.0f, 1);  // unaligned
         return ok;
     });
 
