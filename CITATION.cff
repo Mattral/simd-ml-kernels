@@ -3,27 +3,31 @@ title: "simd-ml-kernels: hand-vectorized SIMD kernels for machine learning workl
 authors:
   - family-names: "Myet"
     given-names: "Min Htet"
-version: "0.2.0"
-date-released: "2026-06-09"
+version: "0.4.0"
+date-released: "2026-11-20"
 license: "Apache-2.0"
 repository-code: "https://github.com/Mattral/simd-ml-kernels"
 url: "https://zenodo.org/records/20616502"
 abstract: >
-  An open-source C++17 library of clean, well-documented hand-vectorized
-  microkernels for GEMM and ML activation functions (GeLU, ReLU, SiLU,
-  Softmax, LayerNorm) targeting x86 processors with AVX2/FMA support.
-  Includes Python/NumPy bindings via pybind11, a statistical benchmark
-  harness, and a CI pipeline with performance regression gating.
+  C++17 library of hand-vectorized x86 kernels for GEMM (FP32, FP16, BF16
+  and INT8), decode GEMV, ggml Q8_0 and Q4_0 GEMV, and GeLU, ReLU, SiLU,
+  softmax and LayerNorm, with Python bindings. Every kernel has a portable
+  scalar path. AVX2 covers every kernel. AVX-512 covers the FP32, FP16 and
+  BF16 GEMMs and the decode GEMV. AVX-VNNI and AVX512-VNNI cover INT8 GEMM
+  and the Q8_0 and Q4_0 GEMVs. Opt-in AVX512-BF16 dot covers packed BF16
+  GEMM. The Zenodo preprint describes the earlier AVX2 kernels; current
+  scope and results are in the repository README.
 keywords:
   - simd
   - avx2
   - avx-512
+  - avx-vnni
   - gemm
+  - gemv
   - machine-learning
   - microkernels
   - gelu
   - layer-normalization
-  - high-performance-computing
   - cpp
 preferred-citation:
   type: unpublished

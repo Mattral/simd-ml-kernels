@@ -1,9 +1,10 @@
 """simd-ml-kernels: hand-vectorized x86 SIMD kernels for NumPy arrays.
 
 GEMM (FP32, FP16-input, BF16-input, INT8 uint8 x int8), the decode GEMV
-(``x @ W.T`` through ``trans_b=True``), GeLU, SiLU, ReLU, softmax and LayerNorm,
-implemented in C++17 with AVX2 / AVX-512 / VNNI intrinsics and a portable
-scalar version of each, chosen at run time. The compiled extension is
+(``x @ W.T`` through ``trans_b=True``), Q8_0 and Q4_0 GEMV, GeLU, SiLU, ReLU,
+softmax and LayerNorm. Every kernel has a scalar path. AVX2, AVX-512,
+AVX-VNNI, AVX512-VNNI and opt-in BF16-dot exist only where dispatch selects
+them (the matrix in the README). The compiled extension is
 ``simd_ml_kernels._core``; this module re-exports its public API.
 """
 

@@ -15,8 +15,10 @@
  * code) is compiled for the baseline, so the library loads and runs on any
  * x86-64 CPU; AVX2/AVX-512 instructions execute only after the CPU and the OS
  * were checked (cpuid.hpp). A table may reuse another table's functions: the
- * AVX-512 table points at the AVX2 elementwise kernels, because only GEMM has
- * an AVX-512 path.
+ * AVX-512 table points at the AVX2 elementwise kernels. AVX-512 bodies are
+ * the FP32/FP16/BF16 GEMMs and the decode GEMV. INT8 and the Q8_0/Q4_0 GEMVs
+ * add an AVX512-VNNI body only when CPUID reports it. The README matrix lists
+ * every variant dispatch can select.
  *
  * Selection, made once on first use: the widest table whose requirements the
  * CPU meets (Isa order below), unless the environment variable SIMD_ML_ISA is

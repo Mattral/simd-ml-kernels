@@ -6,7 +6,15 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-20
+
+Changes on main since 0.3.0. Not tagged and not published.
+
 ### Changed
+- Docs: the README kernel × ISA matrix is the coverage claim. The
+  Llama-3.2-1B check states its prompt, token, weight and tolerance scope.
+  The Zenodo preprint is labeled as the earlier AVX2 kernels. `CITATION.cff`
+  matches this version.
 - Threaded `gemv_q8_0` / `gemv_q4_0`: x is quantized by the thread team
   (one run of blocks per thread) instead of the calling thread alone; same
   quants, results bitwise unchanged. Rerun (`lnl-226v-wsl_2026-10-20_38cd710929a3_threads`): at 4 threads Q4_0

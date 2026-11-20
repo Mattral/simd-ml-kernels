@@ -64,9 +64,10 @@ once, so packing it costs as much as using it). With `trans_a` the direct
 path only swaps A's strides. With `trans_b` B has no contiguous rows of N, so
 the kernel cannot read it in place: for `M ≤ 8` a third path computes dot
 products along rows of A and B (the decode GEMV, §2.7), otherwise B is
-packed. The dot path is well ahead of packing, and of OpenBLAS's own
-`transb` GEMM, for a few rows (decode-style `x @ W.T`). The cut-off was
-measured with both paths on the same core; the numbers are in `choose_path`.
+packed. The dot path is ahead of packing for a few rows (decode-style
+`x @ W.T`). The note there about OpenBLAS's `transb` GEMM is a dev run on
+the reference laptop's P-core, not a published JSON. The cut-off was
+measured with both paths on that core; the numbers stay in `choose_path`.
 Row and column remainders use the same kernel with fewer rows (a template
 parameter, 1-6) and masked B loads and C accesses (`n < 16`), so nothing
 outside C's `M × N` window is read or written.
@@ -952,11 +953,13 @@ kernel on every usable table leaves FTZ and DAZ off in the host process
 ## 6. Runtime dispatch
 
 `src/dispatch/kernels.hpp` defines one `KernelTable` per ISA: function
-pointers for every kernel (FP32/FP16/BF16 GEMM, INT8 GEMM, both GeLUs, ReLU,
-SiLU, softmax row, LayerNorm row), plus the table's name, flags, GEMM tile and
-block sizes. A
-table may point at another table's functions: the AVX-512 table uses the AVX2
-elementwise kernels, because only GEMM has an AVX-512 path.
+pointers for every kernel (FP32/FP16/BF16 GEMM, INT8 GEMM, Q8_0 and Q4_0
+GEMV, both GeLUs, ReLU, SiLU, softmax row, LayerNorm row), plus the table's
+name, flags, GEMM tile and block sizes. Which of scalar, AVX2, AVX-512,
+AVX-VNNI, AVX512-VNNI and BF16-dot dispatch can select is the matrix in the
+README. The AVX-512 table's elementwise entries are the AVX2 functions.
+AVX-VNNI, AVX512-VNNI and BF16-dot are not tables: the AVX2 or AVX-512 entry
+calls them after a CPUID check.
 
 `CpuFeatures::detect()` (`dispatch.cpp`) reads CPUID leaves 1 and 7 and XCR0
 via XGETBV: YMM state needs XCR0 bits 1–2, ZMM state also bits 5–7, and every
@@ -1107,8 +1110,9 @@ floor). Tokens/s, ours against llama.cpp at the same KV depth:
 - F32 6.1 / 10.8 / 15.2 at 1 / 2 / 4 threads against 5.1 / 8.8 / 14.3
   (1.20×, 1.23×, 1.06×); Q8_0 21.5 / 35.6 / 45.9 against 13.7 / 21.1 / 35.5
   (1.58×, 1.69×, 1.29×); Q4_0 34.1 / 54.1 / 73.8 against 26.7 / 47.9 / 72.1
-  (1.28×, 1.13×, 1.02×). Ours is faster in every case, by little where both
-  sides approach the 4-core memory limit (F32 and Q4_0 at 4 threads).
+  (1.28×, 1.13×, 1.02×). On this run ours is faster than llama-bench in every
+  case (median of 3; machine, build and thread counts above), by little where
+  both sides approach the 4-core memory limit (F32 and Q4_0 at 4 threads).
 - *Where the time goes*: GEMVs take 80–97% of our token (the per-core
   efficiency of §2.8–§2.10 is the whole lead); attention 1.1–1.4 ms,
   RMSNorm/RoPE/SiLU 1.4–2.8 ms and the remaining glue 0.2–0.3 ms per token,

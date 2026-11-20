@@ -3,6 +3,18 @@
 Milestones are numbered work stages, not package versions. Package versions
 and their contents are in [CHANGELOG.md](https://github.com/Mattral/simd-ml-kernels/blob/main/CHANGELOG.md).
 
+## Path to 1.0
+
+simd-ml-kernels is an educational reference library. 1.0 is the finish line
+for that reference.
+
+- The public API is listed and frozen.
+- The kernel × ISA matrix in the README is complete, and every variant it marks is tested.
+- The benchmark method is documented.
+- The limitations table is current.
+
+No new features are part of 1.0. The limitations section is never removed.
+
 ## Legend
 ✅ Complete and verified   ⚠️ Partial / in progress   ❌ Not started
 
@@ -223,8 +235,11 @@ Each item is done when its tests, committed benchmark JSON and docs are in.
   2. *GGUF weights and speed* (W6 PR2): llama.cpp's own F32/Q8_0/Q4_0 GGUF
      (`--pure`) straight into our GEMVs (byte-identical blocks); tokens/s
      against `llama-bench` and perplexity against `llama-perplexity`
-     (`lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama`): ours 1.20–1.23× (F32),
-     1.29–1.69× (Q8_0), 1.02–1.28× (Q4_0) faster at 1/2/4 threads; GEMVs
+     (`lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama`, Core Ultra 5 226V, WSL2,
+     P-cores): the Python loop versus llama.cpp v0.7.0 `llama-bench`
+     (CPU-only Release, GGML_NATIVE=ON, GGML_OPENMP=ON, GGML_CPU_REPACK=ON),
+     median of 3, at 1.20–1.23× (F32), 1.29–1.69× (Q8_0) and 1.02–1.28× (Q4_0)
+     at 1/2/4 threads; GEMVs
      80–97% of our token; perplexity within 0.018 of llama.cpp. DESIGN.md §9.
   3. Next: fuse the non-GEMV steps (2.7 ms per token, 20% at Q4_0 / 4
      threads) and batch the prefill.

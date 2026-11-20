@@ -9,19 +9,37 @@
 simd-ml-kernels is a C++17 library of hand-written x86 SIMD kernels for the
 arithmetic at the core of neural-network inference: matrix multiplication,
 the matrix-vector product that dominates generating text with a language
-model one token at a time, and activation and normalization functions. Each
-kernel has a portable C++ version and AVX2 / AVX-512 / VNNI versions chosen at
-run time for the CPU, is tested against a float64 reference with a stated
-error bound, and is benchmarked against OpenBLAS or PyTorch on the same core
-in the same run. You call it from Python on NumPy arrays; the reasons behind
-each kernel's design are written next to the code and in
+model one token at a time, and activation and normalization functions.
+Which instruction sets each kernel has is the matrix under
+[Kernels](#kernels). Each kernel is tested against a float64 reference with
+a stated error bound, and benchmarked against OpenBLAS or PyTorch on the
+same core in the same run. You call it from Python on NumPy arrays; the
+reasons behind each kernel's design are written next to the code and in
 [docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md).
 
 **End to end.** [`examples/llama/`](https://github.com/Mattral/simd-ml-kernels/tree/main/examples/llama)
-generates text with Llama-3.2-1B from these kernels and NumPy (a Python loop,
-not a runtime), on the same GGUF weight files as llama.cpp; its FP32 output is
-token-identical to Hugging Face transformers. Measured against llama.cpp on
-the same cores:
+is a Python loop, not a runtime. It generates text with meta-llama/Llama-3.2-1B
+from these kernels and NumPy.
+
+Accuracy is `tests/test_llama.py` only. It needs the gated weights
+(`SIMD_ML_LLAMA_DIR`) and is not run in CI.
+
+| Check | Scope |
+|---|---|
+| Weights | meta-llama/Llama-3.2-1B safetensors, FP32 |
+| Reference | transformers 5.20.2, PyTorch 2.14.1 CPU, SDPA |
+| Prompts | 5 |
+| Logits | first 8 positions, \|err\| ≤ 1e-4 + 1e-5·\|ref\| |
+| Tokens | 64 greedy tokens, identical |
+
+Speed is one machine, median of 3. Numbers are in the table under this.
+
+| | Scope |
+|---|---|
+| Machine | Intel Core Ultra 5 226V, WSL2, P-cores |
+| Weights | llama.cpp's own GGUF files |
+| Ours | the Python loop above |
+| Baseline | llama.cpp v0.7.0 `llama-bench`, CPU-only Release, `GGML_NATIVE=ON`, `GGML_OPENMP=ON`, `GGML_CPU_REPACK=ON` |
 
 <!-- BEGIN GENERATED: llama-summary -->
 #### lnl-226v-wsl, 2026-10-21, commit `f4a501dd2db4`
@@ -67,7 +85,8 @@ Source: Intel(R) Core(TM) Ultra 5 226V, P-cores 0-3 (taskset -c 0-3), CPUs [0, 1
 | Q4_0 | 8.8892 | +2.9267 | 8.8716 ± 0.3637 | +2.9093 | +0.0176 |
 <!-- END GENERATED: llama-summary -->
 
-**Preprint**: [IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for ML Workloads](https://zenodo.org/records/20616502)
+**Preprint**: [IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for ML Workloads](https://zenodo.org/records/20616502).
+Preprint describes the earlier AVX2 kernels; current scope and results are in this README.
 
 ## Who it is for
 
@@ -77,14 +96,16 @@ Use it if you want to:
   close to the hardware's limit, with the measurement behind each choice;
 - compute decode-shaped `x @ W.T` (one row of activations times a weight
   matrix) from NumPy, on FP32, FP16 or BF16 weights;
-- test or compare SIMD code paths (scalar, AVX2, AVX-512) on one machine:
-  `sgemm(..., isa=...)`, `SIMD_ML_ISA`, Intel SDE.
+- test or compare the scalar, AVX2 and AVX-512 tables on one machine:
+  `sgemm(..., isa=...)`, `SIMD_ML_ISA`, Intel SDE. VNNI and BF16-dot are
+  chosen inside a table; the matrix under Kernels says which kernel has which.
 
 Do not use it if you just want a model to run fast on a CPU: use PyTorch
 (oneDNN), a BLAS such as OpenBLAS or MKL, or llama.cpp. This library is
 single-threaded by default, has no autograd, no model runtime and no batching
 logic, vectorizes only on x86-64, and loses to those libraries in several
-measured cases (Known Honest Limitations below). It is pre-1.0 (0.3.0).
+measured cases (Known Honest Limitations below). It is pre-1.0 (0.4.0).
+What 1.0 means is [Path to 1.0](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md#path-to-10).
 
 ## Install
 
@@ -218,11 +239,40 @@ is in
 | **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
 | **LayerNorm** | `activations/layer_norm_avx2.cpp` | Two-pass statistics (float lanes, flushed to double), then normalize; optional γ/β; error ≤ 1e-5 + 1e-4·\|ref\| for \|mean\| ≤ 30·std |
 
-Every kernel has a scalar, an AVX2 and (GEMM only) an AVX-512 version, each
-compiled separately with its own flags; the one to use is chosen at run time
-from CPUID and XGETBV (docs/DESIGN.md §5–6). The extension runs on any x86-64
-CPU and, scalar only, on other architectures. The full Python API, with each
-function's error bound, is in
+**Instruction sets dispatch can select.** The table (scalar, AVX2 or AVX-512) is chosen from CPUID and XGETBV. A cell is a body that table can run.
+
+| Kernel | scalar | AVX2 | AVX-512 | AVX-VNNI | AVX512-VNNI | BF16-dot |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| FP32 GEMM | yes | 6×16 | 12×32 | — | — | — |
+| FP16 GEMM | yes | yes | 12×32 | — | — | — |
+| BF16 GEMM | yes | yes | 12×32 | — | — | opt-in |
+| Decode GEMV | yes | yes | yes | — | — | — |
+| INT8 GEMM | yes | convert | — | yes | yes | — |
+| Q8_0 GEMV | yes | pmadd | — | yes | yes | — |
+| Q4_0 GEMV | yes | pmadd | — | yes | yes | — |
+| GeLU, ReLU, SiLU, softmax, LayerNorm | yes | yes | — | — | — | — |
+
+| Mark | Means |
+|---|---|
+| yes | that body |
+| — | no such body |
+| 6×16, 12×32 | packed tile. A small AVX-512 product uses the AVX2 direct kernel |
+| convert | INT8 widened to FP32, then the FP32 kernel (no AVX-VNNI) |
+| pmadd | `vpmaddubsw` for Q8_0 and Q4_0 (no VNNI) |
+| opt-in | `vdpbf16ps`: `SIMD_ML_BF16_DOT=1`, AVX512-BF16, not `trans_b`, packed shape, one thread |
+
+Decode GEMV is `trans_b`, at most 8 rows, with its own AVX-512 loop (no BF16-dot). `quantize_q8_0` and `quantize_q4_0` are scalar. Any x86-64 CPU runs the extension; other architectures run the scalar kernels only.
+
+**Where a path actually runs.** CI does not use SDE ([docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md)). `isa_units` checks object files, not VNNI or BF16-dot execution.
+
+| Path | CI | SDE |
+|---|---|---|
+| scalar | every job | `-nhm` |
+| AVX2 | runner has AVX2, FMA and F16C | `-hsw` |
+| AVX-512 | only if that runner has AVX-512F/DQ/BW/VL | `-skx`, `-spr` |
+| AVX-VNNI, AVX512-VNNI, BF16-dot | only if that runner's CPUID reports the feature | `-spr` |
+
+The full Python API, with each function's error bound, is in
 [docs/api/python_api.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/api/python_api.md).
 
 ---

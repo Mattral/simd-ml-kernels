@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(simd_ml_kernels VERSION 0.3.0 LANGUAGES CXX)
+project(simd_ml_kernels VERSION 0.4.0 LANGUAGES CXX)
 # CMake's VERSION is numeric only; the PEP 440 pre-release suffix of
 # pyproject.toml's version goes here ("" for a release). build_info()["version"]
 # is "${PROJECT_VERSION}${SIMD_ML_PRERELEASE}" and must equal the package version.

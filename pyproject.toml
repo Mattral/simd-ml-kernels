@@ -10,8 +10,8 @@ build-backend = "scikit_build_core.build"
 # ─── Project metadata ──────────────────────────────────────────────────────────
 [project]
 name            = "simd-ml-kernels"
-version         = "0.3.0"      # keep in step with CMakeLists.txt (tests/test_cli.py checks)
-description     = "Hand-vectorized x86 SIMD kernels (AVX2, AVX-512, VNNI) for GEMM, decode GEMV and ML activations, with Python bindings"
+version         = "0.4.0"      # keep in step with CMakeLists.txt (tests/test_cli.py checks)
+description     = "Hand-vectorized x86 SIMD kernels for GEMM, decode GEMV and ML activations. Scalar for every kernel; AVX2, AVX-512, AVX-VNNI, AVX512-VNNI and opt-in BF16-dot only where dispatch selects them"
 readme          = "README.md"
 license         = { file = "LICENSE" }
 requires-python = ">=3.9"
@@ -68,11 +68,14 @@ select = ["E", "F", "W", "I", "UP"]
 ignore = ["E501"]   # line length handled separately
 
 # ─── Wheels (cibuildwheel; .github/workflows/wheels.yml) ─────────────────────
-# Linux x86_64 wheels contain the scalar, AVX2 and AVX-512 units and choose one
-# at run time, so a wheel built on any runner runs on any x86-64 CPU. macOS
-# arm64 wheels contain only the scalar kernels. Each wheel is installed in a
-# clean environment and must pass selftest before it is uploaded as a CI
-# artifact; only the manual publish.yml uploads them to (Test)PyPI.
+# Linux x86_64 wheels contain the scalar, AVX2 and AVX-512 units, plus the
+# VNNI and BF16-dot units when the compiler accepts them. One table is chosen
+# at run time (scalar, AVX2 or AVX-512); VNNI and BF16-dot are selected inside
+# a table, as in the README matrix. A wheel built on any runner runs on any
+# x86-64 CPU. macOS arm64 wheels contain only the scalar kernels. Each wheel
+# is installed in a clean environment and must pass selftest before it is
+# uploaded as a CI artifact; only the manual publish.yml uploads them to
+# (Test)PyPI.
 [tool.cibuildwheel]
 build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux_* *_i686 *-win32"

@@ -9,9 +9,11 @@ pip install simd-ml-kernels
 python -m simd_ml_kernels selftest
 ```
 
-Wheels exist for CPython 3.9–3.13 on Linux x86-64 (manylinux_2_28; scalar,
-AVX2 and AVX-512 kernels, chosen at run time) and macOS arm64 (scalar kernels
-only). Anywhere else (Windows, macOS x86-64, other Python versions) pip builds
+Wheels exist for CPython 3.9–3.13 on Linux x86-64 (manylinux_2_28). The wheel
+contains the scalar, AVX2 and AVX-512 units, and the VNNI and BF16-dot units
+when the compiler accepts their flags. Dispatch picks one table, then a path
+inside it, as in the README matrix. macOS arm64 wheels are scalar only.
+Anywhere else (Windows, macOS x86-64, other Python versions) pip builds
 the sdist, which needs a C++17 compiler; pip fetches CMake, Ninja and pybind11
 itself. A build from the sdist reports `git_commit` as `unknown`.
 
