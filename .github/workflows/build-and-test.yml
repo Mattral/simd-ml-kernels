@@ -145,7 +145,7 @@ jobs:
   # ─── macOS: Apple Clang, scalar fallback path ───────────────────────────────
   build-macos:
     name: macOS / Apple Clang / Scalar fallback
-    runs-on: macos-14   # Apple Silicon (ARM) — no AVX2; tests scalar fallback
+    runs-on: macos-15   # Apple Silicon (ARM) — no AVX2; tests scalar fallback
     steps:
       - uses: actions/checkout@v4
       - name: Install CMake and pybind11
