@@ -14,8 +14,8 @@ not benchmarks: no timing is recorded here.
 | OS | Windows, WSL2 (kernel 6.18.58.1-microsoft-standard-WSL2), Ubuntu 24.04.5 LTS |
 | Toolchain | Python 3.12.3, GCC 13.3.0 (pip build), g++-12 12.4.0 (ctest build), CMake 3.28.3 |
 | Libraries | NumPy 2.5.4, PyTorch 2.14.1+cpu (the PyTorch cross-checks in pytest ran) |
-| Commit | `9b3a8088e77d` (`main`; later commits change only docs, charts and CI checks) |
-| Build | `pip install --no-build-isolation .` (no OpenMP), and a Release CMake build with g++-12 |
+| Commit | `9b3a8088e77d` (`main`), and `6459947f4570` for the OpenMP build (rows 11–12; built from that commit's working tree with uncommitted doc edits only, so `git_commit` reads `-dirty`); the commits between them change only docs, charts and CI checks |
+| Build | `pip install --no-build-isolation .` (no OpenMP); the same with `SKBUILD_CMAKE_DEFINE=SIMD_ML_OPENMP=ON` (rows 11–12); a Release CMake build with g++-12 |
 
 ## Commands and results
 
@@ -31,6 +31,10 @@ not benchmarks: no timing is recorded here.
 | 8 | `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-12`, then `cmake --build build` and `ctest --test-dir build` | 2/2 passed (`simd_tests`, `isa_units`). The one compiler warning is in pybind11's headers (`-Wstringop-overread`), not in this project's sources |
 | 9 | `sde64 -skx -- python -m simd_ml_kernels selftest` | **not run**: Intel SDE is not installed in this WSL2 environment |
 | 10 | `sde64 -spr -- python -m simd_ml_kernels selftest` | **not run**: Intel SDE is not installed in this WSL2 environment |
+| 11 | OpenMP build: `python -m simd_ml_kernels selftest` | passed (`openmp` True, 8 threads by default) |
+| 12 | OpenMP build: `python -m pytest tests` | 1072 passed, 14 skipped. The 74 OpenMP tests ran and passed. Skips: 2 need a build without OpenMP, 8 need the Llama weights, 4 need ggml |
+| 13 | `SIMD_ML_LLAMA_DIR=~/code/models/Llama-3.2-1B python -m pytest tests/test_llama.py tests/test_llama_gguf.py` (default build, transformers 5.20.2, PyTorch 2.14.1+cpu) | 7 passed, 1 skipped. Passed: tokenizer and RoPE frequencies match transformers, logits of the first positions within tolerance, greedy decode token-identical, GGUF Q8_0/Q4_0 blocks match our quantizers, F32 GGUF greedy decode matches transformers. Skipped: the perplexity-text tokenization check, which needs llama.cpp's `llama-tokenize` (`SIMD_ML_GGML_TEST_BACKEND_OPS` not set) |
+| 14 | `python -m build`, then `twine check --strict dist/*` (twine 7.0.0, build 1.6.1, throwaway venv) | sdist and wheel built; both PASSED. Nothing was uploaded |
 
 ## Paths executed on this machine
 
@@ -44,12 +48,11 @@ not benchmarks: no timing is recorded here.
 | AVX-512 table | **no** | the CPU has no AVX-512, and SDE is not installed |
 | AVX512-VNNI | **no** | `simd_tests`: "avx512_vnni: SKIP (CPU has no AVX512_VNNI)" |
 | BF16-dot (`vdpbf16ps`) | **no** | `simd_tests` runs its forced-on block only on CPUs with AVX512_BF16 |
-| OpenMP threaded GEMM and GEMV | **no** | the default build has no OpenMP (74 pytest skips) |
+| OpenMP threaded GEMM and GEMV | yes | OpenMP build, rows 11–12 (the default build skips these 74 tests) |
 
-**Not executed anywhere locally:** the AVX-512 table, AVX512-VNNI,
-BF16-dot (`vdpbf16ps`) and the OpenMP paths. On this CPU they need Intel SDE
-(`-skx`, `-spr`, see [setup.md](setup.md)) or an OpenMP build, and neither
-ran for this record.
+**Not executed anywhere locally:** the AVX-512 table, AVX512-VNNI and
+BF16-dot (`vdpbf16ps`). On this CPU they need Intel SDE (`-skx`, `-spr`, see
+[setup.md](setup.md)), which is not installed here.
 
 ## Same commit in CI
 
@@ -64,3 +67,14 @@ AVX-512.
 The CI logs do not show that BF16-dot ran. Only the C++ test forces it on, and
 ctest prints that test's output only when it fails. The C++ jobs also do not
 record their CPU.
+
+The `Linux / GCC-12 / OpenMP GEMM` job in `build-and-test.yml` builds the
+package with `SIMD_ML_OPENMP=ON`, checks that `build_info()["openmp"]` is
+true, and runs selftest and the full pytest suite, so the OpenMP-only tests
+run in CI on every push and pull request. On `6459947f4570`
+([Build and Test run 44854452272](https://github.com/Mattral/simd-ml-kernels/actions/runs/44854452272))
+it reported 1584 passed, 41 skipped on an Intel Xeon Platinum 8573C (scalar,
+avx2 and avx512 tables).
+
+The Llama-3.2-1B parity tests (row 13) need the gated weights and are not run
+in CI; this record is their only run for 0.4.0.
