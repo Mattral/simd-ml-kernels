@@ -78,19 +78,18 @@ clock sample of at least 3.6 GHz.
 
 ## Summary by run
 
-The headline numbers, each with the run it comes from (the README's charts
-show the newest run per machine; earlier runs are under Results).
+The headline numbers, each from the newest run that covers the case (the
+README's charts show the same runs; earlier runs are under Results).
 
-- FP32 GEMM: 93–99% of OpenBLAS at N = 128–2048 on the reference laptop's
-  P-core (`lnl-226v-wsl_2026-10-18_ecc219baa1f2`; N = 1024 not shown, clock
-  below the threshold); 87–107% on AVX-512, a 2-vCPU Emerald Rapids cloud VM
-  (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`).
-- Decode GEMV (laptop, `ecc219baa1f2`): FP32 at 97–99% of the read roof,
-  1.03–1.05× PyTorch's `F.linear` and 1.00–1.20× OpenBLAS; FP16/BF16 at
-  90–99%, 1.78–1.92× PyTorch's `F.linear` on the same 16-bit weights. Not
-  measured on AVX-512.
-- Q8_0 decode GEMV (laptop, `290b91baad26`): 92–95% of the read roof,
-  1.46–1.82× ggml's Q8_0 MUL_MAT (llama.cpp v0.7.0, one thread), 3.49–3.61×
+- FP32 GEMM: 90–99% of OpenBLAS at N = 128–2048 on the reference laptop's
+  P-core (`lnl-226v-wsl_2026-10-20_42f64c7d76b3`); 87–107% on AVX-512, a
+  2-vCPU Emerald Rapids cloud VM (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`).
+- Decode GEMV (laptop, `42f64c7d76b3`): FP32 at 93–96% of the read roof,
+  1.00–1.04× PyTorch's `F.linear` and 1.01–1.14× OpenBLAS; FP16/BF16 at
+  82–95%, 1.60–1.83× PyTorch's `F.linear` on the same 16-bit weights (BF16
+  1×2048×8192 not shown, clock below the threshold). Not measured on AVX-512.
+- Q8_0 decode GEMV (laptop, `42f64c7d76b3`): 81–89% of the read roof,
+  1.55–1.64× ggml's Q8_0 MUL_MAT (llama.cpp v0.7.0, one thread), 3.24–3.59×
   our FP32 GEMV.
 - Q4_0 decode GEMV (laptop, `42f64c7d76b3`): 68–83% of the read roof,
   1.58–2.19× ggml's Q4_0 MUL_MAT (llama.cpp v0.7.0, one thread), 1.38–1.67×
@@ -101,10 +100,11 @@ show the newest run per machine; earlier runs are under Results).
   weights; Llama-3.2-1B GEMV time per token at 4 threads 10.4 ms (Q4_0) and
   17.0 ms (Q8_0) against ggml's 14.5 and 21.6. Four P-cores read only
   2.4–3.0× one core's bandwidth, so 4 threads are not 4× faster.
-- INT8 GEMM with AVX-VNNI (laptop, `ecc219baa1f2`): 3.36–3.60× our FP32 GEMM
-  and 1.72–2.19× PyTorch's quantized linear at 256³ and 1024³.
-- Activations (laptop, `ecc219baa1f2`): 1.05–2.97× PyTorch, except LayerNorm
-  at 0.92×.
+- INT8 GEMM with AVX-VNNI (laptop, `42f64c7d76b3`): 3.26–3.64× our FP32 GEMM
+  and 1.61–2.09× PyTorch's quantized linear at 256³, 512³, 2048³ and
+  1×4096×4096 (128³ and 1024³ not shown, clock below the threshold).
+- Activations (laptop, `42f64c7d76b3`): 1.10–2.88× PyTorch, except ReLU at
+  0.97× and LayerNorm at 0.96×.
 
 ## Results
 

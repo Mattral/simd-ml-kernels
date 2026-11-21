@@ -106,7 +106,7 @@ The full Python API, with each function's error bound, is in
 | 6×16, 12×32 | packed tile. A small AVX-512 product uses the AVX2 direct kernel |
 | convert | INT8 widened to FP32, then the FP32 kernel (no AVX-VNNI) |
 | pmadd | `vpmaddubsw` for Q8_0 and Q4_0 (no VNNI) |
-| opt-in | `vdpbf16ps`: `SIMD_ML_BF16_DOT=1`, AVX512-BF16, not `trans_b`, packed shape, one thread |
+| opt-in | `vdpbf16ps`: `SIMD_ML_BF16_DOT=1`, AVX512-BF16, not `trans_b`, packed shape, one thread. Execution is not confirmed in CI ([docs/VALIDATION.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/VALIDATION.md)) |
 
 Decode GEMV is `trans_b`, at most 8 rows, with its own AVX-512 loop (no BF16-dot). `quantize_q8_0` and `quantize_q4_0` are scalar. Any x86-64 CPU runs the extension; other architectures run the scalar kernels only.
 
@@ -145,19 +145,21 @@ table, with planned fixes, is in
 [docs/ROADMAP.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md#known-honest-limitations-never-remove-this-section)):
 
 - One row times a 4096×4096 INT8 matrix on the cloud VM: 0.13× PyTorch
-  (`255f27755c31`, before the row path; on the laptop it is now 1.36×,
-  `290b91baad26`).
+  (`255f27755c31`, before the row path). On the laptop it was 1.36× once
+  the row path landed (`290b91baad26`) and is 1.61× in the newest laptop run
+  (`42f64c7d76b3`).
 - On the Emerald Rapids VM (`255f27755c31`): BF16 GEMM at 0.14–0.72× PyTorch,
   whose rate implies AMX tiles, which this library does not use; INT8 GEMM at
   0.67–0.75× PyTorch from N = 512 up; FP32 GEMM at 87% of OpenBLAS at
   N = 2048.
-- LayerNorm at 0.92× PyTorch on the laptop (`ecc219baa1f2`).
+- LayerNorm at 0.96× and ReLU at 0.97× PyTorch on the laptop (`42f64c7d76b3`).
 - FP16/BF16 GEMM on AVX2 saves memory but is no faster than FP32 on
   compute-bound shapes (AVX2 has no 16-bit FMA).
 - Single-threaded by default: OpenMP (GEMM and decode GEMV) is a build
   option. GEMV scaling is measured only on the laptop's 4 P-cores under
-  WSL2, where 4 cores read 2.4–3.0× one core's bandwidth; at 4 threads the
-  smallest Llama-3.2-1B matrix in Q8_0 (512×2048) is level with ggml. The
+  WSL2 (`38cd710929a3`), where 4 cores read 2.4–3.0× one core's bandwidth; at
+  4 threads the smallest Llama-3.2-1B matrix in Q8_0 (512×2048) is level with
+  ggml. The
   INT8 GEMM has no threaded path.
 - AVX-512 is measured only on a cloud VM whose clock and neighbours are not
   controlled; the AVX-512 GEMV is not measured.
@@ -186,7 +188,9 @@ Q4_0, …), the summary by run and every run with interquartile ranges:
 [`examples/llama/`](https://github.com/Mattral/simd-ml-kernels/tree/main/examples/llama)
 is a Python loop, not a runtime. It generates text with meta-llama/Llama-3.2-1B
 from these kernels and NumPy. Accuracy is `tests/test_llama.py` only. It needs
-the gated weights (`SIMD_ML_LLAMA_DIR`) and is not run in CI.
+the gated weights (`SIMD_ML_LLAMA_DIR`) and is not run in CI; it last passed
+locally on 2026-11-21 for 0.4.0
+([docs/VALIDATION.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/VALIDATION.md)).
 
 | Check | Scope |
 |---|---|

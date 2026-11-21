@@ -6,7 +6,7 @@ under **Changed** with a migration note.
 
 ## Unreleased
 
-## 0.4.0 — 2026-11-20
+## 0.4.0 — 2026-11-21
 
 Changes on main since 0.3.0. Not tagged and not published.
 
