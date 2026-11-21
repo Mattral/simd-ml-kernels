@@ -8,7 +8,7 @@ under **Changed** with a migration note.
 
 ## 0.4.0 — 2026-11-21
 
-Changes on main since 0.3.0. Not tagged and not published.
+Changes since 0.3.0. Tagged `v0.4.0` and published on PyPI on 2026-11-21.
 
 ### Changed
 - Docs: the README opens with three charts drawn from the committed benchmark
