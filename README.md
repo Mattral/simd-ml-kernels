@@ -7,22 +7,186 @@
 [![Preprint](https://img.shields.io/badge/Preprint-Zenodo-orange)](https://zenodo.org/records/20616502)
 
 simd-ml-kernels is a C++17 library of hand-written x86 SIMD kernels for the
-arithmetic at the core of neural-network inference: matrix multiplication,
-the matrix-vector product that dominates generating text with a language
-model one token at a time, and activation and normalization functions.
-Which instruction sets each kernel has is the matrix under
-[Kernels](#kernels). Each kernel is tested against a float64 reference with
-a stated error bound, and benchmarked against OpenBLAS or PyTorch on the
-same core in the same run. You call it from Python on NumPy arrays; the
-reasons behind each kernel's design are written next to the code and in
+arithmetic at the core of neural-network inference: matrix multiplication
+(GEMM), the matrix-vector product (GEMV) that dominates generating text one
+token at a time, and activation and normalization functions. You call it from
+Python on NumPy arrays. Each kernel is tested against a float64 reference with
+a stated error bound and benchmarked against OpenBLAS, PyTorch or llama.cpp on
+the same core in the same run. The reasons behind each kernel's design are
+written next to the code and in
 [docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md).
 
-**End to end.** [`examples/llama/`](https://github.com/Mattral/simd-ml-kernels/tree/main/examples/llama)
-is a Python loop, not a runtime. It generates text with meta-llama/Llama-3.2-1B
-from these kernels and NumPy.
+## Who it is for
 
-Accuracy is `tests/test_llama.py` only. It needs the gated weights
-(`SIMD_ML_LLAMA_DIR`) and is not run in CI.
+Use it if you want to:
+
+- read how a matrix multiply or a memory-bound matrix-vector product gets
+  close to the hardware's limit, with the measurement behind each choice;
+- compute decode-shaped `x @ W.T` (one row of activations times a weight
+  matrix) from NumPy, on FP32, FP16 or BF16 weights;
+- test or compare the scalar, AVX2 and AVX-512 tables on one machine:
+  `sgemm(..., isa=...)`, `SIMD_ML_ISA`, Intel SDE. VNNI and BF16-dot are
+  chosen inside a table; the matrix under Kernels says which kernel has which.
+
+Do not use it if you just want a model to run fast on a CPU: use PyTorch
+(oneDNN), a BLAS such as OpenBLAS or MKL, or llama.cpp. This library is
+single-threaded by default, has no autograd, no model runtime and no batching
+logic, vectorizes only on x86-64, and loses to those libraries in several
+measured cases ([Where it loses](#where-it-loses)). It is pre-1.0 (0.4.0).
+What 1.0 means is [Path to 1.0](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md#path-to-10).
+
+## At a glance
+
+Every number in these charts comes from a committed JSON file in
+[benchmarks/results/](https://github.com/Mattral/simd-ml-kernels/tree/main/benchmarks/results),
+drawn by `benchmarks/make_charts.py`. Each chart names its machine, commit and
+file. The tables behind them are under [Performance](#performance).
+
+![Llama-3.2-1B decode on an Intel Core Ultra 5 226V laptop, commit f4a501dd2db4, tokens per second, ours vs llama.cpp. F32: 6.1 vs 5.1 (1 thread), 10.8 vs 8.8 (2), 15.2 vs 14.3 (4). Q8_0: 21.5 vs 13.7, 35.6 vs 21.1, 45.9 vs 35.5. Q4_0: 34.1 vs 26.7, 54.1 vs 47.9, 73.8 vs 72.1. Ours / llama.cpp 1.02–1.69×.](https://raw.githubusercontent.com/Mattral/simd-ml-kernels/main/docs/img/llama_vs_llamacpp.svg)
+
+On this laptop, a Python loop over these kernels decodes Llama-3.2-1B
+1.02–1.69× as fast as llama.cpp on the same weights; the gap is smallest at 4
+threads (1.02–1.29×).
+
+![Decode GEMV on an Intel Core Ultra 5 226V laptop, commit 42f64c7d76b3, as % of the read roof measured in the same case: FP32 93–96%, FP16 85–95%, BF16 82–87%, Q8_0 81–89%, Q4_0 68–83%. BF16 1×2048×8192 not published (clock below 3.6 GHz).](https://raw.githubusercontent.com/Mattral/simd-ml-kernels/main/docs/img/gemv_roof.svg)
+
+The decode GEMV reads its weights at 68–96% of what one core can read from
+memory: FP32 comes closest (93–96%) and Q4_0 is furthest (68–83%).
+
+![Ours divided by OpenBLAS or PyTorch, every published single-thread case. Laptop, commit 42f64c7d76b3: FP32 GEMM 0.90–0.99× OpenBLAS, FP16 GEMM 1.40–1.51×, BF16 GEMM 0.97–1.16×, INT8 GEMM 1.61–2.09×, FP32 GEMV 1.01–1.14× OpenBLAS and 1.00–1.04× PyTorch, FP16/BF16 GEMV 1.60–1.83×, activations 0.96–2.88× (ReLU 0.97×, LayerNorm 0.96×). Emerald Rapids VM, commit 255f27755c31: FP32 GEMM 0.87–1.07×, FP16 GEMM 0.57–1.25×, BF16 GEMM 0.14–0.72×, INT8 GEMM 0.13–2.46×, activations 0.86–2.52× (softmax 0.86×, LayerNorm 0.96×).](https://raw.githubusercontent.com/Mattral/simd-ml-kernels/main/docs/img/ratio_vs_baseline.svg)
+
+On the laptop most cases are level with or faster than the baseline, but
+OpenBLAS stays ahead on FP32 GEMM (0.90–0.99×) and PyTorch slightly ahead on
+BF16 GEMM from 256³ up, ReLU and LayerNorm (0.96–0.99×). The large losses are
+on the Emerald Rapids VM, where PyTorch is far ahead on BF16 GEMM (0.14–0.72×)
+and on INT8 GEMM from 512³ up and for one row (0.13–0.75×).
+
+## Install
+
+```bash
+pip install simd-ml-kernels
+python -m simd_ml_kernels selftest   # every kernel vs a float64 reference; exits 1 on failure
+```
+
+Wheels exist for CPython 3.9–3.13 on Linux x86-64 (manylinux_2_28) and macOS
+arm64 (scalar kernels only); anywhere else pip builds from source, which needs
+a C++17 compiler. From a clone: `pip install .`. Details:
+[docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md).
+
+```python
+import numpy as np, simd_ml_kernels as sk
+x = np.random.randn(1, 4096).astype(np.float16)      # one token's activations
+W = np.random.randn(11008, 4096).astype(np.float16)  # weights [out, in], as torch.nn.Linear stores them
+y = sk.silu(sk.sgemm_f16(x, W, trans_b=True))        # decode GEMV in float32 (W read in place), then SiLU
+print(sk.detected_isa())                             # kernel table in use: 'avx512', 'avx2' or 'scalar'
+```
+
+The full Python API, with each function's error bound, is in
+[docs/api/python_api.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/api/python_api.md).
+
+## Kernels
+
+**Instruction sets dispatch can select.** The table (scalar, AVX2 or AVX-512) is chosen from CPUID and XGETBV. A cell is a body that table can run.
+
+| Kernel | scalar | AVX2 | AVX-512 | AVX-VNNI | AVX512-VNNI | BF16-dot |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| FP32 GEMM | yes | 6×16 | 12×32 | — | — | — |
+| FP16 GEMM | yes | yes | 12×32 | — | — | — |
+| BF16 GEMM | yes | yes | 12×32 | — | — | opt-in |
+| Decode GEMV | yes | yes | yes | — | — | — |
+| INT8 GEMM | yes | convert | — | yes | yes | — |
+| Q8_0 GEMV | yes | pmadd | — | yes | yes | — |
+| Q4_0 GEMV | yes | pmadd | — | yes | yes | — |
+| GeLU, ReLU, SiLU, softmax, LayerNorm | yes | yes | — | — | — | — |
+
+| Mark | Means |
+|---|---|
+| yes | that body |
+| — | no such body |
+| 6×16, 12×32 | packed tile. A small AVX-512 product uses the AVX2 direct kernel |
+| convert | INT8 widened to FP32, then the FP32 kernel (no AVX-VNNI) |
+| pmadd | `vpmaddubsw` for Q8_0 and Q4_0 (no VNNI) |
+| opt-in | `vdpbf16ps`: `SIMD_ML_BF16_DOT=1`, AVX512-BF16, not `trans_b`, packed shape, one thread |
+
+Decode GEMV is `trans_b`, at most 8 rows, with its own AVX-512 loop (no BF16-dot). `quantize_q8_0` and `quantize_q4_0` are scalar. Any x86-64 CPU runs the extension; other architectures run the scalar kernels only.
+
+**Where a path actually runs.** CI does not use SDE ([docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md)). `isa_units` checks object files, not VNNI or BF16-dot execution. What ran on a real CPU before 0.4.0, and what did not, is in [docs/VALIDATION.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/VALIDATION.md).
+
+| Path | CI | SDE |
+|---|---|---|
+| scalar | every job | `-nhm` |
+| AVX2 | runner has AVX2, FMA and F16C | `-hsw` |
+| AVX-512 | only if that runner has AVX-512F/DQ/BW/VL | `-skx`, `-spr` |
+| AVX-VNNI, AVX512-VNNI, BF16-dot | only if that runner's CPUID reports the feature | `-spr` |
+
+<details>
+<summary>Where each kernel lives and how it works</summary>
+
+| Kernel | Implementation | Notes |
+|--------|---------------|-------|
+| **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 (12 accumulators) and 12×32 AVX-512 (24 accumulators) kernels; unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise; `trans_a`/`trans_b` handled in packing |
+| **FP16 / BF16 GEMM** (`sgemm_f16`, `sgemm_bf16`) | same files; `gemm/avx512bf16_gemm.cpp` | Inputs converted to FP32 once while packing, then the FP32 kernels; FP32 accumulation and output; `vdpbf16ps` path opt-in (`SIMD_ML_BF16_DOT=1`; slower than conversion where measured) |
+| **Decode GEMV** (`x @ W.T`: `sgemm` / `sgemm_f16` / `sgemm_bf16` with `trans_b=True`, ≤ 8 rows) | same files (`dot_rows`) | W [N, K] read in place, 4 (FP32) or 8 (FP16/BF16) rows at a time, 16-bit weights converted in registers; bound by memory bandwidth, reported as GB/s and % of the measured read stream and STREAM triad |
+| **INT8 GEMM** (`sgemm_u8s8`) | `gemm/avxvnni_gemm.cpp`, `gemm/avx512vnni_gemm.cpp`, `gemm/int8_rows.hpp` | uint8 × int8 with per-column scales, FP32 output; `vpdpbusd` (AVX-VNNI, AVX512_VNNI), exact int32 sums per K block; FP32 conversion path without VNNI; one row with `trans_b` reads B in place |
+| **Q8_0 decode GEMV** (`quantize_q8_0`, `gemv_q8_0`) | `quant/q8_0_scalar.cpp`, `quant/q8_0_rows.hpp` | Weights in ggml's `block_q8_0` (byte-identical; 34 bytes per 32), x quantized to Q8 once per call; exact integer block dots (`vpdpbusd` with ggml's sign trick, `vpmaddubsw` without VNNI), FP32 sums; 8 rows read in place, next rows prefetched |
+| **Q4_0 decode GEMV** (`quantize_q4_0`, `gemv_q4_0`) | `quant/q4_0_scalar.cpp`, `quant/q4_0_rows.hpp` | Weights in ggml's `block_q4_0` (byte-identical; 18 bytes per 32), x quantized to Q8 once per call; two rows per register, nibbles as `vpdpbusd`'s unsigned operand with −8·Σx as its start (no sign trick), FP32 sums; 8 rows read in place, next rows prefetched |
+| **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
+| **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
+| **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
+| **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
+| **LayerNorm** | `activations/layer_norm_avx2.cpp` | Two-pass statistics (float lanes, flushed to double), then normalize; optional γ/β; error ≤ 1e-5 + 1e-4·\|ref\| for \|mean\| ≤ 30·std |
+
+</details>
+
+## Where it loses
+
+Known Honest Limitations: where it loses or has not been measured (the full
+table, with planned fixes, is in
+[docs/ROADMAP.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md#known-honest-limitations-never-remove-this-section)):
+
+- One row times a 4096×4096 INT8 matrix on the cloud VM: 0.13× PyTorch
+  (`255f27755c31`, before the row path; on the laptop it is now 1.36×,
+  `290b91baad26`).
+- On the Emerald Rapids VM (`255f27755c31`): BF16 GEMM at 0.14–0.72× PyTorch,
+  whose rate implies AMX tiles, which this library does not use; INT8 GEMM at
+  0.67–0.75× PyTorch from N = 512 up; FP32 GEMM at 87% of OpenBLAS at
+  N = 2048.
+- LayerNorm at 0.92× PyTorch on the laptop (`ecc219baa1f2`).
+- FP16/BF16 GEMM on AVX2 saves memory but is no faster than FP32 on
+  compute-bound shapes (AVX2 has no 16-bit FMA).
+- Single-threaded by default: OpenMP (GEMM and decode GEMV) is a build
+  option. GEMV scaling is measured only on the laptop's 4 P-cores under
+  WSL2, where 4 cores read 2.4–3.0× one core's bandwidth; at 4 threads the
+  smallest Llama-3.2-1B matrix in Q8_0 (512×2048) is level with ggml. The
+  INT8 GEMM has no threaded path.
+- AVX-512 is measured only on a cloud VM whose clock and neighbours are not
+  controlled; the AVX-512 GEMV is not measured.
+
+## How a call reaches a kernel
+
+![Concept diagram: Python / NumPy calls go through the pybind11 binding (checks dtype, shape and strides; releases the GIL) to the CPUID + XGETBV dispatcher, which picks the scalar, AVX2 or AVX-512 kernel table; AVX-VNNI, AVX512-VNNI and the opt-in BF16-dot path are chosen inside a table.](https://raw.githubusercontent.com/Mattral/simd-ml-kernels/main/docs/img/dispatch.svg)
+
+The table is chosen once per process from what the CPU and OS support;
+`SIMD_ML_ISA=scalar|avx2` caps it and `isa=` picks one per call. Design notes:
+[docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md).
+
+## Performance
+
+Generated from committed JSON (`benchmarks/results/`) by
+`benchmarks/make_tables.py`: one pinned core, one thread unless stated, the
+baseline in the same process on the same inputs, interleaved call by call. The
+GHz column is the core clock measured during the case; cases where it fell
+below the P-core threshold are not shown. Protocol, terms (read roof, Q8_0,
+Q4_0, …), the summary by run and every run with interquartile ranges:
+[docs/BENCHMARKS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/BENCHMARKS.md).
+
+<details>
+<summary>Llama-3.2-1B end to end: tokens/s, time per token, perplexity</summary>
+
+[`examples/llama/`](https://github.com/Mattral/simd-ml-kernels/tree/main/examples/llama)
+is a Python loop, not a runtime. It generates text with meta-llama/Llama-3.2-1B
+from these kernels and NumPy. Accuracy is `tests/test_llama.py` only. It needs
+the gated weights (`SIMD_ML_LLAMA_DIR`) and is not run in CI.
 
 | Check | Scope |
 |---|---|
@@ -32,7 +196,7 @@ Accuracy is `tests/test_llama.py` only. It needs the gated weights
 | Logits | first 8 positions, \|err\| ≤ 1e-4 + 1e-5·\|ref\| |
 | Tokens | 64 greedy tokens, identical |
 
-Speed is one machine, median of 3. Numbers are in the table under this.
+Speed is one machine, median of 3.
 
 | | Scope |
 |---|---|
@@ -85,263 +249,10 @@ Source: Intel(R) Core(TM) Ultra 5 226V, P-cores 0-3 (taskset -c 0-3), CPUs [0, 1
 | Q4_0 | 8.8892 | +2.9267 | 8.8716 ± 0.3637 | +2.9093 | +0.0176 |
 <!-- END GENERATED: llama-summary -->
 
-**Preprint**: [IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for ML Workloads](https://zenodo.org/records/20616502).
-Preprint describes the earlier AVX2 kernels; current scope and results are in this README.
+</details>
 
-## Who it is for
-
-Use it if you want to:
-
-- read how a matrix multiply or a memory-bound matrix-vector product gets
-  close to the hardware's limit, with the measurement behind each choice;
-- compute decode-shaped `x @ W.T` (one row of activations times a weight
-  matrix) from NumPy, on FP32, FP16 or BF16 weights;
-- test or compare the scalar, AVX2 and AVX-512 tables on one machine:
-  `sgemm(..., isa=...)`, `SIMD_ML_ISA`, Intel SDE. VNNI and BF16-dot are
-  chosen inside a table; the matrix under Kernels says which kernel has which.
-
-Do not use it if you just want a model to run fast on a CPU: use PyTorch
-(oneDNN), a BLAS such as OpenBLAS or MKL, or llama.cpp. This library is
-single-threaded by default, has no autograd, no model runtime and no batching
-logic, vectorizes only on x86-64, and loses to those libraries in several
-measured cases (Known Honest Limitations below). It is pre-1.0 (0.4.0).
-What 1.0 means is [Path to 1.0](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md#path-to-10).
-
-## Install
-
-```bash
-pip install simd-ml-kernels
-python -m simd_ml_kernels selftest   # every kernel vs a float64 reference; exits 1 on failure
-```
-
-Wheels exist for CPython 3.9–3.13 on Linux x86-64 (manylinux_2_28) and macOS
-arm64 (scalar kernels only); anywhere else pip builds from source, which needs
-a C++17 compiler. From a clone: `pip install .`. Details:
-[docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md).
-
-```python
-import numpy as np
-import simd_ml_kernels as sk
-
-x = np.random.randn(1, 4096).astype(np.float16)      # one token's activations
-W = np.random.randn(11008, 4096).astype(np.float16)  # weights [out, in], as torch.nn.Linear stores them
-y = sk.sgemm_f16(x, W, trans_b=True)                 # y = x @ W.T in float32, W read in place: the decode GEMV
-h = sk.silu(y)                                       # activation
-A = np.random.randn(512, 512).astype(np.float32)
-C = sk.sgemm(A, A)                                   # FP32 matrix multiply, C = A @ A
-print(sk.detected_isa(), sk.build_info()["sgemm_blocking"])
-```
-
-## What's measured
-
-Every number below and in the
-[Performance](https://github.com/Mattral/simd-ml-kernels#performance) tables
-comes from a
-JSON file in
-[benchmarks/results/](https://github.com/Mattral/simd-ml-kernels/tree/main/benchmarks/results),
-written by `python -m simd_ml_kernels bench`: one pinned core, one thread, the
-baseline in the same process on the same inputs, alternating call by call.
-All runs, with interquartile ranges, are in
-[docs/BENCHMARKS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/BENCHMARKS.md).
-The terms used there:
-
-- **GEMM** (general matrix multiply, C = A·B): the operation behind most of a
-  neural network's arithmetic when many inputs are processed together. Each
-  number loaded is used many times, so the limit is arithmetic, measured in
-  GFLOP/s (billions of floating-point operations per second).
-- **% of OpenBLAS**: our GEMM's GFLOP/s divided by OpenBLAS's (through
-  NumPy's `matmul`) on the same core in the same run; 100% is level.
-- **GEMV** (matrix times one vector): generating one token multiplies a single
-  row of activations by every weight matrix of the model, so each weight is
-  read once and used once. The core spends its time waiting for memory, and
-  speed is measured in GB/s of data read.
-- **% of read roof**: the GEMV's GB/s divided by the fastest read-only loop
-  the same core ran in the same case (timed alongside it): how close it gets
-  to what one core can read from memory (a lower bound on that limit). The STREAM triad (two arrays read, one written) is
-  shown as a second reference.
-- **Q8_0**: llama.cpp/ggml's 8-bit weight format: blocks of 32 int8 values
-  with one FP16 scale, 34 bytes per 32 weights (1.0625 bytes each).
-- **Q4_0**: ggml's 4-bit weight format: blocks of 32 4-bit values (two per
-  byte) with one FP16 scale, 18 bytes per 32 weights (0.5625 bytes each).
-- **FP16 / BF16 / INT8**: weight formats of 2, 2 and 1 bytes instead of
-  FP32's 4. FP16 is IEEE half precision; BF16 keeps FP32's exponent range with
-  8 bits of precision; INT8 stores integers with one scale per output column.
-  Inputs are converted exactly and summed in FP32 (exact int32 sums for INT8),
-  so the gain is fewer bytes to read, not cheaper arithmetic, except INT8 with
-  VNNI instructions.
-
-Summary:
-
-- FP32 GEMM: 93–99% of OpenBLAS at N = 128–2048 on the reference laptop's
-  P-core (`lnl-226v-wsl_2026-10-18_ecc219baa1f2`; N = 1024 not shown, clock
-  below the threshold); 87–107% on AVX-512, a 2-vCPU Emerald Rapids cloud VM
-  (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`).
-- Decode GEMV (laptop, `ecc219baa1f2`): FP32 at 97–99% of the read roof,
-  1.03–1.05× PyTorch's `F.linear` and 1.00–1.20× OpenBLAS; FP16/BF16 at
-  90–99%, 1.78–1.92× PyTorch's `F.linear` on the same 16-bit weights. Not
-  measured on AVX-512.
-- Q8_0 decode GEMV (laptop, `290b91baad26`): 92–95% of the read roof,
-  1.46–1.82× ggml's Q8_0 MUL_MAT (llama.cpp v0.7.0, one thread), 3.49–3.61×
-  our FP32 GEMV.
-- Q4_0 decode GEMV (laptop, `42f64c7d76b3`): 68–83% of the read roof,
-  1.58–2.19× ggml's Q4_0 MUL_MAT (llama.cpp v0.7.0, one thread), 1.38–1.67×
-  our Q8_0 GEMV.
-- Threaded decode GEMV (OpenMP build, laptop's 4 P-cores, `38cd710929a3`):
-  at 4 threads 1.22–2.22× (Q4_0, every shape) and 1.23–1.82× (Q8_0, level
-  at 512×2048) ggml's MUL_MAT at the same thread count, on the same
-  weights; Llama-3.2-1B GEMV time per token at 4 threads 10.4 ms (Q4_0) and
-  17.0 ms (Q8_0) against ggml's 14.5 and 21.6. Four P-cores read only
-  2.4–3.0× one core's bandwidth, so 4 threads are not 4× faster.
-- INT8 GEMM with AVX-VNNI (laptop, `ecc219baa1f2`): 3.36–3.60× our FP32 GEMM
-  and 1.72–2.19× PyTorch's quantized linear at 256³ and 1024³.
-- Activations (laptop, `ecc219baa1f2`): 1.05–2.97× PyTorch, except LayerNorm
-  at 0.92×.
-
-## Known Honest Limitations
-
-Where it loses or has not been measured (the full table, with planned fixes,
-is in
-[docs/ROADMAP.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md#known-honest-limitations-never-remove-this-section)):
-
-- One row times a 4096×4096 INT8 matrix on the cloud VM: 0.13× PyTorch
-  (`255f27755c31`, before the row path; on the laptop it is now 1.36×,
-  `290b91baad26`).
-- On the Emerald Rapids VM (`255f27755c31`): BF16 GEMM at 0.14–0.72× PyTorch,
-  whose rate implies AMX tiles, which this library does not use; INT8 GEMM at
-  0.67–0.75× PyTorch from N = 512 up; FP32 GEMM at 87% of OpenBLAS at
-  N = 2048.
-- LayerNorm at 0.92× PyTorch on the laptop (`ecc219baa1f2`).
-- FP16/BF16 GEMM on AVX2 saves memory but is no faster than FP32 on
-  compute-bound shapes (AVX2 has no 16-bit FMA).
-- Single-threaded by default: OpenMP (GEMM and decode GEMV) is a build
-  option. GEMV scaling is measured only on the laptop's 4 P-cores under
-  WSL2, where 4 cores read 2.4–3.0× one core's bandwidth; at 4 threads the
-  smallest Llama-3.2-1B matrix in Q8_0 (512×2048) is level with ggml. The
-  INT8 GEMM has no threaded path.
-- AVX-512 is measured only on a cloud VM whose clock and neighbours are not
-  controlled; the AVX-512 GEMV is not measured.
-
----
-
-## Kernels
-
-| Kernel | Implementation | Notes |
-|--------|---------------|-------|
-| **GEMM** (SGEMM) | `gemm/avx2_gemm_packed.cpp`, `gemm/avx512_gemm_packed.cpp` | 6×16 AVX2 (12 accumulators) and 12×32 AVX-512 (24 accumulators) kernels; unpacked for small products, Goto/BLIS 5 loops with block sizes from CPUID leaf 4 otherwise; `trans_a`/`trans_b` handled in packing |
-| **FP16 / BF16 GEMM** (`sgemm_f16`, `sgemm_bf16`) | same files; `gemm/avx512bf16_gemm.cpp` | Inputs converted to FP32 once while packing, then the FP32 kernels; FP32 accumulation and output; `vdpbf16ps` path opt-in (`SIMD_ML_BF16_DOT=1`; slower than conversion where measured) |
-| **Decode GEMV** (`x @ W.T`: `sgemm` / `sgemm_f16` / `sgemm_bf16` with `trans_b=True`, ≤ 8 rows) | same files (`dot_rows`) | W [N, K] read in place, 4 (FP32) or 8 (FP16/BF16) rows at a time, 16-bit weights converted in registers; bound by memory bandwidth, reported as GB/s and % of the measured read stream and STREAM triad |
-| **INT8 GEMM** (`sgemm_u8s8`) | `gemm/avxvnni_gemm.cpp`, `gemm/avx512vnni_gemm.cpp`, `gemm/int8_rows.hpp` | uint8 × int8 with per-column scales, FP32 output; `vpdpbusd` (AVX-VNNI, AVX512_VNNI), exact int32 sums per K block; FP32 conversion path without VNNI; one row with `trans_b` reads B in place |
-| **Q8_0 decode GEMV** (`quantize_q8_0`, `gemv_q8_0`) | `quant/q8_0_scalar.cpp`, `quant/q8_0_rows.hpp` | Weights in ggml's `block_q8_0` (byte-identical; 34 bytes per 32), x quantized to Q8 once per call; exact integer block dots (`vpdpbusd` with ggml's sign trick, `vpmaddubsw` without VNNI), FP32 sums; 8 rows read in place, next rows prefetched |
-| **Q4_0 decode GEMV** (`quantize_q4_0`, `gemv_q4_0`) | `quant/q4_0_scalar.cpp`, `quant/q4_0_rows.hpp` | Weights in ggml's `block_q4_0` (byte-identical; 18 bytes per 32), x quantized to Q8 once per call; two rows per register, nibbles as `vpdpbusd`'s unsigned operand with −8·Σx as its start (no sign trick), FP32 sums; 8 rows read in place, next rows prefetched |
-| **GeLU** | `intrinsic_gelu.cpp` | Exact (erf, rational approximation) by default or tanh formula (`approximate="tanh"`), as in PyTorch; max abs error ≤ 2e-6 |
-| **ReLU** | `activations/relu_avx2.cpp` | `_mm256_max_ps`, exact |
-| **SiLU** | `activations/silu_avx2.cpp` | `x / (1 + exp(-x))`; error ≤ 1e-35 + 1e-6·\|ref\| for every finite x |
-| **Softmax** | `activations/softmax_avx2.cpp` | Numerically stable (max-subtraction) |
-| **LayerNorm** | `activations/layer_norm_avx2.cpp` | Two-pass statistics (float lanes, flushed to double), then normalize; optional γ/β; error ≤ 1e-5 + 1e-4·\|ref\| for \|mean\| ≤ 30·std |
-
-**Instruction sets dispatch can select.** The table (scalar, AVX2 or AVX-512) is chosen from CPUID and XGETBV. A cell is a body that table can run.
-
-| Kernel | scalar | AVX2 | AVX-512 | AVX-VNNI | AVX512-VNNI | BF16-dot |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| FP32 GEMM | yes | 6×16 | 12×32 | — | — | — |
-| FP16 GEMM | yes | yes | 12×32 | — | — | — |
-| BF16 GEMM | yes | yes | 12×32 | — | — | opt-in |
-| Decode GEMV | yes | yes | yes | — | — | — |
-| INT8 GEMM | yes | convert | — | yes | yes | — |
-| Q8_0 GEMV | yes | pmadd | — | yes | yes | — |
-| Q4_0 GEMV | yes | pmadd | — | yes | yes | — |
-| GeLU, ReLU, SiLU, softmax, LayerNorm | yes | yes | — | — | — | — |
-
-| Mark | Means |
-|---|---|
-| yes | that body |
-| — | no such body |
-| 6×16, 12×32 | packed tile. A small AVX-512 product uses the AVX2 direct kernel |
-| convert | INT8 widened to FP32, then the FP32 kernel (no AVX-VNNI) |
-| pmadd | `vpmaddubsw` for Q8_0 and Q4_0 (no VNNI) |
-| opt-in | `vdpbf16ps`: `SIMD_ML_BF16_DOT=1`, AVX512-BF16, not `trans_b`, packed shape, one thread |
-
-Decode GEMV is `trans_b`, at most 8 rows, with its own AVX-512 loop (no BF16-dot). `quantize_q8_0` and `quantize_q4_0` are scalar. Any x86-64 CPU runs the extension; other architectures run the scalar kernels only.
-
-**Where a path actually runs.** CI does not use SDE ([docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md)). `isa_units` checks object files, not VNNI or BF16-dot execution.
-
-| Path | CI | SDE |
-|---|---|---|
-| scalar | every job | `-nhm` |
-| AVX2 | runner has AVX2, FMA and F16C | `-hsw` |
-| AVX-512 | only if that runner has AVX-512F/DQ/BW/VL | `-skx`, `-spr` |
-| AVX-VNNI, AVX512-VNNI, BF16-dot | only if that runner's CPUID reports the feature | `-spr` |
-
-The full Python API, with each function's error bound, is in
-[docs/api/python_api.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/api/python_api.md).
-
----
-
-## Building from source
-
-### Python
-
-```bash
-pip install .
-python -m simd_ml_kernels selftest   # every kernel vs a float64 reference; exits 1 on failure
-python -m simd_ml_kernels info       # compiled ISA, flags, commit, CPU features
-```
-
-```python
-import numpy as np
-import simd_ml_kernels as sk
-
-A = np.random.randn(256, 256).astype(np.float32)
-B = np.random.randn(256, 256).astype(np.float32)
-x = np.random.randn(64, 256).astype(np.float32)
-
-# GEMM
-C = sk.sgemm(A, B)                     # C = A @ B
-sk.sgemm(A, B, C, alpha=2.0, beta=0.5) # C = 2*A@B + 0.5*C  (in-place)
-y = sk.sgemm(x, B, trans_b=True)       # x @ B.T, B stored [out, in]; no copy
-
-# Activations
-y = sk.gelu(x)                          # GeLU (out-of-place)
-sk.gelu_inplace(x)                      # GeLU (in-place, no allocation)
-y = sk.silu(x)                          # SiLU / Swish
-y = sk.relu(x)                          # ReLU
-y = sk.softmax(x, axis=-1)              # Softmax over last axis
-y = sk.layer_norm(x, gamma=np.ones(256, np.float32), beta=np.zeros(256, np.float32))
-
-# Diagnostics
-print(sk.build_info())    # version, commit, compiled and usable ISAs, flags, block sizes
-print(sk.detected_isa())  # kernel table in use: 'avx512', 'avx2' or 'scalar'
-```
-
-### C++ (standalone bench)
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-
-./build/bench_stat        # C++ wall-clock harness for kernel development
-./build/bench             # C++ RDTSC harness
-ctest --test-dir build --output-on-failure
-```
-
-### Docker
-
-```bash
-docker build -t simd-ml-kernels .
-docker run --rm simd-ml-kernels ./build/bench_stat
-```
-
----
-
-## Performance
-
-Generated from committed JSON (`benchmarks/results/`) by
-`benchmarks/make_tables.py`; protocol, machine details and per-case
-interquartile ranges in
-[docs/BENCHMARKS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/BENCHMARKS.md).
-Single thread; the baseline runs in the same process on the same inputs,
-interleaved call by call. The GHz column is the core clock measured during the
-case; cases where it fell below the P-core threshold are not shown.
+<details>
+<summary>Single-thread tables: GEMM, FP16/BF16/INT8 GEMM, decode GEMV, Q8_0, Q4_0, activations</summary>
 
 <!-- BEGIN GENERATED: results-summary -->
 #### lnl-226v-wsl, 2026-10-20, commit `42f64c7d76b3`
@@ -479,7 +390,10 @@ Source: Intel(R) Xeon(R) Processor @ 2.10GHz, vCPU 1 (KVM guest, 2 vCPU; host co
 | `layer_norm` | 1024×1024 | 2.099 | 0.663 | 2.180 | 0.96× | 3.16 (3.04–3.30) |
 <!-- END GENERATED: results-summary -->
 
-### Threaded decode GEMV
+</details>
+
+<details>
+<summary>Threaded decode GEMV (OpenMP build, 1/2/4 threads)</summary>
 
 OpenMP builds only (`-DSIMD_ML_OPENMP=ON`, off by default). The process runs
 on the laptop's 4 P-cores (`taskset -c 0-3`, the 4 low-power E-cores excluded);
@@ -580,6 +494,8 @@ Source: Intel(R) Core(TM) Ultra 5 226V, WSL2 vCPUs 0-3 (the 4 P-cores; the 4 LP 
 | BF16 | 4096×11008 | 4 | 1112 | 81.1 | 83% | 58% | 53.1 | 1.53× | 3.54 (3.22–3.65) |
 <!-- END GENERATED: threads-summary -->
 
+</details>
+
 Run it on your hardware:
 
 ```bash
@@ -587,75 +503,45 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 taskset -c 2 python -m simd_ml_kernels bench
 ```
 
----
-
-## Build Requirements
-
-| Requirement | Version |
-|-------------|---------|
-| C++ Compiler | GCC ≥ 12 or Clang ≥ 15 (C++17) |
-| CMake | ≥ 3.22 |
-| Python | 3.9–3.13 (for Python extension; wheels for these versions) |
-| pybind11 | ≥ 2.11 (for Python extension) |
-| AVX2 + FMA + F16C | At run time, for the AVX2 kernels (scalar kernels otherwise) |
-
-Optional: `libopenblas-dev` for `./bench_stat` baseline comparisons (`-DBENCH_OPENBLAS=ON`).
-
----
-
-## Repository Layout
-
-The map of the source tree, the build/test/benchmark commands and the checklist
-for adding a kernel are in
-[AGENTS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/AGENTS.md);
-design notes are in
-[docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md).
-
----
-
-## Testing
+## Build, test, contribute
 
 ```bash
-# C++ unit tests
-ctest --test-dir build --output-on-failure
-
-# Python tests (float64 references; PyTorch cross-checks run when torch is installed)
-pytest tests -v
-
-# Every kernel vs float64 (exit 1 on failure)
-python -m simd_ml_kernels selftest
+pip install .                                   # from a clone: the package with the _core extension
+python -m pytest tests                          # float64 references; PyTorch cross-checks if torch is installed
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
 ```
 
----
-
-## CI Pipeline
-
-Every pull request builds with GCC 12/13 and Clang 15, runs the C++ tests, the
-Python tests with PyTorch cross-checks, `selftest`, stubtest, the examples and
-an ASan + UBSan build; the workflows are listed in
-[docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md#8-ci) §8.
-
----
-
-## Contributing
+Requirements (GCC ≥ 12 or Clang ≥ 15, CMake ≥ 3.22, pybind11 ≥ 2.11), CMake
+options, Docker and Intel SDE are in
+[docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md).
+Every pull request builds with GCC 12/13 and Clang 15 and runs the C++ and
+Python tests, `selftest`, stubtest, the examples and an ASan + UBSan build
+([docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md#8-ci) §8).
 
 Issues, pull requests and benchmark results from other hardware are welcome:
 run `python -m simd_ml_kernels bench --json` with the protocol in
 [docs/BENCHMARKS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/BENCHMARKS.md)
 and open a PR with the JSON. Start with
-[AGENTS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/AGENTS.md) and
+[AGENTS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/AGENTS.md) (commands, repository
+map, the checklist for adding a kernel) and
 [CONTRIBUTING.md](https://github.com/Mattral/simd-ml-kernels/blob/main/CONTRIBUTING.md).
 
----
+## Links
 
-## Naming
+- [docs/DESIGN.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/DESIGN.md): how each kernel works and why
+- [docs/BENCHMARKS.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/BENCHMARKS.md): protocol, terms and every run
+- [docs/VALIDATION.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/VALIDATION.md): which paths ran on real hardware for 0.4.0
+- [docs/ROADMAP.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/ROADMAP.md): history, planned work, limitations
+- [docs/setup.md](https://github.com/Mattral/simd-ml-kernels/blob/main/docs/setup.md): prerequisites, CMake options, Intel SDE, Docker
+- [CHANGELOG.md](https://github.com/Mattral/simd-ml-kernels/blob/main/CHANGELOG.md)
+- Preprint: [IntrinsicML: Transparent Hand-Vectorized SIMD Microkernels for ML Workloads](https://zenodo.org/records/20616502).
+  It describes the earlier AVX2 kernels; current scope and results are in this README.
 
-One name everywhere: repository and PyPI distribution `simd-ml-kernels`,
+**Naming.** One name everywhere: repository and PyPI distribution `simd-ml-kernels`,
 import `simd_ml_kernels`. The project was previously called IntrinsicML (the
 preprint title), the repository `SIMD-Microkernels-for-ML-Workloads` (GitHub
 redirects old links), and the import `simd_kernels`, which still works but
-emits a `DeprecationWarning` and will be removed in 0.5.0. See
-[CHANGELOG.md](https://github.com/Mattral/simd-ml-kernels/blob/main/CHANGELOG.md).
+emits a `DeprecationWarning` and will be removed in 0.5.0.
 
 ## Citation
 

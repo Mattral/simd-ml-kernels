@@ -23,6 +23,7 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 taskset -c 2 python -m simd_ml_kernels bench --json benchmarks/results/<label>_<date>_<commit>.json \
     --label <label> --core "<which core>"
 python benchmarks/make_tables.py       # regenerate README/BENCHMARKS tables from the JSON
+python benchmarks/make_charts.py       # redraw the README charts (docs/img/*.svg) from the same JSON
 # Threaded decode GEMV (OpenMP build: SKBUILD_CMAKE_DEFINE=SIMD_ML_OPENMP=ON pip install .), its own run
 taskset -c 0-3 python -m simd_ml_kernels bench --cases threads --threads 1,2,4 \
     --json benchmarks/results/<label>_<date>_<commit>_threads.json --label <label> --core "<which cores>"
@@ -171,4 +172,5 @@ results[] kernel, impl, shape, median_s, p25_s, p75_s, min_s, reps,
 Files are named `benchmarks/results/<label>_<YYYY-MM-DD>_<commit>.json` (threaded
 runs: `..._threads.json`, rendered in their own blocks), one
 machine per file. `benchmarks/make_tables.py` renders every file into the
-generated blocks of README.md and docs/BENCHMARKS.md; CI fails if they differ.
+generated blocks of README.md and docs/BENCHMARKS.md, and `benchmarks/make_charts.py`
+draws the README charts in docs/img/ from the same runs; CI fails if either differs.

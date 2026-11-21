@@ -49,6 +49,63 @@ samples suggests it was moved to an E-core, and a case that still fails after 3
 attempts is not shown. Every case in the tables therefore has a minimum
 clock sample of at least 3.6 GHz.
 
+## Terms
+
+- **GEMM** (general matrix multiply, C = A·B): the operation behind most of a
+  neural network's arithmetic when many inputs are processed together. Each
+  number loaded is used many times, so the limit is arithmetic, measured in
+  GFLOP/s (billions of floating-point operations per second).
+- **% of OpenBLAS**: our GEMM's GFLOP/s divided by OpenBLAS's (through
+  NumPy's `matmul`) on the same core in the same run; 100% is level.
+- **GEMV** (matrix times one vector): generating one token multiplies a single
+  row of activations by every weight matrix of the model, so each weight is
+  read once and used once. The core spends its time waiting for memory, and
+  speed is measured in GB/s of data read.
+- **% of read roof**: the GEMV's GB/s divided by the fastest read-only loop
+  the same core ran in the same case (timed alongside it): how close it gets
+  to what one core can read from memory (a lower bound on that limit). The STREAM triad (two arrays read, one written) is
+  shown as a second reference.
+- **Q8_0**: llama.cpp/ggml's 8-bit weight format: blocks of 32 int8 values
+  with one FP16 scale, 34 bytes per 32 weights (1.0625 bytes each).
+- **Q4_0**: ggml's 4-bit weight format: blocks of 32 4-bit values (two per
+  byte) with one FP16 scale, 18 bytes per 32 weights (0.5625 bytes each).
+- **FP16 / BF16 / INT8**: weight formats of 2, 2 and 1 bytes instead of
+  FP32's 4. FP16 is IEEE half precision; BF16 keeps FP32's exponent range with
+  8 bits of precision; INT8 stores integers with one scale per output column.
+  Inputs are converted exactly and summed in FP32 (exact int32 sums for INT8),
+  so the gain is fewer bytes to read, not cheaper arithmetic, except INT8 with
+  VNNI instructions.
+
+## Summary by run
+
+The headline numbers, each with the run it comes from (the README's charts
+show the newest run per machine; earlier runs are under Results).
+
+- FP32 GEMM: 93–99% of OpenBLAS at N = 128–2048 on the reference laptop's
+  P-core (`lnl-226v-wsl_2026-10-18_ecc219baa1f2`; N = 1024 not shown, clock
+  below the threshold); 87–107% on AVX-512, a 2-vCPU Emerald Rapids cloud VM
+  (`cloud-xeon-emr-2vcpu_2026-10-18_255f27755c31`).
+- Decode GEMV (laptop, `ecc219baa1f2`): FP32 at 97–99% of the read roof,
+  1.03–1.05× PyTorch's `F.linear` and 1.00–1.20× OpenBLAS; FP16/BF16 at
+  90–99%, 1.78–1.92× PyTorch's `F.linear` on the same 16-bit weights. Not
+  measured on AVX-512.
+- Q8_0 decode GEMV (laptop, `290b91baad26`): 92–95% of the read roof,
+  1.46–1.82× ggml's Q8_0 MUL_MAT (llama.cpp v0.7.0, one thread), 3.49–3.61×
+  our FP32 GEMV.
+- Q4_0 decode GEMV (laptop, `42f64c7d76b3`): 68–83% of the read roof,
+  1.58–2.19× ggml's Q4_0 MUL_MAT (llama.cpp v0.7.0, one thread), 1.38–1.67×
+  our Q8_0 GEMV.
+- Threaded decode GEMV (OpenMP build, laptop's 4 P-cores, `38cd710929a3`):
+  at 4 threads 1.22–2.22× (Q4_0, every shape) and 1.23–1.82× (Q8_0, level
+  at 512×2048) ggml's MUL_MAT at the same thread count, on the same
+  weights; Llama-3.2-1B GEMV time per token at 4 threads 10.4 ms (Q4_0) and
+  17.0 ms (Q8_0) against ggml's 14.5 and 21.6. Four P-cores read only
+  2.4–3.0× one core's bandwidth, so 4 threads are not 4× faster.
+- INT8 GEMM with AVX-VNNI (laptop, `ecc219baa1f2`): 3.36–3.60× our FP32 GEMM
+  and 1.72–2.19× PyTorch's quantized linear at 256³ and 1024³.
+- Activations (laptop, `ecc219baa1f2`): 1.05–2.97× PyTorch, except LayerNorm
+  at 0.92×.
+
 ## Results
 
 <!-- BEGIN GENERATED: results-detail -->

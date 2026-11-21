@@ -11,6 +11,12 @@ under **Changed** with a migration note.
 Changes on main since 0.3.0. Not tagged and not published.
 
 ### Changed
+- Docs: the README opens with three charts drawn from the committed benchmark
+  JSON (`benchmarks/make_charts.py`, SVG in `docs/img/`; CI checks they are up
+  to date) and a dispatch diagram; the long tables are collapsed, and the
+  terms and the summary by run moved to `docs/BENCHMARKS.md`.
+  `docs/VALIDATION.md` records which kernel paths ran on real hardware before
+  0.4.0 and which did not.
 - Docs: the README kernel × ISA matrix is the coverage claim. The
   Llama-3.2-1B check states its prompt, token, weight and tolerance scope.
   The Zenodo preprint is labeled as the earlier AVX2 kernels. `CITATION.cff`
