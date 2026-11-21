@@ -187,8 +187,10 @@ jobs:
           python3 examples/linear_trans_b.py
           python3 examples/bench_to_json.py /tmp/example.json --sizes 128 --reps 3
 
-      - name: Benchmark tables match committed JSON
-        run: python3 benchmarks/make_tables.py --check
+      - name: Benchmark tables and charts match committed JSON
+        run: |
+          python3 benchmarks/make_tables.py --check
+          python3 benchmarks/make_charts.py --check
 
   # ─── ASan / UBSan (Clang-15, Ubuntu 22.04) ───────────────────────────────────
   sanitizers:

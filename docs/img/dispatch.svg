@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 334" width="960" height="334" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="title">Dispatch from Python to a kernel body</title>
+<desc id="desc">A call from Python on NumPy arrays goes through the pybind11 binding, which validates the arrays and releases the GIL, to the dispatcher, which uses CPUID and XGETBV to choose the scalar, AVX2 or AVX-512 kernel table; AVX-VNNI, AVX512-VNNI and the opt-in BF16-dot path are chosen inside a table.</desc>
+<style>
+  .bg { fill: #fcfcfb; stroke: #d0d7de; }
+  .t1 { fill: #1f2328; }
+  .t2 { fill: #57606a; }
+  .grid { stroke: #d8dee4; }
+  .axis { stroke: #8c959f; }
+  .ref { stroke: #57606a; }
+  .ours { fill: #2a78d6; }
+  .base { fill: #eb6834; }
+  .hatch { stroke: #fcfcfb; }
+  .lose { fill: #fcfcfb; stroke: #c4432b; }
+  .win { fill: #2a78d6; stroke: #fcfcfb; }
+  .box { fill: #f0f3f6; stroke: #8c959f; }
+  .arrow { stroke: #57606a; fill: none; }
+  .head { fill: #57606a; }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #1a1d21; stroke: #3d444d; }
+    .t1 { fill: #e6edf3; }
+    .t2 { fill: #9da7b3; }
+    .grid { stroke: #30363d; }
+    .axis { stroke: #6e7781; }
+    .ref { stroke: #9da7b3; }
+    .ours { fill: #3987e5; }
+    .base { fill: #d95926; }
+    .hatch { stroke: #1a1d21; }
+    .lose { fill: #1a1d21; stroke: #f0795a; }
+    .win { fill: #3987e5; stroke: #1a1d21; }
+    .box { fill: #22272e; stroke: #6e7781; }
+    .arrow { stroke: #9da7b3; }
+    .head { fill: #9da7b3; }
+  }
+</style>
+
+<rect x="0.5" y="0.5" width="959" height="333" class="bg" rx="8"/>
+<text x="24" y="30" class="t1" font-size="17" text-anchor="start" font-weight="600">How a call reaches a kernel body</text>
+<text x="24" y="49" class="t2" font-size="12" text-anchor="start">Concept diagram, no measurements. One kernel table is chosen once per process; VNNI and BF16-dot are chosen inside a table.</text>
+<rect x="24" y="80" width="182" height="92" class="box" rx="6" stroke-width="1.2"/>
+<text x="36" y="102" class="t1" font-size="14" text-anchor="start" font-weight="600">Python / NumPy</text>
+<text x="36" y="122" class="t2" font-size="12" text-anchor="start">sk.sgemm(A, B)</text>
+<text x="36" y="137" class="t2" font-size="12" text-anchor="start">sk.gemv_q8_0(...)</text>
+<text x="36" y="152" class="t2" font-size="12" text-anchor="start">float32 / float16 /</text>
+<text x="36" y="167" class="t2" font-size="12" text-anchor="start">bfloat16 / uint8 arrays</text>
+<rect x="230" y="80" width="182" height="92" class="box" rx="6" stroke-width="1.2"/>
+<text x="242" y="102" class="t1" font-size="14" text-anchor="start" font-weight="600">pybind11 binding</text>
+<text x="242" y="122" class="t2" font-size="12" text-anchor="start">checks dtype, shape</text>
+<text x="242" y="137" class="t2" font-size="12" text-anchor="start">and strides;</text>
+<text x="242" y="152" class="t2" font-size="12" text-anchor="start">releases the GIL</text>
+<rect x="436" y="80" width="182" height="92" class="box" rx="6" stroke-width="1.2"/>
+<text x="448" y="102" class="t1" font-size="14" text-anchor="start" font-weight="600">CPUID + XGETBV</text>
+<text x="448" y="122" class="t2" font-size="12" text-anchor="start">picks the best table</text>
+<text x="448" y="137" class="t2" font-size="12" text-anchor="start">the CPU and OS can run;</text>
+<text x="448" y="152" class="t2" font-size="12" text-anchor="start">SIMD_ML_ISA caps it,</text>
+<text x="448" y="167" class="t2" font-size="12" text-anchor="start">isa= picks per call</text>
+<path d="M210 126 L226 126" class="arrow" stroke-width="1.6"/><path d="M226 126 L218.2 130.5 L218.2 121.5 Z" class="head"/>
+<path d="M416 126 L432 126" class="arrow" stroke-width="1.6"/><path d="M432 126 L424.2 130.5 L424.2 121.5 Z" class="head"/>
+<rect x="654" y="62" width="282" height="66" class="box" rx="6" stroke-width="1.2"/>
+<text x="666" y="83" class="t1" font-size="14" text-anchor="start" font-weight="600">scalar table</text>
+<text x="666" y="101" class="t2" font-size="11" text-anchor="start">portable C++, every kernel; any CPU</text>
+<path d="M622 126 L650 95" class="arrow" stroke-width="1.6"/><path d="M650 95 L648.1 103.8 L641.4 97.8 Z" class="head"/>
+<rect x="654" y="142" width="282" height="66" class="box" rx="6" stroke-width="1.2"/>
+<text x="666" y="163" class="t1" font-size="14" text-anchor="start" font-weight="600">AVX2 table</text>
+<text x="666" y="181" class="t2" font-size="11" text-anchor="start">AVX2 + FMA + F16C; INT8, Q8_0, Q4_0 use</text>
+<text x="666" y="195" class="t2" font-size="11" text-anchor="start">AVX-VNNI when present, else vpmaddubsw</text>
+<path d="M622 126 L650 175" class="arrow" stroke-width="1.6"/><path d="M650 175 L642.2 170.5 L650 166 Z" class="head"/>
+<rect x="654" y="222" width="282" height="66" class="box" rx="6" stroke-width="1.2"/>
+<text x="666" y="243" class="t1" font-size="14" text-anchor="start" font-weight="600">AVX-512 table</text>
+<text x="666" y="261" class="t2" font-size="11" text-anchor="start">AVX-512F/DQ/BW/VL; INT8, Q8_0, Q4_0 use</text>
+<text x="666" y="275" class="t2" font-size="11" text-anchor="start">AVX512-VNNI; BF16-dot opt-in</text>
+<path d="M622 126 L650 255" class="arrow" stroke-width="1.6"/><path d="M650 255 L643.9 248.3 L652.7 246.4 Z" class="head"/>
+<text x="24" y="312" class="t2" font-size="12" text-anchor="start">Other architectures (e.g. Apple arm64) build the scalar table only. Kernel files: src/kernels/; selection: src/dispatch/dispatch.cpp.</text>
+</svg>

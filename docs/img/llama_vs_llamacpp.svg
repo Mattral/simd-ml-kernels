@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 585" width="960" height="585" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title id="title">Llama-3.2-1B decode tokens/s, ours vs llama.cpp</title>
+<desc id="desc">Tokens per second, Llama-3.2-1B on Intel Core Ultra 5 226V, commit f4a501dd2db4. F32, 1 thread: ours 6.1, llama.cpp 5.1 (1.20×); F32, 2 threads: ours 10.8, llama.cpp 8.8 (1.23×); F32, 4 threads: ours 15.2, llama.cpp 14.3 (1.06×); Q8_0, 1 thread: ours 21.5, llama.cpp 13.7 (1.58×); Q8_0, 2 threads: ours 35.6, llama.cpp 21.1 (1.69×); Q8_0, 4 threads: ours 45.9, llama.cpp 35.5 (1.29×); Q4_0, 1 thread: ours 34.1, llama.cpp 26.7 (1.28×); Q4_0, 2 threads: ours 54.1, llama.cpp 47.9 (1.13×); Q4_0, 4 threads: ours 73.8, llama.cpp 72.1 (1.02×).</desc>
+<style>
+  .bg { fill: #fcfcfb; stroke: #d0d7de; }
+  .t1 { fill: #1f2328; }
+  .t2 { fill: #57606a; }
+  .grid { stroke: #d8dee4; }
+  .axis { stroke: #8c959f; }
+  .ref { stroke: #57606a; }
+  .ours { fill: #2a78d6; }
+  .base { fill: #eb6834; }
+  .hatch { stroke: #fcfcfb; }
+  .lose { fill: #fcfcfb; stroke: #c4432b; }
+  .win { fill: #2a78d6; stroke: #fcfcfb; }
+  .box { fill: #f0f3f6; stroke: #8c959f; }
+  .arrow { stroke: #57606a; fill: none; }
+  .head { fill: #57606a; }
+  @media (prefers-color-scheme: dark) {
+    .bg { fill: #1a1d21; stroke: #3d444d; }
+    .t1 { fill: #e6edf3; }
+    .t2 { fill: #9da7b3; }
+    .grid { stroke: #30363d; }
+    .axis { stroke: #6e7781; }
+    .ref { stroke: #9da7b3; }
+    .ours { fill: #3987e5; }
+    .base { fill: #d95926; }
+    .hatch { stroke: #1a1d21; }
+    .lose { fill: #1a1d21; stroke: #f0795a; }
+    .win { fill: #3987e5; stroke: #1a1d21; }
+    .box { fill: #22272e; stroke: #6e7781; }
+    .arrow { stroke: #9da7b3; }
+    .head { fill: #9da7b3; }
+  }
+</style>
+<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="hatch" stroke-width="2"/></pattern></defs>
+<rect x="0.5" y="0.5" width="959" height="584" class="bg" rx="8"/>
+<text x="24" y="30" class="t1" font-size="17" text-anchor="start" font-weight="600">Llama-3.2-1B decode, tokens/s: ours vs llama.cpp (higher is better)</text>
+<text x="24" y="49" class="t2" font-size="12" text-anchor="start">Intel Core Ultra 5 226V (lnl-226v-wsl), commit f4a501dd2db4, benchmarks/results/lnl-226v-wsl_2026-10-21_f4a501dd2db4_llama.json</text>
+<text x="24" y="68" class="t2" font-size="12" text-anchor="start">Greedy decode of 128 tokens after a 32-token prompt; llama.cpp v0.7.0 llama-bench at depth 32; same GGUF weights; median of 3 runs (ours).</text>
+<rect x="24" y="80" width="14" height="12" class="ours"/>
+<text x="44" y="90" class="t1" font-size="12" text-anchor="start">ours (examples/llama/, Python over our GEMVs)</text>
+<rect x="330" y="80" width="14" height="12" class="base"/>
+<rect x="330" y="80" width="14" height="12" class="" fill="url(#hatch)"/>
+<text x="350" y="90" class="t1" font-size="12" text-anchor="start">llama.cpp</text>
+<text x="936" y="90" class="t2" font-size="12" text-anchor="end">ours / llama.cpp</text>
+<line x1="190" y1="106" x2="190" y2="507" class="grid"/>
+<text x="190" y="523" class="t2" font-size="11" text-anchor="middle">0</text>
+<line x1="271.2" y1="106" x2="271.2" y2="507" class="grid"/>
+<text x="271.2" y="523" class="t2" font-size="11" text-anchor="middle">10</text>
+<line x1="352.5" y1="106" x2="352.5" y2="507" class="grid"/>
+<text x="352.5" y="523" class="t2" font-size="11" text-anchor="middle">20</text>
+<line x1="433.8" y1="106" x2="433.8" y2="507" class="grid"/>
+<text x="433.8" y="523" class="t2" font-size="11" text-anchor="middle">30</text>
+<line x1="515" y1="106" x2="515" y2="507" class="grid"/>
+<text x="515" y="523" class="t2" font-size="11" text-anchor="middle">40</text>
+<line x1="596.2" y1="106" x2="596.2" y2="507" class="grid"/>
+<text x="596.2" y="523" class="t2" font-size="11" text-anchor="middle">50</text>
+<line x1="677.5" y1="106" x2="677.5" y2="507" class="grid"/>
+<text x="677.5" y="523" class="t2" font-size="11" text-anchor="middle">60</text>
+<line x1="758.8" y1="106" x2="758.8" y2="507" class="grid"/>
+<text x="758.8" y="523" class="t2" font-size="11" text-anchor="middle">70</text>
+<line x1="840" y1="106" x2="840" y2="507" class="grid"/>
+<text x="840" y="523" class="t2" font-size="11" text-anchor="middle">80</text>
+<text x="515" y="541" class="t2" font-size="12" text-anchor="middle">tokens per second</text>
+<text x="24" y="129" class="t1" font-size="13" text-anchor="start">F32, 1 thread</text>
+<rect x="190" y="112" width="49.9" height="13" class="ours" rx="2"/>
+<text x="244.9" y="123" class="t1" font-size="11" text-anchor="start">6.1</text>
+<rect x="190" y="128" width="41.5" height="13" class="base" rx="2"/>
+<rect x="190" y="128" width="41.5" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="236.5" y="139" class="t1" font-size="11" text-anchor="start">5.1</text>
+<text x="936" y="129" class="t1" font-size="13" text-anchor="end">1.20×</text>
+<text x="24" y="172" class="t1" font-size="13" text-anchor="start">F32, 2 threads</text>
+<rect x="190" y="155" width="87.5" height="13" class="ours" rx="2"/>
+<text x="282.5" y="166" class="t1" font-size="11" text-anchor="start">10.8</text>
+<rect x="190" y="171" width="71.1" height="13" class="base" rx="2"/>
+<rect x="190" y="171" width="71.1" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="266.1" y="182" class="t1" font-size="11" text-anchor="start">8.8</text>
+<text x="936" y="172" class="t1" font-size="13" text-anchor="end">1.23×</text>
+<text x="24" y="215" class="t1" font-size="13" text-anchor="start">F32, 4 threads</text>
+<rect x="190" y="198" width="123.3" height="13" class="ours" rx="2"/>
+<text x="318.3" y="209" class="t1" font-size="11" text-anchor="start">15.2</text>
+<rect x="190" y="214" width="115.9" height="13" class="base" rx="2"/>
+<rect x="190" y="214" width="115.9" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="310.9" y="225" class="t1" font-size="11" text-anchor="start">14.3</text>
+<text x="936" y="215" class="t1" font-size="13" text-anchor="end">1.06×</text>
+<line x1="24" y1="234" x2="936" y2="234" class="grid"/>
+<text x="24" y="258" class="t1" font-size="13" text-anchor="start">Q8_0, 1 thread</text>
+<rect x="190" y="241" width="174.8" height="13" class="ours" rx="2"/>
+<text x="369.8" y="252" class="t1" font-size="11" text-anchor="start">21.5</text>
+<rect x="190" y="257" width="110.9" height="13" class="base" rx="2"/>
+<rect x="190" y="257" width="110.9" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="305.9" y="268" class="t1" font-size="11" text-anchor="start">13.7</text>
+<text x="936" y="258" class="t1" font-size="13" text-anchor="end">1.58×</text>
+<text x="24" y="301" class="t1" font-size="13" text-anchor="start">Q8_0, 2 threads</text>
+<rect x="190" y="284" width="289.1" height="13" class="ours" rx="2"/>
+<text x="484.1" y="295" class="t1" font-size="11" text-anchor="start">35.6</text>
+<rect x="190" y="300" width="171.1" height="13" class="base" rx="2"/>
+<rect x="190" y="300" width="171.1" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="366.1" y="311" class="t1" font-size="11" text-anchor="start">21.1</text>
+<text x="936" y="301" class="t1" font-size="13" text-anchor="end">1.69×</text>
+<text x="24" y="344" class="t1" font-size="13" text-anchor="start">Q8_0, 4 threads</text>
+<rect x="190" y="327" width="372.8" height="13" class="ours" rx="2"/>
+<text x="567.8" y="338" class="t1" font-size="11" text-anchor="start">45.9</text>
+<rect x="190" y="343" width="288.6" height="13" class="base" rx="2"/>
+<rect x="190" y="343" width="288.6" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="483.6" y="354" class="t1" font-size="11" text-anchor="start">35.5</text>
+<text x="936" y="344" class="t1" font-size="13" text-anchor="end">1.29×</text>
+<line x1="24" y1="363" x2="936" y2="363" class="grid"/>
+<text x="24" y="387" class="t1" font-size="13" text-anchor="start">Q4_0, 1 thread</text>
+<rect x="190" y="370" width="276.9" height="13" class="ours" rx="2"/>
+<text x="471.9" y="381" class="t1" font-size="11" text-anchor="start">34.1</text>
+<rect x="190" y="386" width="216.9" height="13" class="base" rx="2"/>
+<rect x="190" y="386" width="216.9" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="411.9" y="397" class="t1" font-size="11" text-anchor="start">26.7</text>
+<text x="936" y="387" class="t1" font-size="13" text-anchor="end">1.28×</text>
+<text x="24" y="430" class="t1" font-size="13" text-anchor="start">Q4_0, 2 threads</text>
+<rect x="190" y="413" width="439.6" height="13" class="ours" rx="2"/>
+<text x="634.6" y="424" class="t1" font-size="11" text-anchor="start">54.1</text>
+<rect x="190" y="429" width="388.9" height="13" class="base" rx="2"/>
+<rect x="190" y="429" width="388.9" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="583.9" y="440" class="t1" font-size="11" text-anchor="start">47.9</text>
+<text x="936" y="430" class="t1" font-size="13" text-anchor="end">1.13×</text>
+<text x="24" y="473" class="t1" font-size="13" text-anchor="start">Q4_0, 4 threads</text>
+<rect x="190" y="456" width="599.3" height="13" class="ours" rx="2"/>
+<text x="794.3" y="467" class="t1" font-size="11" text-anchor="start">73.8</text>
+<rect x="190" y="472" width="586" height="13" class="base" rx="2"/>
+<rect x="190" y="472" width="586" height="13" class="" rx="2" fill="url(#hatch)"/>
+<text x="781" y="483" class="t1" font-size="11" text-anchor="start">72.1</text>
+<text x="936" y="473" class="t1" font-size="13" text-anchor="end">1.02×</text>
+<text x="24" y="565" class="t2" font-size="12" text-anchor="start">† = clock below 3.0 GHz on some thread (no cell in this run). Bars start at zero.</text>
+</svg>
